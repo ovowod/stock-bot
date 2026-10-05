@@ -93,6 +93,53 @@ export function quoteToPriceText(price: number, market: Market): string {
   return String(Math.round(Number((price * 100).toFixed(6))) / 100);
 }
 
+// KRX 호가가격단위(2023-01-25 개편, 코스피·코스닥 공통). [상한, 단위]: 가격이 상한 미만이면 그 단위다.
+const KRX_STOCK_TICKS: [number, number][] = [
+  [2_000, 1],
+  [5_000, 5],
+  [20_000, 10],
+  [50_000, 50],
+  [200_000, 100],
+  [500_000, 500],
+  [Infinity, 1_000],
+];
+// ETF·ETN은 2,000원 미만 1원, 이상 5원이다.
+const KRX_FUND_TICKS: [number, number][] = [
+  [2_000, 1],
+  [Infinity, 5],
+];
+// 미국은 0.0001달러를 1로 센 정수로 계산한다. 키움 1517 응답: $1 미만 0.0001, $1 이상 0.01 단위.
+const US_SCALE = 10_000;
+const US_TICKS: [number, number][] = [
+  [US_SCALE, 1],
+  [Infinity, 100],
+];
+
+/**
+ * 가격을 한 호가 올리거나 내린 문자열을 돌려준다. 가격이 올바르지 않거나 더 내릴 수 없으면 null.
+ * 호가 단위에 맞지 않는 가격은 그 방향의 가장 가까운 호가로 맞춘다.
+ * 국내 종목 구분을 모르면(순위에서 연 종목) 주식 단위를 쓴다.
+ */
+export function stepPrice(
+  priceText: string,
+  direction: 1 | -1,
+  market: Market,
+  category: string | null,
+): string | null {
+  const { price } = parsePrice(priceText, market);
+  if (price === null) return null;
+  const ticks =
+    market === "us" ? US_TICKS : /^(ETF|ETN)/.test(category ?? "") ? KRX_FUND_TICKS : KRX_STOCK_TICKS;
+  const units = market === "us" ? Math.round(price * US_SCALE) : price;
+  const tickAt = (value: number) => ticks.find(([limit]) => value < limit)![1];
+  // 내릴 때는 바로 아래 가격의 구간 단위를 쓴다(예: 200,000원 -> 199,900원).
+  const tick = direction === 1 ? tickAt(units) : tickAt(units - 1);
+  const next = direction === 1 ? (Math.floor(units / tick) + 1) * tick : (Math.ceil(units / tick) - 1) * tick;
+  if (next <= 0) return null;
+  if (market === "domestic") return String(next);
+  return (next / US_SCALE).toFixed(next < US_SCALE ? 4 : 2);
+}
+
 /** 최종 확인마다 새로 만드는 주문 키. 보안 연결이 아니어도 쓸 수 있는 getRandomValues로 만든다. */
 export function newOrderKey(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));

@@ -13,6 +13,7 @@ import {
   parsePrice,
   parseQuantity,
   quoteToPriceText,
+  stepPrice,
   type OrderTarget,
   type OrderType,
 } from "./order";
@@ -139,13 +140,17 @@ type QuoteStatus = "loading" | "ready" | "error";
 function usePriceWithQuote(env: EnvironmentOption, target: OrderTarget) {
   const [priceText, setPriceText] = useState("");
   const [status, setStatus] = useState<QuoteStatus>("loading");
+  // 현재가 버튼이 되돌릴 값. 조회하지 못했으면 null이다.
+  const [quoteText, setQuoteText] = useState<string | null>(null);
   const touched = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
     fetchQuote(env.value, target.code, target.exchange, controller.signal).then(
       (quote) => {
-        if (!touched.current && quote.price !== null) setPriceText(quoteToPriceText(quote.price, env.market));
+        const text = quote.price === null ? null : quoteToPriceText(quote.price, env.market);
+        if (!touched.current && text !== null) setPriceText(text);
+        setQuoteText(text);
         setStatus("ready");
       },
       () => {
@@ -159,7 +164,7 @@ function usePriceWithQuote(env: EnvironmentOption, target: OrderTarget) {
     touched.current = true;
     setPriceText(value);
   };
-  return { priceText, change, status };
+  return { priceText, change, status, quoteText };
 }
 
 type Step = "input" | "confirm" | "sending";
@@ -179,7 +184,9 @@ function BuyForm({
   const showToast = useToast();
   const [type, setType] = useState<OrderType>("limit");
   const [quantityText, setQuantityText] = useState("1");
-  const { priceText, change: setPriceText, status: quoteStatus } = usePriceWithQuote(env, target);
+  const { priceText, change: setPriceText, status: quoteStatus, quoteText } = usePriceWithQuote(env, target);
+  const priceDown = stepPrice(priceText, -1, market, target.category);
+  const priceUp = stepPrice(priceText, 1, market, target.category);
   const [step, setStep] = useState<Step>("input");
   const orderKey = useRef("");
   const quantity = parseQuantity(quantityText);
@@ -319,26 +326,47 @@ function BuyForm({
       </div>
 
       {type === "limit" && (
-        <Field
-          label={`가격 (${unit})`}
-          error={price.error}
-          hint={
-            quoteStatus === "loading"
-              ? "현재가를 불러오는 중입니다."
-              : quoteStatus === "error"
-                ? "현재가를 불러오지 못했습니다. 가격을 직접 입력하세요."
-                : null
-          }
-        >
-          <input
-            value={groupThousands(priceText)}
-            onChange={(event) => setPriceText(event.target.value.replaceAll(",", ""))}
-            inputMode={market === "domestic" ? "numeric" : "decimal"}
-            placeholder={market === "domestic" ? "예: 70000" : "예: 213.04"}
-            aria-invalid={price.error !== null}
-            className={INPUT}
-          />
-        </Field>
+        <div className="space-y-2">
+          <Field
+            label={`가격 (${unit})`}
+            error={price.error}
+            hint={
+              quoteStatus === "loading"
+                ? "현재가를 불러오는 중입니다."
+                : quoteStatus === "error"
+                  ? "현재가를 불러오지 못했습니다. 가격을 직접 입력하세요."
+                  : null
+            }
+          >
+            <input
+              value={groupThousands(priceText)}
+              onChange={(event) => setPriceText(event.target.value.replaceAll(",", ""))}
+              inputMode={market === "domestic" ? "numeric" : "decimal"}
+              placeholder={market === "domestic" ? "예: 70000" : "예: 213.04"}
+              aria-invalid={price.error !== null}
+              className={INPUT}
+            />
+          </Field>
+          <div className="grid grid-cols-3 gap-2">
+            {(
+              [
+                ["-1호가", priceDown],
+                ["현재가", quoteText],
+                ["+1호가", priceUp],
+              ] as [string, string | null][]
+            ).map(([label, value]) => (
+              <button
+                key={label}
+                type="button"
+                disabled={value === null}
+                onClick={() => value !== null && setPriceText(value)}
+                className="rounded-xl bg-canvas py-2 text-sm font-semibold text-sub hover:text-ink disabled:opacity-40"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
       )}
       {type === "market" && (
         <p className="rounded-2xl bg-canvas px-4 py-3 text-sm text-sub">

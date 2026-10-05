@@ -325,3 +325,111 @@ test("미국 현재가가 소수 넷째 자리로 오면 $1 이상은 둘째 자
     await page.keyboard.press("Escape");
   }
 });
+
+test("국내 주식은 -1호가·+1호가 버튼으로 KRX 호가 단위만큼 움직이고, 현재가 버튼으로 되돌린다", async ({ page }) => {
+  const prices: Record<string, number> = { "000660": 190_000, "005380": 200_000 };
+  await mockApi(
+    page,
+    {
+      domestic: [rankingItem("000660", "SK하이닉스", null, 1), rankingItem("005380", "현대차", null, 1)],
+      us: [],
+    },
+    [],
+    ({ code }) => ({ body: { code, price: prices[code], fetched_at: "2026-10-05T06:30:00+00:00" } }),
+  );
+  await page.goto("/");
+  await selectEnvironment(page, "국내 모의");
+  await selectMenu(page, "순위");
+
+  await tradingValueCard(page).getByRole("button", { name: /SK하이닉스/ }).click();
+  let dialog = panel(page, "SK하이닉스");
+  const price = dialog.getByLabel("가격 (원)");
+  await expect(price).toHaveValue("190,000");
+  // 5만~20만원 구간은 100원 단위다.
+  await dialog.getByRole("button", { name: "+1호가" }).click();
+  await expect(price).toHaveValue("190,100");
+  await dialog.getByRole("button", { name: "-1호가" }).click();
+  await dialog.getByRole("button", { name: "-1호가" }).click();
+  await expect(price).toHaveValue("189,900");
+  await dialog.getByRole("button", { name: "현재가" }).click();
+  await expect(price).toHaveValue("190,000");
+  // 호가 단위에 맞지 않는 값은 가까운 호가로 맞춘다.
+  await price.fill("190050");
+  await dialog.getByRole("button", { name: "+1호가" }).click();
+  await expect(price).toHaveValue("190,100");
+  await price.fill("190050");
+  await dialog.getByRole("button", { name: "-1호가" }).click();
+  await expect(price).toHaveValue("190,000");
+  await page.keyboard.press("Escape");
+
+  // 20만원 경계: 아래는 100원, 위는 500원 단위다.
+  await tradingValueCard(page).getByRole("button", { name: /현대차/ }).click();
+  dialog = panel(page, "현대차");
+  await expect(dialog.getByLabel("가격 (원)")).toHaveValue("200,000");
+  await dialog.getByRole("button", { name: "-1호가" }).click();
+  await expect(dialog.getByLabel("가격 (원)")).toHaveValue("199,900");
+  await dialog.getByRole("button", { name: "현재가" }).click();
+  await dialog.getByRole("button", { name: "+1호가" }).click();
+  await expect(dialog.getByLabel("가격 (원)")).toHaveValue("200,500");
+});
+
+test("ETF는 ETF 호가 단위를 쓰고, 가격이 비었거나 최저 호가면 버튼이 막힌다", async ({ page }) => {
+  await mockApi(
+    page,
+    { domestic: [], us: [] },
+    [searchItem({ code: "069500", name: "KODEX 200", category: "ETF" })],
+    ({ code }) => ({ body: { code, price: 10_000, fetched_at: "2026-10-05T06:30:00+00:00" } }),
+  );
+  await page.goto("/");
+  await selectEnvironment(page, "국내 모의");
+  await selectMenu(page, "종목 검색");
+  await page.getByRole("searchbox", { name: "종목 검색어" }).fill("KODEX");
+  await page.getByRole("region", { name: "검색 결과" }).getByRole("button", { name: /KODEX 200/ }).click();
+  const dialog = panel(page, "KODEX 200");
+  const price = dialog.getByLabel("가격 (원)");
+  await expect(price).toHaveValue("10,000");
+  // ETF는 2,000원 이상이면 5원 단위다(주식이면 10원).
+  await dialog.getByRole("button", { name: "+1호가" }).click();
+  await expect(price).toHaveValue("10,005");
+
+  await price.fill("");
+  await expect(dialog.getByRole("button", { name: "+1호가" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "-1호가" })).toBeDisabled();
+  await price.fill("1");
+  await expect(dialog.getByRole("button", { name: "-1호가" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "+1호가" }).click();
+  await expect(price).toHaveValue("2");
+});
+
+test("미국은 $1 이상 0.01달러, $1 미만 0.0001달러씩 움직인다", async ({ page }) => {
+  await mockApi(page, { domestic: [], us: [rankingItem("SOXL", "디렉시온 반도체", "NYSE", 1)] });
+  await page.goto("/");
+  await selectEnvironment(page, "미국 모의");
+  await selectMenu(page, "순위");
+  await tradingValueCard(page).getByRole("button", { name: /디렉시온 반도체/ }).click();
+  const dialog = panel(page, "디렉시온 반도체");
+  const price = dialog.getByLabel("가격 (USD)");
+  await expect(price).toHaveValue("170.25");
+  await dialog.getByRole("button", { name: "+1호가" }).click();
+  await expect(price).toHaveValue("170.26");
+
+  await price.fill("1");
+  await dialog.getByRole("button", { name: "-1호가" }).click();
+  await expect(price).toHaveValue("0.9999");
+  await dialog.getByRole("button", { name: "+1호가" }).click();
+  await expect(price).toHaveValue("1.00");
+});
+
+test("현재가를 불러오지 못하면 현재가 버튼이 막힌다", async ({ page }) => {
+  await mockApi(page, { domestic: [rankingItem("000660", "SK하이닉스", null, 1)], us: [] }, [], () => ({
+    status: 502,
+    body: { error: { kind: "kiwoom_error", message: "test" } },
+  }));
+  await page.goto("/");
+  await selectEnvironment(page, "국내 모의");
+  await selectMenu(page, "순위");
+  await tradingValueCard(page).getByRole("button", { name: /SK하이닉스/ }).click();
+  const dialog = panel(page, "SK하이닉스");
+  await expect(dialog.getByText("현재가를 불러오지 못했습니다.", { exact: false })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "현재가" })).toBeDisabled();
+});
