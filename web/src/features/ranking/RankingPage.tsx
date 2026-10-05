@@ -313,7 +313,8 @@ export function RateChange({
           {tone.mark}
         </span>
       )}
-      {tone.sign}
+      {/* 방향을 모르거나 보합이어도 음수 등락률의 부호는 남긴다. */}
+      {tone.sign || (rate < 0 ? "−" : "")}
       {Math.abs(rate).toFixed(2)}%
     </p>
   );

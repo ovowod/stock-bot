@@ -197,6 +197,16 @@ test("값이 없으면 –, 알 수 없는 등락 방향은 중립으로 표시�
   await expect(trading.getByText("–").first()).toBeVisible();
 });
 
+test("방향을 알 수 없어도 음수 등락률은 − 부호를 유지한다", async ({ page }) => {
+  const item = { ...DOMESTIC_ITEM, direction: "unknown", change_rate: -1.5 };
+  await mockRankings(page, ({ environment, kind }) => ({ body: ranking(environment, kind, [item]) }));
+  await openRanking(page);
+
+  const change = card(page, "거래대금 상위").locator("[data-direction=unknown]");
+  await expect(change).toHaveText("−1.50%");
+  await expect(change).toHaveClass(/text-muted/);
+});
+
 test("투자 환경을 바꾸면 이전 시장의 순위가 바로 사라지고 늦은 응답은 무시한다", async ({ page }) => {
   await mockRankings(page, ({ environment, kind }) =>
     environment === "domestic_paper"
