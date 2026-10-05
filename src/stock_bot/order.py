@@ -1,6 +1,6 @@
 """주문 접수: 모의투자 환경에서만 키움에 주문을 보낸다.
 
-매수는 국내 kt10000·미국 ust20000, 매도는 국내 kt10001이다.
+매수는 국내 kt10000·미국 ust20000, 매도는 국내 kt10001·미국 ust20001이다.
 매도는 보내기 직전에 잔고를 다시 확인한다.
 주문은 중복될 수 있으므로 키움 호출을 자동으로 다시 보내지 않는다.
 """
@@ -160,6 +160,9 @@ class OrderService:
                 "ord_uv": order["price"],
                 "trde_tp": trde_tp,
             }
+            if order["side"] == "sell":
+                # 매도 TR(ust20001)에만 있는 칸. STOP 주문만 쓰므로 지정가·시장가는 빈 값이다.
+                body["stop_pric"] = ""
         try:
             data = await self._kiwoom.call_once(spec, api_id, path, body)
             order_no = Reader(data, api_id).text("ord_no")
@@ -208,8 +211,6 @@ def _validate(request: Any, market: Market) -> dict[str, str]:
     side = _text(request, "side")
     if side not in SIDES:
         raise _invalid("매수·매도 구분이 올바르지 않습니다.")
-    if side == "sell" and market is Market.US:
-        raise _invalid("미국 매도 주문은 아직 지원하지 않습니다.")
     code = _text(request, "code")
     if not code:
         raise _invalid("종목코드가 필요합니다.")

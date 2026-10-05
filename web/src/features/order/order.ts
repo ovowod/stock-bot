@@ -40,18 +40,23 @@ export const ORDER_TYPES: { value: OrderType; label: string; trde_tp: Record<Mar
   { value: "market", label: "시장가", trde_tp: { domestic: "3", us: "03" } },
 ];
 
-// 미국 매수 TR(ust20000)의 거래소 값은 NA·ND·NY뿐이고, 미국 모의투자도 이 세 거래소만 지원한다.
+// 미국 주문 TR(매수 ust20000, 매도 ust20001)의 거래소 값은 NA·ND·NY뿐이고, 미국 모의투자도 이 세 거래소만 지원한다.
 const US_ORDER_EXCHANGES = ["NYSE", "NASDAQ", "AMEX"];
 
 /**
- * 매수할 수 없으면 그 이유를, 할 수 있으면 null을 돌려준다.
+ * 주문할 수 없으면 그 이유를, 할 수 있으면 null을 돌려준다. side는 "매수" 또는 "매도"다.
  * 국내는 주문을 KRX로 보내고 순위·검색 종목이 모두 코스피·코스닥이라 모의투자(KRX만 지원)에서도 막지 않는다.
  */
-export function buyUnavailableReason(market: Market, isReal: boolean, exchange: string | null): string | null {
+export function orderUnavailableReason(
+  market: Market,
+  isReal: boolean,
+  exchange: string | null,
+  side: string,
+): string | null {
   if (market !== "us" || (exchange && US_ORDER_EXCHANGES.includes(exchange))) return null;
   const rule = isReal
-    ? "키움 미국주식 매수는 NYSE·NASDAQ·AMEX 종목만 지원합니다."
-    : "미국 모의투자는 NYSE·NASDAQ·AMEX 종목만 매수할 수 있습니다.";
+    ? `키움 미국주식 ${side}는 NYSE·NASDAQ·AMEX 종목만 지원합니다.`
+    : `미국 모의투자는 NYSE·NASDAQ·AMEX 종목만 ${side}할 수 있습니다.`;
   const actual = exchange ? `이 종목의 거래소는 ${exchange}입니다.` : "이 종목의 거래소를 확인할 수 없습니다.";
   return `${rule} ${actual}`;
 }

@@ -10,6 +10,8 @@ from tests.fake_kiwoom import (
     FAKE_ENV,
     KT00018_HOLDING,
     KT00018_REPLY,
+    UST21070_HOLDING,
+    UST21070_REPLY,
     FakeKiwoom,
     ThreadedTransport,
     body_of,
@@ -188,13 +190,135 @@ def test_real_environment_sells_send_nothing_to_kiwoom(make_client):
     assert fake.requests == []
 
 
-def test_us_sells_are_not_supported_yet(make_client):
-    fake = FakeKiwoom()
-    order = sell_order(code="AAPL", exchange="NASDAQ", price="275.24")
-    response = make_client(fake).post("/api/environments/us_paper/orders", json=order)
+def test_domestic_market_sell_sends_trde_tp_3_without_a_price(make_client):
+    fake = FakeKiwoom().reply("kt00018", balance(holding())).reply("kt10001", SELL_REPLY)
+    client = make_client(fake)
+    order = {k: v for k, v in sell_order(order_type="market").items() if k != "price"}
+    assert client.post(DOMESTIC_URL, json=order).status_code == 200
+    body = body_of(fake.calls("kt10001")[0])
+    assert body["trde_tp"] == "3"
+    assert body["ord_uv"] == ""
 
-    assert response.status_code == 400
+    with_price = sell_order(order_key="priced", order_type="market")
+    assert client.post(DOMESTIC_URL, json=with_price).status_code == 400
+    assert len(fake.calls("kt10001")) == 1
+
+
+US_URL = "/api/environments/us_paper/orders"
+US_SELL_REPLY = {"ord_no": "000000283", "stk_nm": "애플", "poss_qty": "000000000395"}
+
+
+def us_sell(**overrides: object) -> dict[str, object]:
+    return {
+        "order_key": "us-sell-1",
+        "side": "sell",
+        "code": "AAPL",
+        "exchange": "NASDAQ",
+        "order_type": "limit",
+        "quantity": "10",
+        "price": "275.24",
+        **overrides,
+    }
+
+
+def us_balance(*holdings: dict[str, object]) -> dict[str, object]:
+    return {**UST21070_REPLY, "result_list": list(holdings)}
+
+
+def us_holding(**overrides: object) -> dict[str, object]:
+    return {**UST21070_HOLDING, **overrides}
+
+
+def test_us_limit_sell_checks_the_ticker_balance_then_sends_ust20001(make_client):
+    fake = FakeKiwoom().reply("ust21070", us_balance(us_holding()))
+    fake.reply("ust20001", US_SELL_REPLY)
+    response = make_client(fake).post(US_URL, json=us_sell())
+
+    assert response.status_code == 200
+    assert response.json()["order_no"] == "000000283"
+    assert body_of(fake.calls("ust21070")[0]) == {"stex_tp": "", "stk_cd": "AAPL"}
+    request = fake.calls("ust20001")[0]
+    assert request.url.host == "mockapi.kiwoom.com"
+    assert request.url.path == "/api/us/ordr"
+    assert body_of(request) == {
+        "stex_tp": "ND",
+        "stk_cd": "AAPL",
+        "ord_qty": "10",
+        "ord_uv": "275.24",
+        "stop_pric": "",
+        "trde_tp": "00",
+    }
+
+
+def test_us_market_sell_sends_trde_tp_03_without_a_price(make_client):
+    fake = FakeKiwoom().reply("ust21070", us_balance(us_holding()))
+    fake.reply("ust20001", US_SELL_REPLY)
+    order = {k: v for k, v in us_sell(order_type="market").items() if k != "price"}
+    assert make_client(fake).post(US_URL, json=order).status_code == 200
+    body = body_of(fake.calls("ust20001")[0])
+    assert body["trde_tp"] == "03"
+    assert body["ord_uv"] == ""
+
+
+def test_us_sell_inputs_follow_the_buy_rules(make_client):
+    fake = FakeKiwoom()
+    client = make_client(fake)
+    for order in (
+        us_sell(order_key="a", exchange="OTC"),
+        us_sell(order_key="b", exchange=None),
+        us_sell(order_key="c", price="275.245"),
+    ):
+        assert client.post(US_URL, json=order).status_code == 400, order
     assert fake.requests == []
+
+
+def test_us_sells_are_limited_to_the_sellable_quantity(make_client):
+    held = us_holding(poss_qty="000000000010", sell_alowq="000000000004")
+    fake = FakeKiwoom().reply("ust21070", us_balance(held)).reply("ust20001", US_SELL_REPLY)
+    client = make_client(fake)
+
+    over = client.post(US_URL, json=us_sell(order_key="over", quantity="5"))
+    assert over.status_code == 400
+    assert over.json()["error"]["kind"] == "sellable_exceeded"
+    assert "4주" in over.json()["error"]["message"]
+    assert client.post(US_URL, json=us_sell(order_key="exact", quantity="4")).status_code == 200
+    assert len(fake.calls("ust20001")) == 1
+
+    fake.reply("ust21070", us_balance())
+    missing = client.post(US_URL, json=us_sell(order_key="missing", quantity="1"))
+    assert missing.json()["error"]["kind"] == "sellable_exceeded"
+    assert len(fake.calls("ust20001")) == 1
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        kiwoom_error(20, "조회 실패"),
+        us_balance(us_holding(sell_alowq="")),
+        us_balance(us_holding(sell_alowq=". 950")),
+        us_balance(us_holding(), us_holding()),
+    ],
+)
+def test_a_failed_us_balance_check_does_not_send_the_order(make_client, reply):
+    fake = FakeKiwoom().reply("ust21070", reply)
+    response = make_client(fake).post(US_URL, json=us_sell())
+
+    assert response.status_code == 502
+    assert response.json()["error"]["kind"] == "sellable_check_failed"
+    assert fake.calls("ust20001") == []
+
+
+def test_us_real_sells_send_nothing_and_repeated_keys_order_once(make_client):
+    fake = FakeKiwoom().reply("ust21070", us_balance(us_holding()))
+    fake.reply("ust20001", US_SELL_REPLY)
+    client = make_client(fake)
+    assert client.post("/api/environments/us_real/orders", json=us_sell()).status_code == 403
+    assert fake.requests == []
+
+    assert client.post(US_URL, json=us_sell()).status_code == 200
+    assert client.post(US_URL, json=us_sell()).status_code == 409
+    assert len(fake.calls("ust21070")) == 1
+    assert len(fake.calls("ust20001")) == 1
 
 
 def test_a_repeated_sell_key_checks_the_balance_and_orders_once(make_client):

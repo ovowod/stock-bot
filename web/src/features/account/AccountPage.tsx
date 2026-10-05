@@ -64,7 +64,7 @@ export function AccountPage({ environment }: { environment: EnvironmentValue }) 
           {ready.data.market === "domestic" ? (
             <DomesticView data={ready.data} onSold={refresh} />
           ) : (
-            <UsView data={ready.data} />
+            <UsView data={ready.data} onSold={refresh} />
           )}
         </div>
       )}
@@ -174,8 +174,9 @@ function DomesticView({ data, onSold }: { data: DomesticAccount; onSold: () => v
   );
 }
 
-function UsView({ data }: { data: UsAccount }) {
+function UsView({ data, onSold }: { data: UsAccount; onSold: () => void }) {
   const { summary, summary_krw: krw, deposit } = data;
+  const openOrder = useOrderPanel();
   const currency = data.currency || "USD";
   const usd = (value: number | null) => formatForeign(value, currency);
   const price = (value: number | null) => formatForeign(value, currency, 4);
@@ -263,6 +264,15 @@ function UsView({ data }: { data: UsAccount }) {
                 { label: "원화 평가금액", value: formatKrw(h.evaluation_amount_krw) },
                 ...sellableDetail(h.quantity, h.sellable_quantity),
               ],
+              onSell: () =>
+                openOrder({
+                  code: h.code,
+                  name: h.name,
+                  exchange: h.exchange,
+                  category: null,
+                  status: null,
+                  sell: { quantity: h.quantity, sellableQuantity: h.sellable_quantity, onAccepted: onSold },
+                }),
               value: usd(h.evaluation_amount),
               valueSub: formatKrw(h.evaluation_amount_krw),
               change: (

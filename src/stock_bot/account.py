@@ -131,20 +131,31 @@ class AccountService:
 
         보유하지 않으면 두 수량이 0이다. 수량을 읽지 못하면 추측하지 않고 오류로 돌려준다.
         """
-        if spec.market is not Market.DOMESTIC:
-            raise AppError("invalid_request", "미국 잔고 확인은 아직 지원하지 않습니다.", 400)
-        api_id = "kt00018"
-        data = await self._kiwoom.call(
-            spec, api_id, DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
-        )
-        # 현금 매도(kt10001) 대상인 현금잔고(crd_tp=00) 줄만 센다. 신용 보유분은 세지 않는다.
-        rows = [
-            row
-            for row in Reader(data, api_id).rows("acnt_evlt_remn_indv_tot")
-            if _strip_prefix(row.text("stk_cd")) == code and row.text("crd_tp") == "00"
-        ]
+        if spec.market is Market.DOMESTIC:
+            api_id, quantity_key, sellable_key = "kt00018", "rmnd_qty", "trde_able_qty"
+            data = await self._kiwoom.call(
+                spec, api_id, DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+            )
+            # 현금 매도(kt10001) 대상인 현금잔고(crd_tp=00) 줄만 센다. 신용 보유분은 세지 않는다.
+            rows = [
+                row
+                for row in Reader(data, api_id).rows("acnt_evlt_remn_indv_tot")
+                if _strip_prefix(row.text("stk_cd")) == code and row.text("crd_tp") == "00"
+            ]
+        else:
+            api_id, quantity_key, sellable_key = "ust21070", "poss_qty", "sell_alowq"
+            # 잔고의 거래소 표기가 주문과 다를 수 있어(NYSE Arca ETF를 아멕스로 준다)
+            # 거래소로 거르지 않는다.
+            data = await self._kiwoom.call(
+                spec, api_id, US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": code}
+            )
+            rows = [
+                row
+                for row in Reader(data, api_id).rows("result_list")
+                if row.text("stk_cd") == code
+            ]
         if len(rows) > 1:
-            # 문서 예제가 합산 조회인데도 같은 종목 두 줄을 준다.
+            # kt00018 문서 예제가 합산 조회인데도 같은 종목 두 줄을 준다.
             # 뜻을 모르므로 더하지도 고르지도 않는다.
             raise AppError(
                 "unsupported_holding",
@@ -154,8 +165,8 @@ class AccountService:
             )
         quantity = sellable = 0
         if rows:
-            quantity = _required_count(rows[0], "rmnd_qty", api_id)
-            sellable = _required_count(rows[0], "trde_able_qty", api_id)
+            quantity = _required_count(rows[0], quantity_key, api_id)
+            sellable = _required_count(rows[0], sellable_key, api_id)
         result = {
             "code": code,
             "held": bool(rows),

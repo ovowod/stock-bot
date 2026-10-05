@@ -35,6 +35,45 @@ const account = (environment: string, holdings: unknown[]) => ({
   holdings,
 });
 
+const usHolding = (overrides: Record<string, unknown> = {}) => ({
+  code: "AAPL",
+  name: "애플",
+  exchange: "NASDAQ",
+  currency: "USD",
+  quantity: 395,
+  sellable_quantity: 395,
+  purchase_price: 282.1603,
+  current_price: 275.24,
+  purchase_amount: 111453.32,
+  evaluation_amount: 108719.8,
+  profit_loss: -3283.95,
+  return_rate: -2.94,
+  evaluation_amount_krw: 165743335,
+  profit_loss_krw: -5006383,
+  ...overrides,
+});
+
+const usAccount = (environment: string, holdings: unknown[]) => ({
+  environment,
+  market: "us",
+  account_no: "6111****41",
+  fetched_at: "2026-10-05T06:30:00+00:00",
+  currency: "USD",
+  summary: {
+    total_evaluation: 108719.8,
+    total_purchase: 111453.32,
+    total_profit_loss: -3283.95,
+    total_return_rate: -2.94,
+    today_realized_profit_loss: 0,
+    today_realized_return_rate: 0,
+  },
+  summary_krw: { total_evaluation: 0, total_purchase: 0, total_profit_loss: 0, today_realized_profit_loss: 0 },
+  deposit: { krw_deposit: 0, currencies: [] },
+  holdings,
+});
+
+const QUOTES: Record<string, number> = { "005930": 84_500, AAPL: 275.24 };
+
 type OrderReply = { status?: number; body: unknown };
 type OrderRequest = { environment: string; body: Record<string, unknown> };
 
@@ -44,7 +83,11 @@ const accepted: (request: OrderRequest) => OrderReply = (request) => ({
 
 async function mockApi(
   page: Page,
-  { holdings = [holding()], order = accepted }: { holdings?: unknown[]; order?: (r: OrderRequest) => OrderReply } = {},
+  {
+    holdings = [holding()],
+    usHoldings = [usHolding()],
+    order = accepted,
+  }: { holdings?: unknown[]; usHoldings?: unknown[]; order?: (r: OrderRequest) => OrderReply } = {},
 ) {
   const orders: OrderRequest[] = [];
   const accountRequests: string[] = [];
@@ -53,10 +96,12 @@ async function mockApi(
     const [, , , environment, resource] = url.pathname.split("/");
     if (resource === "account") {
       accountRequests.push(environment);
-      await route.fulfill({ json: account(environment, holdings) });
+      await route.fulfill({
+        json: environment.startsWith("us") ? usAccount(environment, usHoldings) : account(environment, holdings),
+      });
     } else if (resource === "quote") {
       const code = url.searchParams.get("code") ?? "";
-      await route.fulfill({ json: { code, price: 84_500, fetched_at: "2026-10-05T01:00:00+00:00" } });
+      await route.fulfill({ json: { code, price: QUOTES[code] ?? 100, fetched_at: "2026-10-05T01:00:00+00:00" } });
     } else if (resource === "orders") {
       const request = { environment, body: route.request().postDataJSON() };
       orders.push(request);
@@ -173,4 +218,68 @@ test("매도 버튼과 패널이 가로 스크롤을 만들지 않는다", async
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   expect(await page.evaluate(() => window.innerWidth)).toBe(page.viewportSize()!.width);
+});
+
+test("국내 시장가 매도는 가격 없이 보내고, 최종 확인에 시장가로 보인다", async ({ page }) => {
+  const { orders } = await mockApi(page);
+  const dialog = await openSell(page);
+  await dialog.getByRole("radio", { name: "시장가" }).click();
+  await dialog.getByRole("button", { name: "매도", exact: true }).click();
+
+  const confirm = confirmation(page);
+  await expect(confirm.locator('dd[data-term="가격"]')).toHaveText("시장가");
+  await confirm.getByRole("button", { name: "주문하기" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "매도 주문이 접수되었습니다" })).toBeVisible();
+  const { order_key: _, ...rest } = orders[0].body;
+  expect(rest).toEqual({ side: "sell", code: "005930", order_type: "market", quantity: "7" });
+});
+
+test("미국 모의 보유종목을 거래소·USD 금액과 함께 매도하고 계좌 확인을 다시 조회한다", async ({ page }) => {
+  const { orders, accountRequests } = await mockApi(page);
+  const dialog = await openSell(page, "미국 모의", "애플");
+
+  await expect(dialog.getByText("미국 모의 매도")).toBeVisible();
+  await expect(dialog.getByText("AAPL · NASDAQ")).toBeVisible();
+  await expect(dialog.getByLabel("매도 가능 수량")).toHaveText("395주");
+  await expect(dialog.getByLabel(/가격/)).toHaveValue("275.24");
+  await dialog.getByLabel("수량 (주)").fill("2");
+  await dialog.getByRole("button", { name: "매도", exact: true }).click();
+
+  const confirm = confirmation(page);
+  await expect(confirm.locator('dd[data-term="거래소"]')).toHaveText("NASDAQ");
+  await expect(confirm.locator('dd[data-term="가격"]')).toHaveText("$275.24");
+  await expect(confirm.locator('dd[data-term="예상 주문금액"]')).toHaveText("$550.48");
+  await confirm.getByRole("button", { name: "주문하기" }).click();
+
+  await expect(page.getByRole("status").filter({ hasText: "매도 주문이 접수되었습니다" })).toBeVisible();
+  expect(orders[0].environment).toBe("us_paper");
+  const { order_key: _, ...rest } = orders[0].body;
+  expect(rest).toEqual({
+    side: "sell",
+    code: "AAPL",
+    exchange: "NASDAQ",
+    order_type: "limit",
+    quantity: "2",
+    price: "275.24",
+  });
+  await expect.poll(() => accountRequests.filter((env) => env === "us_paper").length).toBe(2);
+});
+
+test("미국 매도도 주문할 수 없는 거래소의 종목은 막고, 매도 가능 수량을 모르면 확인 불가로 연다", async ({ page }) => {
+  const { orders } = await mockApi(page, {
+    usHoldings: [
+      usHolding({ code: "OTCX", name: "장외 종목", exchange: "OTC" }),
+      usHolding({ sellable_quantity: null }),
+    ],
+  });
+  const otc = await openSell(page, "미국 모의", "장외 종목");
+  await expect(otc.getByText("매도할 수 없는 종목입니다")).toBeVisible();
+  await expect(otc).toContainText("미국 모의투자는 NYSE·NASDAQ·AMEX 종목만 매도할 수 있습니다.");
+  await expect(otc.getByRole("button", { name: "매도", exact: true })).toHaveCount(0);
+  await otc.getByRole("button", { name: "닫기", exact: true }).click();
+
+  const unknown = await openSell(page, "미국 모의", "애플");
+  await expect(unknown.getByLabel("매도 가능 수량")).toHaveText("확인 불가");
+  await expect(unknown.getByLabel("수량 (주)")).toHaveValue("");
+  expect(orders).toEqual([]);
 });

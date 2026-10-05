@@ -7,9 +7,9 @@ import { formatCount, formatForeign, formatKrw } from "../../format";
 import { useToast } from "../toast/Toasts";
 import {
   ORDER_TYPES,
-  buyUnavailableReason,
   groupThousands,
   newOrderKey,
+  orderUnavailableReason,
   parsePrice,
   parseQuantity,
   quoteToPriceText,
@@ -66,7 +66,7 @@ function OrderPanel({
     if (!lockedRef.current) onClose();
   }, [onClose]);
   const side = target.sell ? "매도" : "매수";
-  const unavailable = buyUnavailableReason(env.market, env.isReal, target.exchange);
+  const unavailable = orderUnavailableReason(env.market, env.isReal, target.exchange, side);
   const meta = [target.code, target.exchange ?? target.category].filter(Boolean).join(" · ");
 
   // 패널이 열린 동안 뒤쪽 화면을 inert로 막고, 닫으면 패널을 열었던 요소로 초점을 되돌린다.
