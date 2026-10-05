@@ -1,37 +1,34 @@
 import { AlertTriangle, Inbox, KeyRound, Lock, RefreshCw, Timer, WifiOff } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { ApiError } from "../../api";
 import { direction, EMPTY } from "../../format";
 
 const TONE = {
-  up: { text: "text-gain", soft: "bg-gain-soft", mark: "▲", sign: "+" },
-  down: { text: "text-loss", soft: "bg-loss-soft", mark: "▼", sign: "−" },
-  flat: { text: "text-muted", soft: "bg-canvas", mark: "", sign: "" },
+  up: { text: "text-gain", soft: "bg-gain-soft", sign: "+" },
+  down: { text: "text-loss", soft: "bg-loss-soft", sign: "−" },
+  flat: { text: "text-muted", soft: "bg-canvas", sign: "" },
 } as const;
 
-/** 수익·상승은 빨강 ▲ +, 손실·하락은 파랑 ▼ −, 0은 회색. 색을 못 구분해도 기호로 알 수 있다. */
+/** 수익·상승은 빨강 +, 손실·하락은 파랑 −, 0은 회색. 색을 못 구분해도 부호로 알 수 있다. 수익률은 parens로 괄호에 넣는다. */
 export function Change({
   value,
   format,
   className = "",
-  mark = true,
+  parens = false,
 }: {
   value: number | null;
   format: (value: number | null) => string;
   className?: string;
-  mark?: boolean;
+  parens?: boolean;
 }) {
   if (value === null) return <span className={`text-muted ${className}`}>{EMPTY}</span>;
   const tone = TONE[direction(value)];
   return (
     <span className={`whitespace-nowrap ${tone.text} ${className}`}>
-      {mark && tone.mark && (
-        <span className="mr-0.5 text-[0.75em]" aria-hidden>
-          {tone.mark}
-        </span>
-      )}
+      {parens && "("}
       {tone.sign}
       {format(Math.abs(value))}
+      {parens && ")"}
     </span>
   );
 }
@@ -55,7 +52,7 @@ export function ChangePill({
       }`}
     >
       <Change value={amount} format={formatAmount} />
-      <Change value={rate} format={formatRate} mark={false} />
+      <Change value={rate} format={formatRate} parens />
     </span>
   );
 }
@@ -100,8 +97,9 @@ export function MiniStat({ label, value, sub }: { label: string; value: ReactNod
   return (
     <div className="min-w-0 rounded-2xl bg-canvas px-4 py-3.5">
       <p className="text-[13px] text-muted">{label}</p>
-      <p className="mt-0.5 truncate text-[17px] font-bold">{value}</p>
-      {sub && <p className="truncate text-xs text-muted">{sub}</p>}
+      {/* 좁은 화면에서도 금액을 말줄임으로 자르지 않는다. 글씨를 줄이고, 그래도 넘치면 줄을 바꾼다. */}
+      <p className="mt-0.5 text-[15px] font-bold [overflow-wrap:anywhere] md:text-[17px]">{value}</p>
+      {sub && <p className="text-xs text-muted [overflow-wrap:anywhere]">{sub}</p>}
     </div>
   );
 }
@@ -109,13 +107,21 @@ export function MiniStat({ label, value, sub }: { label: string; value: ReactNod
 export interface HoldingView {
   key: string;
   name: string;
-  meta: ReactNode;
+  /** 모바일 목록 둘째 줄의 수량(예: "100주"). */
+  quantity: string;
+  /** 모바일에서 줄을 눌러 펼치는 세부 정보. */
+  details: { label: string; value: string }[];
+  /** 둘째 줄: 수량, 현재가. 오른쪽 평가금액(수량 × 현재가)과 짝을 이룬다. */
+  position: string[];
+  /** 셋째 줄: 종목코드, 거래소, 평균단가, 보유비중 등. */
+  info: string[];
+  /** 오른쪽 위: 평가금액. */
   value: ReactNode;
+  /** 평가금액 아래 줄(예: 원화 환산 평가금액). */
+  valueSub?: ReactNode;
   change: ReactNode;
-  details: { label: string; value: ReactNode }[];
 }
 
-/** 토스식 종목 목록. 넓은 화면에서는 가운데에 세부 값을 함께 펼친다. */
 export function HoldingsList({ items }: { items: HoldingView[] }) {
   if (items.length === 0) {
     return (
@@ -131,35 +137,94 @@ export function HoldingsList({ items }: { items: HoldingView[] }) {
   return (
     <ul className="-mx-2">
       {items.map((item) => (
-        <li
-          key={item.key}
-          className="flex items-center gap-3 rounded-2xl px-2 py-3 transition hover:bg-canvas/70"
-        >
-          <span
-            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-50 text-[15px] font-bold text-brand-600"
-            aria-hidden
-          >
-            {item.name.slice(0, 1)}
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[15px] font-semibold">{item.name}</p>
-            <p className="truncate text-[13px] text-muted">{item.meta}</p>
+        <li key={item.key}>
+          {/* 넓은 화면: 세부 정보까지 3줄로 모두 보여준다. */}
+          <div className="hidden items-start gap-3 rounded-2xl px-2 py-3 transition hover:bg-canvas/70 md:flex">
+            <Avatar name={item.name} />
+            {/* 왼쪽은 종목 정보, 오른쪽은 평가금액과 손익이다. 두 칸은 각자 위에서부터 쌓아, 이름이 길어도 어긋나지 않는다. */}
+            <div className="min-w-0 flex-1">
+              {/* 한글 이름은 띄어쓰기 자리에서만 줄을 바꾼다("아이셰어/즈"처럼 끊지 않는다). */}
+              <p className="text-[15px] font-semibold break-words break-keep">{item.name}</p>
+              <Parts parts={item.position} className={SUB_TEXT} />
+              <Parts parts={item.info} className={SUB_TEXT} />
+            </div>
+            <div className="shrink-0 text-right">
+              <p className="text-[15px] font-bold">{item.value}</p>
+              {item.valueSub && <p className={SUB_TEXT}>{item.valueSub}</p>}
+              <p className="text-[13px] font-medium">{item.change}</p>
+            </div>
           </div>
-          <dl className="hidden shrink-0 gap-6 xl:flex">
-            {item.details.map((detail) => (
-              <div key={detail.label} className="w-24 text-right">
-                <dt className="text-xs text-muted">{detail.label}</dt>
-                <dd className="text-sm font-medium">{detail.value}</dd>
-              </div>
-            ))}
-          </dl>
-          <div className="shrink-0 text-right xl:w-44">
-            <p className="text-[15px] font-bold">{item.value}</p>
-            <p className="text-[13px] font-medium">{item.change}</p>
-          </div>
+          <MobileHolding item={item} />
         </li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * 좁은 화면: 이름·수량과 평가금액·손익만 두 줄로 보여주고(토스증권 목록 방식),
+ * 현재가·평균단가 같은 세부 정보는 줄을 눌러 펼친다.
+ */
+function MobileHolding({ item }: { item: HoldingView }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="md:hidden">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-start gap-3 rounded-2xl px-2 py-3 text-left transition hover:bg-canvas/70"
+      >
+        <Avatar name={item.name} />
+        {/* 이름은 평가금액과, 수량은 손익과 짝을 지어 한 줄씩 둔다. 긴 손익이 이름 칸을 좁히지 않는다. */}
+        <span className="grid min-w-0 flex-1 grid-cols-[1fr_auto] items-baseline gap-x-3">
+          <span className="min-w-0 text-[15px] font-semibold break-words break-keep">{item.name}</span>
+          <span className="text-right text-[15px] font-bold">{item.value}</span>
+          <span className="text-[13px] text-muted">{item.quantity}</span>
+          <span className="text-right text-[13px] font-medium">{item.change}</span>
+        </span>
+      </button>
+      {open && (
+        <dl className="mx-2 mb-2 grid grid-cols-2 gap-x-4 gap-y-2 rounded-2xl bg-canvas px-4 py-3">
+          {item.details.map((detail) => (
+            <div key={detail.label} className="min-w-0">
+              <dt className="text-xs text-muted">{detail.label}</dt>
+              <dd data-term={detail.label} className="text-sm font-medium break-words">
+                {detail.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+}
+
+function Avatar({ name }: { name: string }) {
+  return (
+    <span
+      className="flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-50 text-[15px] font-bold text-brand-600"
+      aria-hidden
+    >
+      {name.slice(0, 1)}
+    </span>
+  );
+}
+
+// 이름·평가금액보다 한 단계 작은 보조 정보.
+const SUB_TEXT = "text-[13px] text-muted";
+
+/** 가운뎃점으로 이은 한 줄. 좁으면 가운뎃점 자리에서만 줄을 바꾸고, 각 덩어리 안에서는 끊지 않는다. */
+function Parts({ parts, className }: { parts: string[]; className: string }) {
+  return (
+    <p className={`min-w-0 ${className}`}>
+      {parts.map((part, index) => (
+        <span key={part}>
+          {index > 0 && " · "}
+          <span className="whitespace-nowrap">{part}</span>
+        </span>
+      ))}
+    </p>
   );
 }
 

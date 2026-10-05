@@ -30,11 +30,13 @@ class Reader:
         value = self.number(key)
         return None if value is None else float(value)
 
-    def rows(self, key: str) -> list[Reader]:
+    def rows(self, key: str, reader: type[Reader] | None = None) -> list[Reader]:
+        """목록 필드의 각 항목을 읽는다. reader로 항목을 읽을 Reader 종류를 바꿀 수 있다."""
         value = required(self._data, key, self._api_id)
         if not isinstance(value, list):
             raise response_format_error(self._api_id, f"{key} 필드가 목록이 아닙니다.")
-        return [Reader(row, self._api_id) for row in value if isinstance(row, dict)]
+        make = reader or Reader
+        return [make(row, self._api_id) for row in value if isinstance(row, dict)]
 
     def number(self, key: str) -> Decimal | None:
         """'-00000000196888', '156464.6701' 같은 문자열을 숫자로 바꾼다. 빈 값은 None."""
@@ -44,7 +46,10 @@ class Reader:
         try:
             return Decimal(raw)
         except InvalidOperation:
-            raise response_format_error(self._api_id, f"{key} 값이 숫자가 아닙니다.") from None
+            # 원인을 찾을 수 있게 받은 값을 담는다. 너무 길면 자른다.
+            raise response_format_error(
+                self._api_id, f"{key} 값이 숫자가 아닙니다: {raw[:40]!r}"
+            ) from None
 
 
 def required(data: dict[str, Any], key: str, api_id: str) -> Any:

@@ -82,7 +82,7 @@ const us = (environment = "us_paper") => ({
   holdings: [
     {
       code: "AAPL",
-      name: "애플",
+      name: "MSCI 브라질 아이셰어즈 ETF 긴 이름",
       exchange: "미국",
       currency: "USD",
       quantity: 395,
@@ -116,6 +116,9 @@ const envButton = (page: Page, label: string) => page.getByRole("radio", { name:
 // 데스크톱 표와 모바일 카드가 함께 DOM에 있으므로 보이는 요소만 고른다.
 const visibleText = (page: Page, text: string) => page.getByText(text).filter({ visible: true }).first();
 
+/** 모바일 보유종목 줄을 눌러 펼친 세부 정보에서 항목 값을 찾는다. */
+const holdingDetail = (row: ReturnType<Page["getByRole"]>, term: string) => row.locator(`dd[data-term="${term}"]`);
+
 async function expectNoHorizontalScroll(page: Page) {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
@@ -137,11 +140,43 @@ test("처음에는 국내 모의로 열리고 계좌 요약·예수금·보유�
   await expect(page.getByText("8135****11")).toBeVisible();
   await expect(page.getByText("실전", { exact: true })).toHaveCount(0);
   await expect(visibleText(page, "삼성전자")).toBeVisible();
+  const samsung = page.getByRole("listitem").filter({ hasText: "삼성전자" }).filter({ visible: true }).first();
+  if (info.project.name.includes("mobile")) {
+    // 모바일 목록은 이름·수량과 평가금액·손익만 보여주고, 줄을 누르면 세부 정보를 펼친다.
+    const toggle = samsung.getByRole("button", { name: /삼성전자/ });
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(samsung.getByText("100주", { exact: true }).filter({ visible: true })).toBeVisible();
+    await expect(samsung.getByText("8,450,000원", { exact: true }).filter({ visible: true })).toBeVisible();
+    await expect(samsung.getByText("(+20.71%)", { exact: true }).filter({ visible: true })).toBeVisible();
+    await expect(holdingDetail(samsung, "현재가")).toBeHidden();
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(holdingDetail(samsung, "현재가")).toHaveText("84,500원");
+    await expect(holdingDetail(samsung, "평균단가")).toHaveText("70,000원");
+    await expect(holdingDetail(samsung, "종목코드")).toHaveText("005930");
+    await expect(holdingDetail(samsung, "보유비중")).toHaveText("68.45%");
+    await toggle.click();
+    await expect(holdingDetail(samsung, "현재가")).toBeHidden();
+  } else {
+    // 넓은 화면: 왼쪽은 종목 정보(수량·현재가, 코드·평균단가·보유비중), 오른쪽은 평가금액과 손익이다.
+    // 매입금액은 수량 × 평균단가라 따로 보여주지 않는다.
+    await expect(samsung.getByText("100주 · 현재가 84,500원", { exact: true }).filter({ visible: true })).toBeVisible();
+    const samsungInfo = samsung.getByText("005930 · 평균 70,000원 · 보유비중 68.45%", { exact: true }).filter({ visible: true });
+    await expect(samsungInfo).toBeVisible();
+    // 왼쪽과 오른쪽은 각각 위에서부터 차례로 쌓인다. 오른쪽 칸 아래로 넘어가지 않는다.
+    const change = samsung.getByText("(+20.71%)", { exact: true }).filter({ visible: true });
+    const value = samsung.getByText("8,450,000원", { exact: true }).filter({ visible: true });
+    expect((await change.boundingBox())!.y).toBeLessThan((await value.boundingBox())!.y + 40);
+    const infoBox = (await samsungInfo.boundingBox())!;
+    expect(infoBox.x + infoBox.width).toBeLessThanOrEqual((await value.boundingBox())!.x + 1);
+  }
+  await expect(samsung).not.toContainText("매입금액");
+  await expect(samsung).not.toContainText("매도가능");
   await expectNoHorizontalScroll(page);
   await page.screenshot({ path: `screenshots/${info.project.name}-domestic-paper.png`, fullPage: true });
 });
 
-test("수익은 빨강 ▲ +, 손실은 파랑 ▼ − 로 표시한다", async ({ page }) => {
+test("수익은 빨강 +, 손실은 파랑 − 로 표시하고 수익률은 괄호로 붙인다", async ({ page }) => {
   await mockAccount(page, { domestic_paper: { body: domestic() } });
   await page.goto("/");
 
@@ -152,8 +187,14 @@ test("수익은 빨강 ▲ +, 손실은 파랑 ▼ − 로 표시한다", async 
   const color = (locator: typeof gain) => locator.evaluate((el) => getComputedStyle(el).color);
   expect(await color(gain)).toBe("rgb(240, 68, 82)");
   expect(await color(loss)).toBe("rgb(49, 130, 246)");
-  await expect(gain).toContainText("▲");
-  await expect(loss).toContainText("▼");
+  // 화살표 없이 부호와 색으로만 방향을 보여주고, 수익률은 금액 뒤 괄호에 둔다.
+  const holding = (name: string) =>
+    page.getByRole("listitem").filter({ hasText: name }).filter({ visible: true }).first();
+  await expect(holding("삼성전자")).not.toContainText("▲");
+  await expect(holding("삼성전자")).not.toContainText("▼");
+  await expect(visibleText(page, "(+20.71%)")).toBeVisible();
+  await expect(visibleText(page, "(−2.60%)")).toBeVisible();
+  await expect(visibleText(page, "(+12.23%)")).toBeVisible();
 });
 
 test("부호 없이 표시하는 금액도 음수면 − 를 유지한다", async ({ page }) => {
@@ -192,9 +233,80 @@ test("미국 계좌는 USD와 원화 환산, 통화별 예수금, 거래소명�
   await expect(page.getByText("$156,464.67")).toBeVisible();
   await expect(page.getByText("238,530,390원")).toBeVisible();
   await expect(page.getByText("미국달러")).toBeVisible();
-  await expect(visibleText(page, "AAPL · 미국")).toBeVisible();
+  // 외화예수금의 주문가능·출금가능은 각각 한 줄로, 낱말 중간에서 끊기지 않는다.
+  for (const text of ["주문가능 $100,000.00", "출금가능 $100,000.00"]) {
+    const line = visibleText(page, text);
+    await expect(line).toHaveText(text);
+    const lineHeight = await line.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
+    expect((await line.boundingBox())!.height).toBeLessThan(lineHeight * 1.5);
+  }
+  // 보유종목 이름은 말줄임(...)으로 자르지 않는다.
+  const row = page.getByRole("listitem").filter({ hasText: "MSCI" }).filter({ visible: true }).first();
+  const name = row.getByText("MSCI 브라질 아이셰어즈 ETF 긴 이름", { exact: true }).filter({ visible: true });
+  const clipped = await name.evaluate((el) => el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight);
+  expect(clipped).toBe(false);
+  if (info.project.name.includes("mobile")) {
+    // 모바일: 이름·수량과 평가금액·손익만 보이고, 누르면 원화 평가금액 등 세부 정보가 펼쳐진다.
+    await expect(row.getByText("395주", { exact: true }).filter({ visible: true })).toBeVisible();
+    await expect(row.getByText("$108,719.80", { exact: true }).filter({ visible: true })).toBeVisible();
+    await row.getByRole("button", { name: /MSCI/ }).click();
+    await expect(holdingDetail(row, "현재가")).toHaveText("$275.24");
+    await expect(holdingDetail(row, "평균단가")).toHaveText("$282.1603");
+    await expect(holdingDetail(row, "종목코드")).toHaveText("AAPL");
+    await expect(holdingDetail(row, "거래소")).toHaveText("미국");
+    await expect(holdingDetail(row, "원화 평가금액")).toHaveText("165,743,335원");
+    await expect(holdingDetail(row, "매도가능")).toHaveCount(0);
+  } else {
+    // 넓은 화면: 1줄 이름, 2줄 수량·현재가, 3줄 종목코드·거래소·평균단가. 오른쪽은 평가금액·원화 금액·손익.
+    await expect(row.getByText("395주 · 현재가 $275.24", { exact: true }).filter({ visible: true })).toBeVisible();
+    await expect(row.getByText("AAPL · 미국 · 평균 $282.1603", { exact: true }).filter({ visible: true })).toBeVisible();
+    await expect(row.getByText("165,743,335원", { exact: true }).filter({ visible: true })).toBeVisible();
+    await expect(row).not.toContainText("평가금액(원)");
+    await expect(row).not.toContainText("매도가능");
+    const oneLine = async (locator: ReturnType<Page["getByText"]>) => {
+      const lineHeight = await locator.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
+      expect((await locator.boundingBox())!.height, await locator.textContent()).toBeLessThan(lineHeight * 1.5);
+    };
+    await oneLine(name);
+    // 줄이 좁으면 가운뎃점 자리에서만 바꾸고, 덩어리 안에서는 끊지 않는다.
+    for (const part of ["평균 $282.1603", "현재가 $275.24", "165,743,335원"]) {
+      await oneLine(row.getByText(part, { exact: true }).filter({ visible: true }));
+    }
+  }
   await expectNoHorizontalScroll(page);
   await page.screenshot({ path: `screenshots/${info.project.name}-us-paper.png`, fullPage: true });
+});
+
+test("매도가능 수량이 보유 수량보다 적으면 함께 보여준다", async ({ page }, info) => {
+  const body = us();
+  body.holdings[0].sellable_quantity = 390;
+  await mockAccount(page, { domestic_paper: { body: domestic() }, us_paper: { body } });
+  await page.goto("/");
+  await envButton(page, "미국 모의").click();
+
+  if (info.project.name.includes("mobile")) {
+    const row = page.getByRole("listitem").filter({ hasText: "MSCI" }).filter({ visible: true }).first();
+    await row.getByRole("button", { name: /MSCI/ }).click();
+    await expect(holdingDetail(row, "매도가능")).toHaveText("390주");
+  } else {
+    await expect(visibleText(page, "AAPL · 미국 · 평균 $282.1603 · 매도가능 390주")).toBeVisible();
+  }
+});
+
+test("좁은 화면에서도 요약 카드의 큰 금액을 말줄임으로 자르지 않는다", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  const body = domestic();
+  body.summary.total_evaluation = 123_456_789;
+  body.summary.total_purchase = 110_000_000;
+  await mockAccount(page, { domestic_paper: { body } });
+  await page.goto("/");
+
+  for (const text of ["123,456,789원", "110,000,000원"]) {
+    const value = visibleText(page, text);
+    await expect(value).toHaveText(text);
+    const clipped = await value.evaluate((el) => el.scrollWidth > el.clientWidth);
+    expect(clipped, text).toBe(false);
+  }
 });
 
 test("마지막으로 고른 투자 환경으로 다시 열린다", async ({ page }) => {

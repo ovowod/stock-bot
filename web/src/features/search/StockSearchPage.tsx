@@ -2,6 +2,7 @@ import { Inbox, LoaderCircle, Search } from "lucide-react";
 import type { EnvironmentValue, StockSearchItem, StockSearchResult } from "../../api";
 import { findEnvironment } from "../../environments";
 import { ErrorNotice } from "../account/parts";
+import { useOrderPanel } from "../order/OrderPanel";
 import { useStockSearch } from "./useStockSearch";
 
 const PLACEHOLDER = {
@@ -84,24 +85,31 @@ function Results({ result, dimmed }: { result: StockSearchResult; dimmed: boolea
 }
 
 function ResultRow({ item }: { item: StockSearchItem }) {
+  const openOrder = useOrderPanel();
   const meta = [item.code, item.exchange ?? item.category, item.industry].filter(Boolean).join(" · ");
   return (
-    <li className="flex items-center gap-3 rounded-2xl px-2 py-2.5">
-      <span
-        className="flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-50 text-[15px] font-bold text-brand-600"
-        aria-hidden
+    <li>
+      <button
+        type="button"
+        onClick={() => openOrder(item)}
+        className="flex w-full items-center gap-3 rounded-2xl px-2 py-2.5 text-left hover:bg-canvas/70"
       >
-        {item.name.slice(0, 1)}
-      </span>
-      <div className="min-w-0 flex-1">
-        <p className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[15px] font-semibold">{item.name}</span>
-          {item.is_etf && <Badge tone="brand">ETF</Badge>}
-          {item.status && <Badge tone="real">{item.status}</Badge>}
-        </p>
-        {item.english_name && <p className="truncate text-xs text-sub">{item.english_name}</p>}
-        <p className="truncate text-xs text-muted">{meta}</p>
-      </div>
+        <span
+          className="flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-50 text-[15px] font-bold text-brand-600"
+          aria-hidden
+        >
+          {item.name.slice(0, 1)}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate text-[15px] font-semibold">{item.name}</span>
+            {item.is_etf && <Badge tone="brand">ETF</Badge>}
+            {item.status && <Badge tone="real">{item.status}</Badge>}
+          </p>
+          {item.english_name && <p className="truncate text-xs text-sub">{item.english_name}</p>}
+          <p className="truncate text-xs text-muted">{meta}</p>
+        </div>
+      </button>
     </li>
   );
 }

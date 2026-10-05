@@ -3,7 +3,7 @@ const count = new Intl.NumberFormat("ko-KR");
 
 export const EMPTY = "–";
 
-// 손익은 <Change>가 절댓값에 ▲▼와 부호를 붙인다. 그 밖의 값은 여기서 음수 부호를 유지한다.
+// 손익은 <Change>가 절댓값에 부호를 붙인다. 그 밖의 값은 여기서 음수 부호를 유지한다.
 const minus = (value: number) => (value < 0 ? "−" : "");
 
 export function formatKrw(value: number | null): string {

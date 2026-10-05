@@ -13,6 +13,7 @@ import {
   formatTime,
 } from "../../format";
 import { ErrorNotice } from "../account/parts";
+import { useOrderPanel } from "../order/OrderPanel";
 import { KINDS, useRankings, type CardState } from "./useRankings";
 
 type Market = "domestic" | "us";
@@ -268,30 +269,38 @@ function RankingRow({
   market: Market;
   metric: CardSpec["metric"];
 }) {
+  const openOrder = useOrderPanel();
   const price = market === "domestic" ? formatKrw(item.price) : formatForeign(item.price, "USD", 4);
+  const target = { code: item.code, name: item.name, exchange: item.exchange, category: null, status: null };
   return (
-    <li className="flex items-center gap-3 rounded-2xl px-2 py-2.5 hover:bg-canvas/70">
-      <span className="w-6 shrink-0 text-center text-[15px] font-bold text-brand-600">{item.rank ?? EMPTY}</span>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-[15px] font-semibold">{item.name}</p>
-        <p className="truncate text-xs text-muted">
-          {item.exchange ? `${item.code} · ${item.exchange}` : item.code}
-        </p>
-      </div>
-      <div className="shrink-0 text-right">
-        <p className="text-sm font-semibold">{price}</p>
-        <RateChange direction={item.direction} rate={item.change_rate} className="text-xs font-medium" />
-      </div>
-      <div className="w-24 shrink-0 text-right">{metric(item, market)}</div>
+    <li>
+      <button
+        type="button"
+        onClick={() => openOrder(target)}
+        className="flex w-full items-center gap-3 rounded-2xl px-2 py-2.5 text-left hover:bg-canvas/70"
+      >
+        <span className="w-6 shrink-0 text-center text-[15px] font-bold text-brand-600">{item.rank ?? EMPTY}</span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[15px] font-semibold">{item.name}</p>
+          <p className="truncate text-xs text-muted">
+            {item.exchange ? `${item.code} · ${item.exchange}` : item.code}
+          </p>
+        </div>
+        <div className="shrink-0 text-right">
+          <p className="text-sm font-semibold">{price}</p>
+          <RateChange direction={item.direction} rate={item.change_rate} className="text-xs font-medium" />
+        </div>
+        <div className="w-24 shrink-0 text-right">{metric(item, market)}</div>
+      </button>
     </li>
   );
 }
 
-const TONE: Record<RankingDirection, { text: string; mark: string; sign: string }> = {
-  up: { text: "text-gain", mark: "▲", sign: "+" },
-  down: { text: "text-loss", mark: "▼", sign: "−" },
-  flat: { text: "text-muted", mark: "", sign: "" },
-  unknown: { text: "text-muted", mark: "", sign: "" },
+const TONE: Record<RankingDirection, { text: string; sign: string }> = {
+  up: { text: "text-gain", sign: "+" },
+  down: { text: "text-loss", sign: "−" },
+  flat: { text: "text-muted", sign: "" },
+  unknown: { text: "text-muted", sign: "" },
 };
 
 /** 등락 방향은 키움이 준 기호를 따른다. 알 수 없는 기호는 보합으로 단정하지 않고 중립으로 둔다. */
@@ -308,11 +317,6 @@ export function RateChange({
   const tone = TONE[direction];
   return (
     <p className={`whitespace-nowrap ${tone.text} ${className}`} data-direction={direction}>
-      {tone.mark && (
-        <span className="mr-0.5 text-[0.75em]" aria-hidden>
-          {tone.mark}
-        </span>
-      )}
       {/* 방향을 모르거나 보합이어도 음수 등락률의 부호는 남긴다. */}
       {tone.sign || (rate < 0 ? "−" : "")}
       {Math.abs(rate).toFixed(2)}%

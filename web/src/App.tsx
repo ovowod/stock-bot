@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { EnvironmentValue } from "./api";
 import { ENVIRONMENTS, findEnvironment, loadEnvironment, saveEnvironment } from "./environments";
 import { AccountPage } from "./features/account/AccountPage";
+import { OrderPanelProvider } from "./features/order/OrderPanel";
 import { RankingPage } from "./features/ranking/RankingPage";
 import { StockSearchPage } from "./features/search/StockSearchPage";
 
@@ -142,7 +143,11 @@ export default function App() {
           </div>
         )}
 
-        <main className="min-w-0 flex-1 px-4 py-6 md:px-8 md:py-8">{feature.render(environment)}</main>
+        <main className="min-w-0 flex-1 px-4 py-6 md:px-8 md:py-8">
+          <OrderPanelProvider key={environment} environment={environment}>
+            {feature.render(environment)}
+          </OrderPanelProvider>
+        </main>
       </div>
     </div>
   );

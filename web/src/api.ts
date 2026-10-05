@@ -158,6 +158,81 @@ export function searchStocks(
   return getJson<StockSearchResult>(`/api/environments/${environment}/stocks?${params}`, signal);
 }
 
+export interface Quote {
+  code: string;
+  price: number | null;
+  fetched_at: string;
+}
+
+export function fetchQuote(
+  environment: EnvironmentValue,
+  code: string,
+  exchange: string | null,
+  signal: AbortSignal,
+): Promise<Quote> {
+  const params = new URLSearchParams({ code });
+  if (exchange) params.set("exchange", exchange);
+  return getJson<Quote>(`/api/environments/${environment}/quote?${params}`, signal);
+}
+
+export interface OrderRequest {
+  order_key: string;
+  code: string;
+  exchange?: string;
+  order_type: "limit" | "market";
+  quantity: string;
+  price?: string;
+}
+
+export interface OrderAccepted {
+  order_key: string;
+  order_no: string;
+  accepted_at: string;
+}
+
+export const ORDER_TIMEOUT_MS = 30_000;
+/** 주문이 키움에 접수됐는지 알 수 없는 결과. 실패와 달리 다시 주문하기 전에 확인이 필요하다. */
+export const ORDER_RESULT_UNKNOWN = "order_result_unknown";
+const UNKNOWN_KINDS = new Set([ORDER_RESULT_UNKNOWN, "duplicate_order"]);
+
+/**
+ * 매수 주문을 보낸다. 어떤 경우에도 다시 보내지 않는다.
+ * 응답을 받지 못했거나(연결 끊김, 시간 초과) 해석하지 못하면 접수 여부 확인 불가로 던진다.
+ * 같은 주문 키의 중복 거부(409)도 이전 요청이 접수됐을 수 있으므로 확인 불가로 본다.
+ */
+export async function placeOrder(
+  environment: EnvironmentValue,
+  order: OrderRequest,
+): Promise<{ result: OrderAccepted; requestId: string | null }> {
+  const unknown = (requestId: string | null = null) =>
+    new ApiError(ORDER_RESULT_UNKNOWN, "접수 여부를 확인할 수 없습니다.", requestId);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ORDER_TIMEOUT_MS);
+  let response: Response;
+  let body: { error?: { kind?: string; message?: string; request_id?: string } } & Partial<OrderAccepted>;
+  try {
+    response = await fetch(`/api/environments/${environment}/orders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(order),
+      signal: controller.signal,
+    });
+    body = await response.json();
+  } catch {
+    throw unknown();
+  } finally {
+    clearTimeout(timer);
+  }
+  const requestId = body?.error?.request_id ?? response.headers.get("X-Request-ID");
+  if (response.ok) {
+    if (typeof body?.order_no !== "string" || !body.order_no) throw unknown(requestId);
+    return { result: body as OrderAccepted, requestId };
+  }
+  const kind = body?.error?.kind;
+  if (!kind || UNKNOWN_KINDS.has(kind)) throw unknown(requestId);
+  throw new ApiError(kind, body.error?.message ?? `요청이 실패했습니다. (HTTP ${response.status})`, requestId);
+}
+
 export function fetchAccount(environment: EnvironmentValue, signal: AbortSignal): Promise<Account> {
   return getJson<Account>(`/api/environments/${environment}/account`, signal);
 }
