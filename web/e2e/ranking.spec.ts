@@ -138,10 +138,10 @@ test("새로고침 중에는 기존 목록을 유지하고 버튼을 비활성�
   let slow = false;
   await mockRankings(page, ({ environment, kind }) => ({
     body: ranking(environment, kind, [DOMESTIC_ITEM]),
-    delayMs: slow ? 1500 : 0,
+    delayMs: slow ? 800 : 0,
   }));
   await openRanking(page);
-  await expect(card(page, "거래대금 상위")).toContainText("SK하이닉스");
+  await expect(page.getByRole("button", { name: "새로고침" })).toBeEnabled();
 
   slow = true;
   await page.getByRole("button", { name: "새로고침" }).click();
@@ -229,7 +229,7 @@ test("카드는 위에서부터 한 번에 하나씩 조회한다", async ({ pag
   await openRanking(page);
   await expect(card(page, "거래량 상위")).toContainText("SK하이닉스");
 
-  expect(seen.map((r) => r.kind)).toEqual(["trading_value", "gainers", "volume"]);
+  expect(seen.map((r) => r.kind)).toEqual(["trading_value", "gainers", "volume", "popular"]);
   for (let i = 1; i < seen.length; i++) {
     expect(seen[i].startedAt).toBeGreaterThanOrEqual(seen[i - 1].endedAt!);
   }
@@ -286,13 +286,76 @@ test("조회 중인 카드가 있으면 새로고침 버튼을 비활성화한�
   await expect(page.getByRole("button", { name: "새로고침" })).toBeEnabled();
 });
 
+const POPULAR_ITEMS = [
+  { ...DOMESTIC_ITEM, rank: 1, name: "삼성전자", code: "005930", rank_change: 0 },
+  { ...DOMESTIC_ITEM, rank: 2, name: "성호전자", code: "043260", rank_change: 3 },
+  { ...DOMESTIC_ITEM, rank: 3, name: "SK하이닉스", code: "000660", rank_change: -2 },
+];
+
+test("인기 종목은 기준 시각, 전체 거래소, 순위 변동을 보여준다", async ({ page }, info) => {
+  await mockRankings(page, ({ environment, kind }) => ({
+    body:
+      kind === "popular"
+        ? { ...ranking(environment, kind, POPULAR_ITEMS), period: "1h", base_time: "2026-10-05T17:00:00+09:00" }
+        : ranking(environment, kind, [DOMESTIC_ITEM]),
+  }));
+  await openRanking(page);
+
+  const popular = card(page, "인기 종목");
+  await expect(popular).toContainText("전체 거래소 · 17:00 기준가");
+  await expect(popular.getByRole("radio", { name: "1시간" })).toHaveAttribute("aria-checked", "true");
+  await expect(popular.locator("[data-rank-change='3']")).toHaveText("▲3");
+  await expect(popular.locator("[data-rank-change='-2']")).toHaveText("▼2");
+  await expect(popular.locator("[data-rank-change='0']")).toHaveText("−");
+  await expectNoHorizontalScroll(page);
+  await page.screenshot({ path: `screenshots/${info.project.name}-ranking-all.png`, fullPage: true });
+});
+
+test("집계 시각이 없으면 기준 표시를 숨긴다", async ({ page }) => {
+  await mockRankings(page, ({ environment, kind }) => ({
+    body: kind === "popular" ? { ...ranking(environment, kind, []), period: "1h", base_time: null } : ranking(environment, kind, []),
+  }));
+  await openRanking(page);
+
+  const popular = card(page, "인기 종목");
+  await expect(popular).toContainText("순위 데이터가 없습니다");
+  await expect(popular).toContainText("전체 거래소");
+  await expect(popular).not.toContainText("기준가");
+});
+
+test("집계 구간을 바꾸면 인기 종목만 다시 조회하고, 거래소를 바꿔도 인기 종목은 그대로다", async ({ page }) => {
+  const seen = await mockRankings(page, ({ environment, kind, query }) => ({
+    body:
+      kind === "popular"
+        ? { ...ranking(environment, kind, POPULAR_ITEMS), period: query.get("period"), base_time: null }
+        : ranking(environment, kind, [DOMESTIC_ITEM]),
+    delayMs: query.get("period") === "today" ? 800 : 0,
+  }));
+  await openRanking(page);
+  await expect(card(page, "인기 종목")).toContainText("성호전자");
+  expect(seen.map((r) => r.kind)).toEqual(["trading_value", "gainers", "volume", "popular"]);
+  expect(seen.at(-1)!.query.get("period")).toBe("1h");
+
+  let before = seen.length;
+  await card(page, "인기 종목").getByRole("radio", { name: "당일" }).click();
+  await expect(page.getByRole("status", { name: "인기 종목 불러오는 중" })).toBeVisible();
+  await expect(card(page, "인기 종목")).toContainText("성호전자");
+  expect(seen.slice(before).map((r) => [r.kind, r.query.get("period")])).toEqual([["popular", "today"]]);
+
+  before = seen.length;
+  await page.getByRole("radio", { name: "코스피" }).click();
+  await expect(card(page, "거래량 상위")).toContainText("SK하이닉스");
+  expect(seen.slice(before).map((r) => r.kind)).toEqual(["trading_value", "gainers", "volume"]);
+  await expect(card(page, "인기 종목")).toContainText("성호전자");
+});
+
 // 실제 서버 확인용. 백엔드를 띄운 상태에서 `pnpm test:live`로만 실행한다. 모의 환경만 호출한다.
 for (const label of ["국내 모의", "미국 모의"] as const) {
   test(`@live ${label} 순위 실제 모의 서버 조회`, async ({ page }, info) => {
     await page.goto("/");
     await page.getByRole("radio", { name: label }).click();
     await selectRankingMenu(page);
-    for (const title of ["거래대금 상위", "상승률 상위", "거래량 상위"]) {
+    for (const title of ["거래대금 상위", "상승률 상위", "거래량 상위", "인기 종목"]) {
       await expect(card(page, title).getByRole("listitem").first()).toBeVisible({ timeout: 15_000 });
       await expect(card(page, title).getByRole("alert")).toHaveCount(0);
     }

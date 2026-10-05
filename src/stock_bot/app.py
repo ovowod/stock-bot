@@ -107,11 +107,11 @@ def create_app(
 
     @app.get("/api/environments/{environment}/rankings/{kind}")
     async def get_ranking(
-        environment: str, kind: str, exchange: str | None = None
+        environment: str, kind: str, exchange: str | None = None, period: str | None = None
     ) -> dict[str, Any]:
         spec = parse_environment(environment)
         environment_var.set(spec.environment.value)
-        return await rankings.fetch(spec, kind, exchange)
+        return await rankings.fetch(spec, kind, {"exchange": exchange, "period": period})
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

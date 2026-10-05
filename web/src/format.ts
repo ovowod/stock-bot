@@ -75,6 +75,16 @@ export function formatTime(iso: string): string {
   });
 }
 
+/** 한국시간 기준 HH:MM */
+export function formatKstTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: "Asia/Seoul",
+  });
+}
+
 export type Direction = "up" | "down" | "flat";
 
 export function direction(value: number | null): Direction {

@@ -99,7 +99,7 @@ export class ApiError extends Error {
   }
 }
 
-export type RankingKind = "trading_value" | "gainers" | "volume";
+export type RankingKind = "trading_value" | "gainers" | "volume" | "popular";
 export type RankingDirection = "up" | "down" | "flat" | "unknown";
 
 export interface RankingItem {
@@ -113,13 +113,17 @@ export interface RankingItem {
   trading_value?: number | null;
   previous_rank?: number | null;
   volume?: number | null;
+  rank_change?: number | null;
 }
 
 export interface Ranking {
   environment: EnvironmentValue;
   market: "domestic" | "us";
   kind: RankingKind;
-  exchange: string;
+  exchange?: string;
+  period?: string;
+  /** 인기 종목의 집계 시각. 구할 수 없으면 null. */
+  base_time?: string | null;
   fetched_at: string;
   items: RankingItem[];
 }
@@ -128,13 +132,21 @@ export function fetchAccount(environment: EnvironmentValue, signal: AbortSignal)
   return getJson<Account>(`/api/environments/${environment}/account`, signal);
 }
 
+export interface RankingConditions {
+  exchange: string;
+  period: string;
+}
+
 export function fetchRanking(
   environment: EnvironmentValue,
   kind: RankingKind,
-  exchange: string,
+  conditions: RankingConditions,
   signal: AbortSignal,
 ): Promise<Ranking> {
-  const query = new URLSearchParams({ exchange });
+  // 인기 종목은 집계 구간으로, 나머지 순위는 거래소로 조회한다.
+  const query = new URLSearchParams(
+    kind === "popular" ? { period: conditions.period } : { exchange: conditions.exchange },
+  );
   return getJson<Ranking>(`/api/environments/${environment}/rankings/${kind}?${query}`, signal);
 }
 

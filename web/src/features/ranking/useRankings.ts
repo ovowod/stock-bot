@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, fetchRanking, type EnvironmentValue, type Ranking, type RankingKind } from "../../api";
+import {
+  ApiError,
+  fetchRanking,
+  type EnvironmentValue,
+  type Ranking,
+  type RankingConditions,
+  type RankingKind,
+} from "../../api";
 
 export type CardState =
   | { status: "loading" }
@@ -7,7 +14,10 @@ export type CardState =
   | { status: "ready"; data: Ranking; refreshing: boolean; refreshError: ApiError | null };
 
 /** 화면에 위에서부터 놓이는 순서이자 조회 순서. */
-export const KINDS: RankingKind[] = ["trading_value", "gainers", "volume"];
+export const KINDS: RankingKind[] = ["trading_value", "gainers", "volume", "popular"];
+/** 거래소 선택이 적용되는 카드. 인기 종목은 집계 구간만 따른다. */
+const EXCHANGE_KINDS = KINDS.filter((kind) => kind !== "popular");
+const INITIAL: RankingConditions = { exchange: "all", period: "1h" };
 
 type Cards = Record<RankingKind, CardState>;
 
@@ -22,7 +32,7 @@ const allLoading = (): Cards =>
  */
 export function useRankings(environment: EnvironmentValue) {
   const [cards, setCards] = useState<Cards>(allLoading);
-  const [exchange, setExchangeState] = useState("all");
+  const [conditions, setConditions] = useState<RankingConditions>(INITIAL);
   const ticket = useRef(0);
   const tickets = useRef<Partial<Record<RankingKind, number>>>({});
   const controllers = useRef<Partial<Record<RankingKind, AbortController>>>({});
@@ -31,7 +41,7 @@ export function useRankings(environment: EnvironmentValue) {
     setCards((prev) => ({ ...prev, [kind]: next(prev[kind]) }));
 
   const run = useCallback(
-    async (kinds: RankingKind[], mode: "initial" | "refresh", conditions: { exchange: string }) => {
+    async (kinds: RankingKind[], mode: "initial" | "refresh", conditions: RankingConditions) => {
       const claimed = kinds.map((kind) => {
         controllers.current[kind]?.abort();
         tickets.current[kind] = ++ticket.current;
@@ -55,7 +65,7 @@ export function useRankings(environment: EnvironmentValue) {
         const controller = new AbortController();
         controllers.current[kind] = controller;
         try {
-          const data = await fetchRanking(environment, kind, conditions.exchange, controller.signal);
+          const data = await fetchRanking(environment, kind, conditions, controller.signal);
           if (tickets.current[kind] !== mine) continue;
           update(kind, () => ({ status: "ready", data, refreshing: false, refreshError: null }));
         } catch (error) {
@@ -74,7 +84,7 @@ export function useRankings(environment: EnvironmentValue) {
   );
 
   useEffect(() => {
-    void run(KINDS, "initial", { exchange: "all" });
+    void run(KINDS, "initial", INITIAL);
     const owned = controllers.current;
     const owner = tickets.current;
     return () => {
@@ -96,15 +106,21 @@ export function useRankings(environment: EnvironmentValue) {
 
   return {
     cards,
-    exchange,
+    conditions,
     busy,
     fetchedAt,
-    setExchange: (value: string) => {
-      setExchangeState(value);
-      void run(KINDS, "initial", { exchange: value });
+    setExchange: (exchange: string) => {
+      const next = { ...conditions, exchange };
+      setConditions(next);
+      void run(EXCHANGE_KINDS, "initial", next);
     },
-    refresh: () => void run(KINDS, "refresh", { exchange }),
+    setPeriod: (period: string) => {
+      const next = { ...conditions, period };
+      setConditions(next);
+      void run(["popular"], "initial", next);
+    },
+    refresh: () => void run(KINDS, "refresh", conditions),
     // 같은 조건으로 다시 받으므로, 목록이 있던 카드(새로고침 실패)는 목록을 유지한다.
-    retry: (kind: RankingKind) => void run([kind], "refresh", { exchange }),
+    retry: (kind: RankingKind) => void run([kind], "refresh", conditions),
   };
 }

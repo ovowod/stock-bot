@@ -9,6 +9,7 @@ import {
   formatCompactUsd,
   formatForeign,
   formatKrw,
+  formatKstTime,
   formatTime,
 } from "../../format";
 import { ErrorNotice } from "../account/parts";
@@ -29,6 +30,14 @@ const EXCHANGES: Record<Market, { value: string; label: string }[]> = {
     { value: "amex", label: "AMEX" },
   ],
 };
+
+const PERIODS = [
+  { value: "30s", label: "30초" },
+  { value: "1m", label: "1분" },
+  { value: "10m", label: "10분" },
+  { value: "1h", label: "1시간" },
+  { value: "today", label: "당일" },
+];
 
 interface CardSpec {
   title: string;
@@ -63,10 +72,16 @@ const CARDS: Record<RankingKind, CardSpec> = {
     metricLabel: "거래량",
     metric: (item) => <p className="text-sm font-semibold">{formatCompactCount(item.volume ?? null)}</p>,
   },
+  popular: {
+    title: "인기 종목",
+    metricLabel: "순위 변동",
+    metric: (item) => <RankChange value={item.rank_change ?? null} />,
+  },
 };
 
 export function RankingPage({ environment }: { environment: EnvironmentValue }) {
-  const { cards, exchange, busy, fetchedAt, setExchange, refresh, retry } = useRankings(environment);
+  const { cards, conditions, busy, fetchedAt, setExchange, setPeriod, refresh, retry } =
+    useRankings(environment);
   const env = findEnvironment(environment);
   const refreshing = KINDS.some((kind) => {
     const card = cards[kind];
@@ -99,7 +114,7 @@ export function RankingPage({ environment }: { environment: EnvironmentValue }) 
         </button>
       </div>
 
-      <ExchangeSwitch options={EXCHANGES[env.market]} value={exchange} onChange={setExchange} />
+      <Segmented label="거래소" options={EXCHANGES[env.market]} value={conditions.exchange} onChange={setExchange} />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {KINDS.map((kind) => (
@@ -109,6 +124,11 @@ export function RankingPage({ environment }: { environment: EnvironmentValue }) 
             state={cards[kind]}
             market={env.market}
             onRetry={() => retry(kind)}
+            toolbar={
+              kind === "popular" && (
+                <PopularToolbar period={conditions.period} onPeriod={setPeriod} state={cards.popular} />
+              )
+            }
           />
         ))}
       </div>
@@ -116,17 +136,25 @@ export function RankingPage({ environment }: { environment: EnvironmentValue }) 
   );
 }
 
-function ExchangeSwitch({
+function Segmented({
+  label,
   options,
   value,
   onChange,
+  small = false,
 }: {
+  label: string;
   options: { value: string; label: string }[];
   value: string;
   onChange: (value: string) => void;
+  small?: boolean;
 }) {
   return (
-    <div role="radiogroup" aria-label="거래소" className="inline-flex gap-1 rounded-2xl bg-surface p-1">
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className={`inline-flex gap-1 rounded-2xl p-1 ${small ? "bg-canvas" : "bg-surface"}`}
+    >
       {options.map((option) => {
         const active = option.value === value;
         return (
@@ -136,9 +164,9 @@ function ExchangeSwitch({
             role="radio"
             aria-checked={active}
             onClick={() => !active && onChange(option.value)}
-            className={`rounded-xl px-3.5 py-2 text-sm font-semibold whitespace-nowrap transition ${
-              active ? "bg-brand-50 text-brand-700" : "text-muted hover:text-sub"
-            }`}
+            className={`rounded-xl font-semibold whitespace-nowrap transition ${
+              small ? "px-2.5 py-1 text-xs" : "px-3.5 py-2 text-sm"
+            } ${active ? (small ? "bg-surface text-brand-700" : "bg-brand-50 text-brand-700") : "text-muted hover:text-sub"}`}
           >
             {option.label}
           </button>
@@ -148,16 +176,39 @@ function ExchangeSwitch({
   );
 }
 
+/** 인기 종목 카드 위쪽: 집계 구간 선택과, 거래소 선택이 적용되지 않는다는 표시, 집계 시각. */
+function PopularToolbar({
+  period,
+  onPeriod,
+  state,
+}: {
+  period: string;
+  onPeriod: (value: string) => void;
+  state: CardState;
+}) {
+  const baseTime = state.status === "ready" ? state.data.base_time : null;
+  return (
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <Segmented label="집계 구간" options={PERIODS} value={period} onChange={onPeriod} small />
+      <p className="text-xs text-muted">
+        전체 거래소{baseTime && ` · ${formatKstTime(baseTime)} 기준가`}
+      </p>
+    </div>
+  );
+}
+
 function RankingCard({
   spec,
   state,
   market,
   onRetry,
+  toolbar,
 }: {
   spec: CardSpec;
   state: CardState;
   market: Market;
   onRetry: () => void;
+  toolbar?: ReactNode;
 }) {
   return (
     <section aria-label={spec.title} className="flex h-[560px] flex-col rounded-3xl bg-surface p-5">
@@ -165,6 +216,7 @@ function RankingCard({
         <h3 className="text-[17px] font-bold">{spec.title}</h3>
         <span className="text-xs text-muted">{spec.metricLabel}</span>
       </div>
+      {toolbar}
       {state.status === "loading" && <CardSkeleton title={spec.title} />}
       {state.status === "error" && (
         <div className="flex flex-1 flex-col justify-center">
@@ -263,6 +315,18 @@ export function RateChange({
       )}
       {tone.sign}
       {Math.abs(rate).toFixed(2)}%
+    </p>
+  );
+}
+
+function RankChange({ value }: { value: number | null }) {
+  if (value === null) return <p className="text-sm text-muted">{EMPTY}</p>;
+  if (value === 0) return <p className="text-sm text-muted" data-rank-change="0">−</p>;
+  const up = value > 0;
+  return (
+    <p className={`text-sm font-semibold ${up ? "text-gain" : "text-loss"}`} data-rank-change={value}>
+      {up ? "▲" : "▼"}
+      {Math.abs(value)}
     </p>
   );
 }

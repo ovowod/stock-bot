@@ -7,9 +7,11 @@ import pytest
 from stock_bot.app import create_app
 from tests.fake_kiwoom import (
     FAKE_ENV,
+    KA00198_ROW,
     KA10027_ROW,
     KA10030_ROW,
     KA10032_ROW,
+    USA01980_REPLY,
     USA20530_ROW,
     USA20540_ROW,
     USA20910_ROW,
@@ -420,3 +422,120 @@ def test_exchange_applies_to_gainers_and_volume(make_client):
 
     assert response.json()["exchange"] == "kosdaq"
     assert body_of(fake.calls("ka10030")[0])["mrkt_tp"] == "101"
+
+
+def test_domestic_popular_calls_ka00198_with_the_period_code(make_client):
+    fake = ranking_fake("ka00198", {"item_inq_rank": [KA00198_ROW]})
+    response = make_client(fake).get("/api/environments/domestic_paper/rankings/popular")
+
+    assert response.status_code == 200
+    request = fake.calls("ka00198")[0]
+    assert request.url.path == "/api/dostk/stkinfo"
+    assert body_of(request) == {"qry_tp": "3"}
+    body = response.json()
+    assert body["period"] == "1h"
+    assert body["base_time"] == "2026-10-05T17:00:00+09:00"
+    assert body["items"] == [
+        {
+            "rank": 3,
+            "code": "043260",
+            "name": "성호전자",
+            "exchange": None,
+            "price": 31400,
+            "direction": "up",
+            "change_rate": 10.18,
+            "rank_change": 3,
+        }
+    ]
+
+
+def test_us_popular_calls_usa01980_and_applies_signs(make_client):
+    fake = ranking_fake("usa01980", USA01980_REPLY)
+    response = make_client(fake).get("/api/environments/us_paper/rankings/popular?period=today")
+
+    assert response.status_code == 200
+    request = fake.calls("usa01980")[0]
+    assert request.url.path == "/api/us/rkinfo"
+    assert body_of(request) == {"svc_type": "B284"}
+    body = response.json()
+    assert body["period"] == "today"
+    assert body["base_time"] == "2026-10-05T17:00:00+09:00"
+    assert body["items"] == [
+        {
+            "rank": 4,
+            "code": "NVDA",
+            "name": "엔비디아",
+            "exchange": "NASDAQ",
+            "price": 233.95,
+            "direction": "down",
+            "change_rate": -0.62,
+            "rank_change": -2,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("period", "domestic", "us"),
+    [
+        ("30s", "5", "B286"),
+        ("1m", "1", "B281"),
+        ("10m", "2", "B282"),
+        ("1h", "3", "B283"),
+        ("today", "4", "B284"),
+    ],
+)
+def test_period_is_mapped_to_the_kiwoom_code(make_client, period, domestic, us):
+    kr = ranking_fake("ka00198", {"item_inq_rank": []})
+    make_client(kr).get(f"/api/environments/domestic_paper/rankings/popular?period={period}")
+    usa = ranking_fake("usa01980", {**USA01980_REPLY, "result_list": []})
+    make_client(usa).get(f"/api/environments/us_paper/rankings/popular?period={period}")
+
+    assert body_of(kr.calls("ka00198")[0]) == {"qry_tp": domestic}
+    assert body_of(usa.calls("usa01980")[0]) == {"svc_type": us}
+
+
+def test_invalid_period_is_rejected_without_calling_kiwoom(make_client):
+    response = make_client().get("/api/environments/domestic_paper/rankings/popular?period=2h")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["kind"] == "bad_request"
+
+
+@pytest.mark.parametrize(
+    ("change", "sign", "expected"),
+    [("+3", "+", 3), ("-2", "-", -2), ("0", "", 0), ("", "", 0), ("2", "?", None)],
+)
+def test_domestic_rank_change_follows_the_sign(make_client, change, sign, expected):
+    row = {**KA00198_ROW, "rank_chg": change, "rank_chg_sign": sign}
+    fake = ranking_fake("ka00198", {"item_inq_rank": [row]})
+    item = (
+        make_client(fake)
+        .get("/api/environments/domestic_paper/rankings/popular")
+        .json()["items"][0]
+    )
+
+    assert item["rank_change"] == expected
+
+
+def test_domestic_popular_without_items_has_no_base_time(make_client):
+    fake = ranking_fake("ka00198", {"item_inq_rank": []})
+    body = make_client(fake).get("/api/environments/domestic_paper/rankings/popular").json()
+
+    assert body["items"] == []
+    assert body["base_time"] is None
+
+
+def test_us_popular_unchanged_rank_and_flat_rate(make_client):
+    row = {
+        **USA01980_REPLY["result_list"][0],
+        "sign": "",
+        "chg_val": "00",
+        "sign_for_gjga": "",
+        "diff_rate_for_gjga": "0.0000",
+    }
+    fake = ranking_fake("usa01980", {**USA01980_REPLY, "result_list": [row]})
+    item = make_client(fake).get("/api/environments/us_paper/rankings/popular").json()["items"][0]
+
+    assert item["rank_change"] == 0
+    assert item["direction"] == "flat"
+    assert item["change_rate"] == 0

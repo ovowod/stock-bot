@@ -323,6 +323,42 @@ USA20530_ROW = {
 }
 
 
+KA00198_ROW = {
+    "stk_nm": "성호전자",
+    "bigd_rank": "3",
+    "rank_chg": "+3",
+    "rank_chg_sign": "+",
+    "past_curr_prc": "+31400",
+    "base_comp_sign": "2",
+    "base_comp_chgr": "+10.18",
+    "prev_base_sign": "3",
+    "prev_base_chgr": "0.00",
+    "dt": "20261005",
+    "tm": "170000",
+    "stk_cd": "043260",
+}
+
+USA01980_REPLY = {
+    "base_date": "20261005",
+    "base_time": "170000",
+    "result_list": [
+        {
+            "rank": "04",
+            "stk_cd": "NVDA",
+            "stk_nm": "엔비디아",
+            "sign": "-",
+            "chg_val": "02",
+            "curr_pric": "233.9500",
+            "sign_for_gjga": "-",
+            "diff_rate_for_gjga": "0.6200",
+            "sign_for_prev": "",
+            "diff_rate_for_prev": "0.0000",
+            "stex_tp": "ND",
+        }
+    ],
+}
+
+
 def ranking_fake(api_id: str, *pages: Reply) -> FakeKiwoom:
     return FakeKiwoom().reply(api_id, *pages)
 
