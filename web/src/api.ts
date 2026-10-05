@@ -175,6 +175,19 @@ export function fetchQuote(
   return getJson<Quote>(`/api/environments/${environment}/quote?${params}`, signal);
 }
 
+/** 한 종목의 보유수량과 매도 가능 수량. 보유하지 않으면 held가 false이고 두 수량은 0이다. */
+export interface Holding {
+  code: string;
+  held: boolean;
+  quantity: number;
+  sellable_quantity: number;
+  fetched_at: string;
+}
+
+export function fetchHolding(environment: EnvironmentValue, code: string, signal: AbortSignal): Promise<Holding> {
+  return getJson<Holding>(`/api/environments/${environment}/holdings/${encodeURIComponent(code)}`, signal);
+}
+
 export interface OrderRequest {
   order_key: string;
   side: "buy" | "sell";

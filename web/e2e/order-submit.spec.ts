@@ -93,6 +93,10 @@ const confirmation = (page: Page) => page.getByRole("region", { name: "최종 �
 
 test("국내 모의에서 최종 확인을 거쳐 지정가 매수 주문을 보내고, 접수 알림을 본다", async ({ page }) => {
   const orders = await mockApi(page);
+  const holdingRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/holdings/")) holdingRequests.push(request.url());
+  });
   const dialog = await openPanel(page);
   await dialog.getByLabel("수량 (주)").fill("2");
   await dialog.getByRole("button", { name: "매수" }).click();
@@ -113,6 +117,8 @@ test("국내 모의에서 최종 확인을 거쳐 지정가 매수 주문을 보
   }
   expect(orders).toEqual([]);
 
+  // 매수는 최종 확인에서 잔고를 다시 조회하지 않는다.
+  expect(holdingRequests).toEqual([]);
   await confirm.getByRole("button", { name: "주문하기" }).click();
   const toast = page.getByRole("status").filter({ hasText: "매수 주문이 접수되었습니다" });
   await expect(toast).toContainText("주문번호 00024");

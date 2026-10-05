@@ -1,7 +1,15 @@
 import { CircleAlert, Info, ShieldAlert, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ApiError, fetchQuote, ORDER_RESULT_UNKNOWN, placeOrder, type EnvironmentValue } from "../../api";
+import {
+  ApiError,
+  fetchHolding,
+  fetchQuote,
+  ORDER_RESULT_UNKNOWN,
+  placeOrder,
+  type EnvironmentValue,
+  type Holding,
+} from "../../api";
 import { findEnvironment, type EnvironmentOption } from "../../environments";
 import { formatCount, formatForeign, formatKrw } from "../../format";
 import { useToast } from "../toast/Toasts";
@@ -171,6 +179,45 @@ function usePriceWithQuote(env: EnvironmentOption, target: OrderTarget) {
 
 type Step = "input" | "confirm" | "sending";
 
+type HoldingCheck = { status: "loading" } | { status: "ready"; holding: Holding } | { status: "error"; message: string };
+
+/**
+ * 매도 최종 확인이 열려 있는 동안 그 종목의 잔고를 다시 조회한다. retry를 부르면 다시 조회한다.
+ * 확인을 닫거나 패널을 닫으면 진행 중인 조회를 취소하고 그 응답은 반영하지 않는다.
+ */
+function useHoldingCheck(env: EnvironmentOption, code: string, active: boolean, onLoaded: (holding: Holding) => void) {
+  const [check, setCheck] = useState<HoldingCheck>({ status: "loading" });
+  const [attempt, setAttempt] = useState(0);
+  const loaded = useRef(onLoaded);
+  useEffect(() => {
+    loaded.current = onLoaded;
+  });
+
+  useEffect(() => {
+    if (!active) return;
+    const controller = new AbortController();
+    setCheck({ status: "loading" });
+    fetchHolding(env.value, code, controller.signal).then(
+      (holding) => {
+        if (controller.signal.aborted) return;
+        loaded.current(holding);
+        setCheck({ status: "ready", holding });
+      },
+      (error) => {
+        if (controller.signal.aborted) return;
+        setCheck({ status: "error", message: error instanceof ApiError ? error.message : "알 수 없는 오류입니다." });
+      },
+    );
+    return () => {
+      controller.abort();
+      // 확인을 다시 열 때 이전 결과로 주문하기가 잠깐이라도 풀리지 않게 한다.
+      setCheck({ status: "loading" });
+    };
+  }, [env.value, code, active, attempt]);
+
+  return { check, retry: () => setAttempt((value) => value + 1) };
+}
+
 function OrderForm({
   env,
   target,
@@ -186,6 +233,11 @@ function OrderForm({
   const showToast = useToast();
   const sell = target.sell;
   const side = sell ? "매도" : "매수";
+  // 매도 패널이 보여주는 수량. 최종 확인에서 다시 조회하면 최신 값으로 바뀐다.
+  const [held, setHeld] = useState(() => ({
+    quantity: sell?.quantity ?? null,
+    sellable: sell?.sellableQuantity ?? null,
+  }));
   const [type, setType] = useState<OrderType>("limit");
   // 매수는 1주, 매도는 매도 가능 수량(전량)으로 시작한다. 매도 가능 수량이 없거나 모르면 비워 둔다.
   const [quantityText, setQuantityText] = useState(() =>
@@ -197,8 +249,13 @@ function OrderForm({
   const [step, setStep] = useState<Step>("input");
   const orderKey = useRef("");
   const quantity = parseQuantity(quantityText);
-  const quantityError = quantity.error ?? (sell ? sellQuantityError(quantity.quantity, sell.sellableQuantity) : null);
-  const nothingToSell = sell?.sellableQuantity === 0;
+  const quantityError = quantity.error ?? (sell ? sellQuantityError(quantity.quantity, held.sellable) : null);
+  const nothingToSell = sell !== undefined && held.sellable === 0;
+  const previousSellable = useRef(held.sellable);
+  const { check, retry } = useHoldingCheck(env, target.code, sell !== undefined && step !== "input", (holding) => {
+    previousSellable.current = held.sellable;
+    setHeld({ quantity: holding.quantity, sellable: holding.sellable_quantity });
+  });
   const price = parsePrice(priceText, market);
   const unit = market === "domestic" ? "원" : "USD";
   const formatMoney = (value: number) => (market === "domestic" ? formatKrw(value) : formatForeign(value, "USD", 4));
@@ -221,6 +278,7 @@ function OrderForm({
 
   const submit = async () => {
     if (step !== "confirm" || quantity.text === null) return;
+    if (sell && !(check.status === "ready" && check.holding.held)) return;
     setStep("sending");
     onSendingChange(true);
     const key = orderKey.current;
@@ -262,6 +320,13 @@ function OrderForm({
   };
 
   if (step !== "input") {
+    // 매도는 다시 조회한 잔고로 충분하다고 확인됐을 때만 주문할 수 있다.
+    const holding = check.status === "ready" ? check.holding : null;
+    const shortBy =
+      holding && holding.held && quantity.quantity !== null && quantity.quantity > holding.sellable_quantity
+        ? holding.sellable_quantity
+        : null;
+    const canSubmit = !sell || (holding !== null && holding.held && shortBy === null);
     const rows: [string, string][] = [
       ["투자 환경", env.label],
       ["주문", side],
@@ -272,6 +337,12 @@ function OrderForm({
       ["가격", type === "limit" && price.price !== null ? formatMoney(price.price) : "시장가"],
       ["수량", `${quantity.quantity?.toLocaleString("ko-KR")}주`],
       ...(amount ? ([["예상 주문금액", amount]] as [string, string][]) : []),
+      ...(holding
+        ? ([
+            ["보유 수량", formatCount(holding.quantity)],
+            ["매도 가능 수량", formatCount(holding.sellable_quantity)],
+          ] as [string, string][])
+        : []),
     ];
     return (
       <section aria-label="최종 확인" className="flex flex-1 flex-col gap-4">
@@ -289,6 +360,39 @@ function OrderForm({
             </div>
           ))}
         </dl>
+        {sell && check.status === "loading" && <p className="text-sm text-sub">잔고를 확인하는 중입니다.</p>}
+        {sell && check.status === "error" && (
+          <div className="space-y-2">
+            <Callout tone="real" icon={CircleAlert} title="잔고를 확인하지 못했습니다">
+              {check.message}
+            </Callout>
+            <button
+              type="button"
+              onClick={retry}
+              className="w-full rounded-2xl bg-canvas py-3 text-sm font-bold text-sub hover:text-ink"
+            >
+              다시 확인
+            </button>
+          </div>
+        )}
+        {holding && !holding.held && (
+          <Callout tone="real" icon={CircleAlert} title="보유하고 있지 않은 종목입니다">
+            잔고에 이 종목이 없어 매도할 수 없습니다.
+          </Callout>
+        )}
+        {shortBy !== null && (
+          <Callout
+            tone="real"
+            icon={CircleAlert}
+            title={
+              previousSellable.current === null
+                ? `매도 가능 수량은 ${formatCount(shortBy)}입니다`
+                : `매도 가능 수량이 ${formatCount(shortBy)}로 줄었습니다`
+            }
+          >
+            취소하고 수량을 고친 뒤 다시 주문하세요.
+          </Callout>
+        )}
         <p className="text-xs text-muted">주문하기를 누르면 이 내용으로 {side} 주문을 보냅니다.</p>
         <div className="sticky bottom-0 mt-auto grid grid-cols-2 gap-2 bg-surface pt-2">
           <button
@@ -301,7 +405,7 @@ function OrderForm({
           </button>
           <button
             type="button"
-            disabled={step === "sending"}
+            disabled={step === "sending" || !canSubmit}
             onClick={() => void submit()}
             className={`rounded-2xl py-3.5 text-[15px] font-bold text-white disabled:opacity-60 ${sell ? "bg-loss" : "bg-gain"}`}
           >
@@ -325,8 +429,8 @@ function OrderForm({
         <dl className="grid grid-cols-2 gap-2">
           {(
             [
-              ["보유 수량", sell.quantity],
-              ["매도 가능 수량", sell.sellableQuantity],
+              ["보유 수량", held.quantity],
+              ["매도 가능 수량", held.sellable],
             ] as [string, number | null][]
           ).map(([term, value]) => (
             <div key={term} className="rounded-2xl bg-canvas px-4 py-3">

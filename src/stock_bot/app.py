@@ -5,7 +5,7 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +112,13 @@ def create_app(
         spec = parse_environment(environment)
         environment_var.set(spec.environment.value)
         return await accounts.fetch(spec)
+
+    @app.get("/api/environments/{environment}/holdings/{code}")
+    async def get_holding(environment: str, code: str) -> dict[str, Any]:
+        spec = parse_environment(environment)
+        environment_var.set(spec.environment.value)
+        holding = await accounts.holding(spec, code)
+        return {**holding, "fetched_at": datetime.now(UTC).isoformat(timespec="seconds")}
 
     @app.get("/api/environments/{environment}/rankings/{kind}")
     async def get_ranking(

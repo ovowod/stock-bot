@@ -75,6 +75,13 @@ const usAccount = (environment: string, holdings: unknown[]) => ({
 const QUOTES: Record<string, number> = { "005930": 84_500, AAPL: 275.24 };
 
 type OrderReply = { status?: number; body: unknown };
+type HoldingReply = { status?: number; body: unknown; delayMs?: number };
+
+/** 최종 확인의 잔고 재조회 응답. 기본은 계좌 확인과 같은 수량이다. */
+const heldReply = (code: string, quantity: number, sellable: number): HoldingReply => ({
+  body: { code, held: true, quantity, sellable_quantity: sellable, fetched_at: "2026-10-05T01:00:00+00:00" },
+});
+const defaultHolding = (code: string) => (code === "AAPL" ? heldReply(code, 395, 395) : heldReply(code, 10, 7));
 type OrderRequest = { environment: string; body: Record<string, unknown> };
 
 const accepted: (request: OrderRequest) => OrderReply = (request) => ({
@@ -87,9 +94,16 @@ async function mockApi(
     holdings = [holding()],
     usHoldings = [usHolding()],
     order = accepted,
-  }: { holdings?: unknown[]; usHoldings?: unknown[]; order?: (r: OrderRequest) => OrderReply } = {},
+    holdingReply = defaultHolding,
+  }: {
+    holdings?: unknown[];
+    usHoldings?: unknown[];
+    order?: (r: OrderRequest) => OrderReply;
+    holdingReply?: (code: string) => HoldingReply;
+  } = {},
 ) {
   const orders: OrderRequest[] = [];
+  const holdingRequests: string[] = [];
   const accountRequests: string[] = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -102,6 +116,12 @@ async function mockApi(
     } else if (resource === "quote") {
       const code = url.searchParams.get("code") ?? "";
       await route.fulfill({ json: { code, price: QUOTES[code] ?? 100, fetched_at: "2026-10-05T01:00:00+00:00" } });
+    } else if (resource === "holdings") {
+      const code = url.pathname.split("/")[5];
+      holdingRequests.push(code);
+      const reply = holdingReply(code);
+      if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
+      await route.fulfill({ status: reply.status ?? 200, json: reply.body }).catch(() => {});
     } else if (resource === "orders") {
       const request = { environment, body: route.request().postDataJSON() };
       orders.push(request);
@@ -111,7 +131,7 @@ async function mockApi(
       await route.fulfill({ status: 503, json: { error: { kind: "config_error", message: "test" } } });
     }
   });
-  return { orders, accountRequests };
+  return { orders, accountRequests, holdingRequests };
 }
 
 /** 계좌 확인에서 보유종목의 매도 버튼을 누른다. 좁은 화면에서는 줄을 펼쳐야 버튼이 보인다. */
@@ -133,8 +153,8 @@ test("국내 모의 보유종목에서 매도 패널을 열어 매도 주문을 
   const dialog = await openSell(page);
 
   await expect(dialog.getByText("국내 모의 매도")).toBeVisible();
-  await expect(dialog.getByLabel("보유 수량")).toHaveText("10주");
-  await expect(dialog.getByLabel("매도 가능 수량")).toHaveText("7주");
+  await expect(dialog.getByLabel("보유 수량", { exact: true })).toHaveText("10주");
+  await expect(dialog.getByLabel("매도 가능 수량", { exact: true })).toHaveText("7주");
   await expect(dialog.getByLabel("수량 (주)")).toHaveValue("7");
   await expect(dialog.getByLabel(/가격/)).toHaveValue("84,500");
   await expect(dialog.getByRole("button", { name: "매수" })).toHaveCount(0);
@@ -176,8 +196,8 @@ test("매도 가능 수량을 모르면 확인 불가로 보이고 수량을 입
   await mockApi(page, { holdings: [holding({ quantity: null, tradable_quantity: null })] });
   const dialog = await openSell(page);
 
-  await expect(dialog.getByLabel("보유 수량")).toHaveText("확인 불가");
-  await expect(dialog.getByLabel("매도 가능 수량")).toHaveText("확인 불가");
+  await expect(dialog.getByLabel("보유 수량", { exact: true })).toHaveText("확인 불가");
+  await expect(dialog.getByLabel("매도 가능 수량", { exact: true })).toHaveText("확인 불가");
   await expect(dialog.getByLabel("수량 (주)")).toHaveValue("");
   await dialog.getByLabel("수량 (주)").fill("100");
   await dialog.getByRole("button", { name: "매도", exact: true }).click();
@@ -204,12 +224,13 @@ for (const [kind, message] of [
 }
 
 test("실전투자에서는 매도 버튼과 패널은 보이지만 주문할 수 없다", async ({ page }) => {
-  const { orders } = await mockApi(page);
+  const { orders, holdingRequests } = await mockApi(page);
   const dialog = await openSell(page, "국내 실전");
 
   await expect(dialog.getByText("실전투자에서는 주문할 수 없습니다.")).toBeVisible();
   await expect(dialog.getByRole("button", { name: "매도", exact: true })).toHaveCount(0);
   expect(orders).toEqual([]);
+  expect(holdingRequests).toEqual([]);
 });
 
 test("매도 버튼과 패널이 가로 스크롤을 만들지 않는다", async ({ page }) => {
@@ -240,7 +261,7 @@ test("미국 모의 보유종목을 거래소·USD 금액과 함께 매도하고
 
   await expect(dialog.getByText("미국 모의 매도")).toBeVisible();
   await expect(dialog.getByText("AAPL · NASDAQ")).toBeVisible();
-  await expect(dialog.getByLabel("매도 가능 수량")).toHaveText("395주");
+  await expect(dialog.getByLabel("매도 가능 수량", { exact: true })).toHaveText("395주");
   await expect(dialog.getByLabel(/가격/)).toHaveValue("275.24");
   await dialog.getByLabel("수량 (주)").fill("2");
   await dialog.getByRole("button", { name: "매도", exact: true }).click();
@@ -279,7 +300,128 @@ test("미국 매도도 주문할 수 없는 거래소의 종목은 막고, 매�
   await otc.getByRole("button", { name: "닫기", exact: true }).click();
 
   const unknown = await openSell(page, "미국 모의", "애플");
-  await expect(unknown.getByLabel("매도 가능 수량")).toHaveText("확인 불가");
+  await expect(unknown.getByLabel("매도 가능 수량", { exact: true })).toHaveText("확인 불가");
   await expect(unknown.getByLabel("수량 (주)")).toHaveValue("");
   expect(orders).toEqual([]);
+});
+
+const notHeld = (code: string): HoldingReply => ({
+  body: { code, held: false, quantity: 0, sellable_quantity: 0, fetched_at: "2026-10-05T01:00:00+00:00" },
+});
+const failed: HoldingReply = { status: 502, body: { error: { kind: "kiwoom_error", message: "키움 오류 [20] 조회 실패" } } };
+const orderButton = (page: Page) => confirmation(page).getByRole("button", { name: "주문하기" });
+
+test("최종 확인을 열면 잔고를 다시 조회하고, 확인되기 전에는 주문하기가 막힌다", async ({ page }) => {
+  const { holdingRequests } = await mockApi(page, {
+    holdingReply: (code) => ({ ...heldReply(code, 12, 9), delayMs: 500 }),
+  });
+  const dialog = await openSell(page);
+  await dialog.getByRole("button", { name: "매도", exact: true }).click();
+
+  const confirm = confirmation(page);
+  await expect(confirm.getByText("잔고를 확인하는 중입니다.")).toBeVisible();
+  await expect(orderButton(page)).toBeDisabled();
+  await expect(confirm.locator('dd[data-term="보유 수량"]')).toHaveText("12주");
+  await expect(confirm.locator('dd[data-term="매도 가능 수량"]')).toHaveText("9주");
+  await expect(orderButton(page)).toBeEnabled();
+  expect(holdingRequests).toEqual(["005930"]);
+
+  // 패널의 표시도 최신 값이 되고, 입력한 수량은 그대로다.
+  await confirm.getByRole("button", { name: "취소" }).click();
+  await expect(dialog.getByLabel("보유 수량", { exact: true })).toHaveText("12주");
+  await expect(dialog.getByLabel("매도 가능 수량", { exact: true })).toHaveText("9주");
+  await expect(dialog.getByLabel("수량 (주)")).toHaveValue("7");
+});
+
+test("다시 조회한 매도 가능 수량이 줄었으면 안내와 함께 주문하기가 막히고, 취소하면 최신 수량으로 고친다", async ({
+  page,
+}) => {
+  const { orders } = await mockApi(page, { holdingReply: (code) => heldReply(code, 10, 4) });
+  const dialog = await openSell(page);
+  await dialog.getByRole("button", { name: "매도", exact: true }).click();
+
+  await expect(confirmation(page).getByText("매도 가능 수량이 4주로 줄었습니다")).toBeVisible();
+  await expect(orderButton(page)).toBeDisabled();
+  await confirmation(page).getByRole("button", { name: "취소" }).click();
+
+  await expect(dialog.getByLabel("수량 (주)")).toHaveValue("7");
+  await expect(dialog.getByLabel("매도 가능 수량", { exact: true })).toHaveText("4주");
+  await expect(dialog.getByText("매도 가능 수량(4주)을 넘을 수 없습니다.")).toBeVisible();
+  expect(orders).toEqual([]);
+});
+
+test("다시 조회했을 때 보유하지 않은 종목이면 주문하기가 막힌다", async ({ page }) => {
+  const { orders } = await mockApi(page, { holdingReply: notHeld });
+  const dialog = await openSell(page);
+  await dialog.getByRole("button", { name: "매도", exact: true }).click();
+
+  await expect(confirmation(page).getByText("보유하고 있지 않은 종목입니다")).toBeVisible();
+  await expect(orderButton(page)).toBeDisabled();
+  expect(orders).toEqual([]);
+});
+
+for (const [title, retry, expectation] of [
+  ["충분하면 주문하기가 풀린다", (code: string) => heldReply(code, 10, 7), null],
+  ["줄었으면 안내와 함께 막힌다", (code: string) => heldReply(code, 10, 2), "매도 가능 수량이 2주로 줄었습니다"],
+  ["보유하지 않았으면 안내와 함께 막힌다", notHeld, "보유하고 있지 않은 종목입니다"],
+] as const) {
+  test(`잔고 조회가 실패하면 다시 확인할 수 있고, 다시 받은 결과가 ${title}`, async ({ page }) => {
+    let calls = 0;
+    await mockApi(page, { holdingReply: (code) => (calls++ === 0 ? failed : retry(code)) });
+    const dialog = await openSell(page);
+    await dialog.getByRole("button", { name: "매도", exact: true }).click();
+
+    const confirm = confirmation(page);
+    await expect(confirm.getByText("잔고를 확인하지 못했습니다")).toBeVisible();
+    await expect(confirm).toContainText("키움 오류 [20] 조회 실패");
+    await expect(orderButton(page)).toBeDisabled();
+    await confirm.getByRole("button", { name: "다시 확인" }).click();
+
+    if (expectation === null) {
+      await expect(orderButton(page)).toBeEnabled();
+      await expect(confirm.getByText("잔고를 확인하지 못했습니다")).toHaveCount(0);
+    } else {
+      await expect(confirm.getByText(expectation)).toBeVisible();
+      await expect(orderButton(page)).toBeDisabled();
+    }
+  });
+}
+
+test("최종 확인을 닫으면 늦게 온 잔고 응답은 반영하지 않는다", async ({ page }) => {
+  await mockApi(page, { holdingReply: (code) => ({ ...heldReply(code, 10, 1), delayMs: 600 }) });
+  const dialog = await openSell(page);
+  await dialog.getByRole("button", { name: "매도", exact: true }).click();
+  await confirmation(page).getByRole("button", { name: "취소" }).click();
+
+  await page.waitForTimeout(900);
+  await expect(dialog.getByLabel("매도 가능 수량", { exact: true })).toHaveText("7주");
+  await expect(dialog.getByRole("button", { name: "매도", exact: true })).toBeEnabled();
+});
+
+test("미국 매도도 최종 확인에서 티커로 잔고를 다시 조회한다", async ({ page }) => {
+  const { holdingRequests } = await mockApi(page, { holdingReply: (code) => heldReply(code, 395, 1) });
+  const dialog = await openSell(page, "미국 모의", "애플");
+  await dialog.getByLabel("수량 (주)").fill("2");
+  await dialog.getByRole("button", { name: "매도", exact: true }).click();
+
+  await expect(confirmation(page).getByText("매도 가능 수량이 1주로 줄었습니다")).toBeVisible();
+  await expect(orderButton(page)).toBeDisabled();
+  expect(holdingRequests).toEqual(["AAPL"]);
+});
+
+test("최종 확인을 다시 열면 이전 확인 결과가 아니라 새 조회 결과로 판정한다", async ({ page }) => {
+  let calls = 0;
+  const { holdingRequests } = await mockApi(page, {
+    holdingReply: (code) => (calls++ === 0 ? heldReply(code, 10, 7) : { ...heldReply(code, 10, 7), delayMs: 800 }),
+  });
+  const dialog = await openSell(page);
+  await dialog.getByRole("button", { name: "매도", exact: true }).click();
+  await expect(orderButton(page)).toBeEnabled();
+  await confirmation(page).getByRole("button", { name: "취소" }).click();
+
+  await dialog.getByRole("button", { name: "매도", exact: true }).click();
+  await expect(orderButton(page)).toBeDisabled();
+  await expect(confirmation(page).getByText("잔고를 확인하는 중입니다.")).toBeVisible();
+  await expect(orderButton(page)).toBeEnabled();
+  expect(holdingRequests).toHaveLength(2);
 });
