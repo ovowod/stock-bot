@@ -40,21 +40,44 @@ export function buyUnavailableReason(market: Market, isReal: boolean, exchange: 
   return `${rule} ${actual}`;
 }
 
-export function parseQuantity(value: string): { quantity: number | null; error: string | null } {
-  if (value.trim() === "") return { quantity: null, error: null };
-  const quantity = /^\d+$/.test(value.trim()) ? Number(value) : 0;
-  return quantity >= 1 ? { quantity, error: null } : { quantity: null, error: "수량은 1주 이상의 정수로 입력하세요." };
+// 키움 문서의 ord_qty·ord_uv 길이(12)를 따른다. 이 길이의 값은 숫자로 바꿔도 반올림되지 않는다.
+const MAX_LENGTH = 12;
+
+/** 수량 입력값을 검사한다. text는 주문에 그대로 보낼 문자열이다. */
+export function parseQuantity(value: string): { quantity: number | null; text: string | null; error: string | null } {
+  const text = value.trim();
+  if (text === "") return { quantity: null, text: null, error: null };
+  if (/^\d+$/.test(text) && text.length <= MAX_LENGTH && Number(text) >= 1) {
+    return { quantity: Number(text), text, error: null };
+  }
+  return { quantity: null, text: null, error: "수량은 1주 이상, 12자리 이하의 정수로 입력하세요." };
 }
 
-export function parsePrice(value: string, market: Market): { price: number | null; error: string | null } {
-  if (value.trim() === "") return { price: null, error: null };
+/** 가격 입력값(쉼표 제외)을 검사한다. text는 주문에 그대로 보낼 문자열이다. */
+export function parsePrice(
+  value: string,
+  market: Market,
+): { price: number | null; text: string | null; error: string | null } {
+  const text = value.trim();
+  if (text === "") return { price: null, text: null, error: null };
   const pattern = market === "domestic" ? /^\d+$/ : /^\d+(\.\d+)?$/;
-  const price = pattern.test(value.trim()) ? Number(value) : 0;
-  if (price > 0) return { price, error: null };
+  if (pattern.test(text) && text.length <= MAX_LENGTH && Number(text) > 0) {
+    return { price: Number(text), text, error: null };
+  }
   return {
     price: null,
-    error: market === "domestic" ? "가격은 1원 이상의 정수로 입력하세요." : "가격은 0보다 큰 숫자로 입력하세요.",
+    text: null,
+    error:
+      market === "domestic"
+        ? "가격은 1원 이상, 12자리 이하의 정수로 입력하세요."
+        : "가격은 0보다 크고 12글자 이하인 숫자로 입력하세요.",
   };
+}
+
+/** 최종 확인마다 새로 만드는 주문 키. 보안 연결이 아니어도 쓸 수 있는 getRandomValues로 만든다. */
+export function newOrderKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** 가격 입력값의 정수 부분에 천 단위 쉼표를 넣는다. 숫자 형식이 아니면 그대로 둔다. */

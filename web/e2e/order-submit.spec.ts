@@ -1,0 +1,209 @@
+import { expect, test, type Page } from "@playwright/test";
+
+// 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 주문 요청도 가짜 서버가 받으며 키움 서버는 호출되지 않는다.
+
+const RANKING_ITEM = {
+  rank: 1,
+  code: "000660",
+  name: "SK하이닉스",
+  exchange: null,
+  price: 184_100,
+  direction: "up",
+  change_rate: 1.5,
+  trading_value: 1_000_000_000,
+  previous_rank: 1,
+  volume: 1000,
+  rank_change: 0,
+};
+
+type Reply = { status?: number; body?: unknown; delayMs?: number; headers?: Record<string, string> };
+type OrderRequest = { environment: string; body: Record<string, unknown> };
+
+const accepted = (orderNo: string): ((request: OrderRequest) => Reply) => (request) => ({
+  body: { order_key: request.body.order_key, order_no: orderNo, accepted_at: "2026-10-05T01:00:00+00:00" },
+  headers: { "X-Request-ID": "req-ok-1" },
+});
+
+async function mockApi(page: Page, order: (request: OrderRequest) => Reply = accepted("00024")) {
+  const orders: OrderRequest[] = [];
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const [, , , environment, resource, kind] = url.pathname.split("/");
+    const market = environment?.startsWith("us") ? "us" : "domestic";
+    if (resource === "orders") {
+      const request = { environment, body: route.request().postDataJSON() };
+      orders.push(request);
+      const reply = order(request);
+      if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
+      await route
+        .fulfill({ status: reply.status ?? 200, json: reply.body, headers: reply.headers })
+        .catch(() => {});
+    } else if (resource === "quote") {
+      await route.fulfill({ json: { code: "000660", price: 190_000, fetched_at: "2026-10-05T01:00:00+00:00" } });
+    } else if (resource === "rankings") {
+      await route.fulfill({
+        json: {
+          environment,
+          market,
+          kind,
+          exchange: "all",
+          fetched_at: "2026-10-05T01:00:00+00:00",
+          items: market === "domestic" ? [RANKING_ITEM] : [],
+        },
+      });
+    } else {
+      await route.fulfill({ status: 503, json: { error: { kind: "config_error", message: "test" } } });
+    }
+  });
+  return orders;
+}
+
+async function openPanel(page: Page, environment = "국내 모의") {
+  await page.goto("/");
+  await page.getByRole("radio", { name: environment }).filter({ visible: true }).click();
+  const menu = page.getByRole("button", { name: "메뉴 열기" });
+  if (await menu.isVisible()) await menu.click();
+  await page.getByRole("button", { name: "순위" }).filter({ visible: true }).click();
+  await page.getByRole("region", { name: "거래대금 상위" }).getByRole("button", { name: /SK하이닉스/ }).click();
+  const dialog = page.getByRole("dialog", { name: "SK하이닉스 주문" });
+  await expect(dialog.getByLabel("가격 (원)")).toHaveValue("190,000");
+  return dialog;
+}
+
+const confirmation = (page: Page) => page.getByRole("region", { name: "최종 확인" });
+
+test("국내 모의에서 최종 확인을 거쳐 지정가 매수 주문을 보내고, 접수 알림을 본다", async ({ page }) => {
+  const orders = await mockApi(page);
+  const dialog = await openPanel(page);
+  await dialog.getByLabel("수량 (주)").fill("2");
+  await dialog.getByRole("button", { name: "매수" }).click();
+
+  const confirm = confirmation(page);
+  await expect(confirm.getByText("모의투자 주문")).toBeVisible();
+  for (const [term, value] of [
+    ["투자 환경", "국내 모의"],
+    ["종목", "SK하이닉스"],
+    ["종목코드", "000660"],
+    ["거래소", "KRX"],
+    ["주문 유형", "지정가"],
+    ["가격", "190,000원"],
+    ["수량", "2주"],
+    ["예상 주문금액", "380,000원"],
+  ]) {
+    await expect(confirm.locator(`dd[data-term="${term}"]`)).toHaveText(value);
+  }
+  expect(orders).toEqual([]);
+
+  await confirm.getByRole("button", { name: "주문하기" }).click();
+  const toast = page.getByRole("status").filter({ hasText: "매수 주문이 접수되었습니다" });
+  await expect(toast).toContainText("주문번호 00024");
+  await expect(dialog).toHaveCount(0);
+
+  expect(orders).toHaveLength(1);
+  const { order_key: orderKey, ...rest } = orders[0].body;
+  expect(rest).toEqual({ code: "000660", order_type: "limit", quantity: "2", price: "190000" });
+  expect(typeof orderKey).toBe("string");
+  await expect(toast).toContainText(`주문 키 ${orderKey}`);
+  await expect(toast).toContainText("요청 ID req-ok-1");
+  // 성공 알림은 잠시 뒤 저절로 사라진다.
+  await expect(toast).toHaveCount(0, { timeout: 7000 });
+});
+
+test("최종 확인에서 취소하면 입력 값 그대로 돌아간다", async ({ page }) => {
+  const orders = await mockApi(page);
+  const dialog = await openPanel(page);
+  await dialog.getByLabel("수량 (주)").fill("5");
+  await dialog.getByRole("button", { name: "매수" }).click();
+  await confirmation(page).getByRole("button", { name: "취소" }).click();
+
+  await expect(confirmation(page)).toHaveCount(0);
+  await expect(dialog.getByLabel("수량 (주)")).toHaveValue("5");
+  await expect(dialog.getByLabel("가격 (원)")).toHaveValue("190,000");
+  expect(orders).toEqual([]);
+});
+
+test("키움이 거부하면 실패 알림이 남고, 패널은 입력 값과 함께 입력 화면으로 돌아간다", async ({ page }) => {
+  await mockApi(page, () => ({
+    status: 502,
+    body: {
+      error: { kind: "kiwoom_error", message: "키움 오류 [20] 주문가능금액이 부족합니다", request_id: "req-err-1" },
+    },
+  }));
+  const dialog = await openPanel(page);
+  await dialog.getByLabel("수량 (주)").fill("7");
+  await dialog.getByRole("button", { name: "매수" }).click();
+  await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+
+  const alert = page.getByRole("alert").filter({ hasText: "주문하지 못했습니다" });
+  await expect(alert).toContainText("주문가능금액이 부족합니다");
+  await expect(alert).toContainText("요청 ID req-err-1");
+  await expect(alert).toContainText("주문 키");
+  await expect(dialog.getByLabel("수량 (주)")).toHaveValue("7");
+  await expect(confirmation(page)).toHaveCount(0);
+
+  // 실패 알림은 저절로 사라지지 않고, 닫기를 눌러야 사라진다.
+  await page.waitForTimeout(5500);
+  await expect(alert).toBeVisible();
+  await alert.getByRole("button", { name: "알림 닫기" }).click();
+  await expect(alert).toHaveCount(0);
+});
+
+test("알림이 여러 개면 최신 알림이 위에 오고, 최종 확인마다 새 주문 키를 쓴다", async ({ page }) => {
+  let count = 0;
+  const orders = await mockApi(page, () => ({
+    status: 502,
+    body: { error: { kind: "kiwoom_error", message: `거부 ${++count}`, request_id: `req-${count}` } },
+  }));
+  const dialog = await openPanel(page);
+  for (let i = 0; i < 2; i += 1) {
+    await dialog.getByRole("button", { name: "매수" }).click();
+    await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+    await expect(page.getByRole("alert")).toHaveCount(i + 1);
+  }
+  await expect(page.getByRole("alert").first()).toContainText("거부 2");
+  expect(orders[0].body.order_key).not.toEqual(orders[1].body.order_key);
+});
+
+test("주문하기를 누르면 결과가 올 때까지 버튼이 잠겨 여러 번 눌러도 주문은 하나다", async ({ page }) => {
+  const orders = await mockApi(page, (request) => ({ ...accepted("00031")(request), delayMs: 1000 }));
+  const dialog = await openPanel(page);
+  await dialog.getByRole("button", { name: "매수" }).click();
+  const submit = confirmation(page).getByRole("button", { name: /주문/ }).last();
+  await submit.click();
+  await expect(confirmation(page).getByRole("button", { name: "주문 중…" })).toBeDisabled();
+  await submit.click({ force: true });
+  await submit.click({ force: true });
+  await expect(page.getByRole("status").filter({ hasText: "주문번호 00031" })).toBeVisible();
+  expect(orders).toHaveLength(1);
+});
+
+test("입력이 올바르지 않거나 너무 길면 매수 버튼이 눌리지 않는다", async ({ page }) => {
+  await mockApi(page);
+  const dialog = await openPanel(page);
+  await dialog.getByLabel("수량 (주)").fill("1234567890123");
+  await expect(dialog.getByText("수량은 1주 이상, 12자리 이하의 정수로 입력하세요.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "매수" })).toBeDisabled();
+  await dialog.getByLabel("수량 (주)").fill("1");
+  await dialog.getByLabel("가격 (원)").fill("1234567890123");
+  await expect(dialog.getByText("가격은 1원 이상, 12자리 이하의 정수로 입력하세요.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "매수" })).toBeDisabled();
+});
+
+test("실전투자에서는 매수 버튼 대신 안내가 보이고 주문 요청이 나가지 않는다", async ({ page }) => {
+  const orders = await mockApi(page);
+  const dialog = await openPanel(page, "국내 실전");
+  await expect(dialog.getByText("실전투자에서는 주문할 수 없습니다.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "매수" })).toHaveCount(0);
+  await expect(dialog.getByLabel("수량 (주)")).toHaveValue("1");
+  expect(orders).toEqual([]);
+});
+
+test("알림이 떠도 가로 스크롤이 생기지 않는다", async ({ page }) => {
+  await mockApi(page);
+  const dialog = await openPanel(page);
+  await dialog.getByRole("button", { name: "매수" }).click();
+  await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "매수 주문이 접수되었습니다" })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+});

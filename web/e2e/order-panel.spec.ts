@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-// 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 주문 패널은 주문을 전송하지 않으며 키움 서버도 호출되지 않는다.
+// 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 이 파일의 테스트는 주문을 보내지 않으며 키움 서버도 호출되지 않는다.
 
 const rankingItem = (code: string, name: string, exchange: string | null, price: number) => ({
   rank: 1,
@@ -100,7 +100,7 @@ async function selectEnvironment(page: Page, label: string) {
 const panel = (page: Page, name: string) => page.getByRole("dialog", { name: `${name} 주문` });
 const tradingValueCard = (page: Page) => page.getByRole("region", { name: "거래대금 상위" });
 
-test("순위의 종목을 누르면 현재가 조회 결과와 수량 1이 채워진 매수 패널이 열리고, 주문은 보낼 수 없다", async ({ page }) => {
+test("순위의 종목을 누르면 현재가 조회 결과와 수량 1이 채워진 매수 패널이 열린다", async ({ page }) => {
   const { unexpected, quotes } = await mockApi(page, { domestic: [rankingItem("000660", "SK하이닉스", null, 184_100)], us: [] });
   await page.goto("/");
   await selectEnvironment(page, "국내 모의");
@@ -123,8 +123,7 @@ test("순위의 종목을 누르면 현재가 조회 결과와 수량 1이 채�
   await dialog.getByLabel("가격 (원)").fill("1841000");
   await expect(dialog.getByLabel("가격 (원)")).toHaveValue("1,841,000");
   await expect(dialog.getByLabel("예상 주문금액")).toHaveText("5,523,000원");
-  await expect(dialog.getByRole("button", { name: "매수" })).toBeDisabled();
-  await expect(dialog.getByText("주문 전송은 아직 지원하지 않습니다.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "매수" })).toBeEnabled();
 
   await dialog.getByRole("radio", { name: "시장가" }).click();
   await expect(dialog.getByLabel("가격 (원)")).toHaveCount(0);
@@ -214,11 +213,11 @@ test("잘못된 수량과 가격은 이유를 보여준다", async ({ page }) =>
   const dialog = panel(page, "SK하이닉스");
 
   await dialog.getByLabel("수량 (주)").fill("1.5");
-  await expect(dialog.getByText("수량은 1주 이상의 정수로 입력하세요.")).toBeVisible();
+  await expect(dialog.getByText("수량은 1주 이상, 12자리 이하의 정수로 입력하세요.")).toBeVisible();
   await dialog.getByLabel("수량 (주)").fill("0");
-  await expect(dialog.getByText("수량은 1주 이상의 정수로 입력하세요.")).toBeVisible();
+  await expect(dialog.getByText("수량은 1주 이상, 12자리 이하의 정수로 입력하세요.")).toBeVisible();
   await dialog.getByLabel("가격 (원)").fill("1000.5");
-  await expect(dialog.getByText("가격은 1원 이상의 정수로 입력하세요.")).toBeVisible();
+  await expect(dialog.getByText("가격은 1원 이상, 12자리 이하의 정수로 입력하세요.")).toBeVisible();
   await expect(dialog.getByLabel("예상 주문금액")).toHaveText("–");
 });
 
@@ -266,7 +265,7 @@ test("검색 결과에서도 패널이 열리고, 종목 상태 경고와 실전
   await expect(dialog.getByText("005930 · 코스피")).toBeVisible();
   // 검색 결과에는 가격이 없지만, 패널을 열 때 조회한 현재가로 채운다.
   await expect(dialog.getByLabel("가격 (원)")).toHaveValue("61,300");
-  await expect(dialog.getByRole("button", { name: "매수" })).toBeDisabled();
+  await expect(dialog.getByText("실전투자에서는 주문할 수 없습니다.")).toBeVisible();
 });
 
 test("바깥 영역을 누르면 패널이 닫히고, 패널이 열려도 가로 스크롤이 없다", async ({ page }) => {

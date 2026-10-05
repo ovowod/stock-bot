@@ -118,6 +118,41 @@ class KiwoomClient:
         page = await self._call_page(spec, api_id, path, body, "N", "", 1)
         return page.data
 
+    async def call_once(
+        self, spec: EnvironmentSpec, api_id: str, path: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """주문처럼 다시 보내면 안 되는 TR을 한 번만 호출한다.
+
+        토큰 무효(8005)도 재시도하지 않는다. 다음 호출이 새 토큰을 받도록 그 토큰만 버린다.
+        """
+        token = await self._token(spec)
+        headers = {
+            "api-id": api_id,
+            "authorization": f"Bearer {token.value}",
+            "Content-Type": CONTENT_TYPE,
+        }
+        try:
+            page = await self._post(spec, api_id, path, body, headers, 1)
+        except _KiwoomResult as result:
+            if result.code == INVALID_TOKEN:
+                await self._discard_token(spec, token)
+                log(logger, logging.WARNING, "kiwoom_token_discarded", api_id=api_id)
+                raise AppError(
+                    "token_expired",
+                    "토큰이 만료되어 주문하지 못했습니다. 다시 주문하세요.",
+                    502,
+                    {"api_id": api_id, "return_code": result.code},
+                ) from None
+            raise _classify(result) from None
+        return page.data
+
+    async def _discard_token(self, spec: EnvironmentSpec, token: _Token) -> None:
+        """그 토큰이 아직 캐시에 있을 때만 지운다. 그사이 새로 받은 토큰은 지우지 않는다."""
+        key = spec.credential_prefix
+        async with self._token_locks.setdefault(key, asyncio.Lock()):
+            if self._tokens.get(key) == token:
+                del self._tokens[key]
+
     async def _call_page(
         self,
         spec: EnvironmentSpec,

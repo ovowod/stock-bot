@@ -1,13 +1,15 @@
 import { CircleAlert, Info, ShieldAlert, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { fetchQuote, type EnvironmentValue } from "../../api";
-import { findEnvironment } from "../../environments";
+import { ApiError, fetchQuote, placeOrder, type EnvironmentValue } from "../../api";
+import { findEnvironment, type EnvironmentOption } from "../../environments";
 import { formatForeign, formatKrw } from "../../format";
+import { useToast } from "../toast/Toasts";
 import {
   ORDER_TYPES,
   buyUnavailableReason,
   groupThousands,
+  newOrderKey,
   parsePrice,
   parseQuantity,
   type OrderTarget,
@@ -108,7 +110,7 @@ function OrderPanel({
               {unavailable}
             </Callout>
           ) : (
-            <BuyForm environment={environment} market={env.market} target={target} />
+            <BuyForm env={env} target={target} onAccepted={onClose} />
           )}
         </div>
       </div>
@@ -149,30 +151,131 @@ function usePriceWithQuote(environment: EnvironmentValue, target: OrderTarget) {
   return { priceText, change, status };
 }
 
+type Step = "input" | "confirm" | "sending";
+
 function BuyForm({
-  environment,
-  market,
+  env,
   target,
+  onAccepted,
 }: {
-  environment: EnvironmentValue;
-  market: "domestic" | "us";
+  env: EnvironmentOption;
   target: OrderTarget;
+  onAccepted: () => void;
 }) {
+  const market = env.market;
+  const showToast = useToast();
   const [type, setType] = useState<OrderType>("limit");
   const [quantityText, setQuantityText] = useState("1");
-  const { priceText, change: setPriceText, status: quoteStatus } = usePriceWithQuote(environment, target);
-  const { quantity, error: quantityError } = parseQuantity(quantityText);
-  const { price, error: priceError } = parsePrice(priceText, market);
+  const { priceText, change: setPriceText, status: quoteStatus } = usePriceWithQuote(env.value, target);
+  const [step, setStep] = useState<Step>("input");
+  const orderKey = useRef("");
+  const quantity = parseQuantity(quantityText);
+  const price = parsePrice(priceText, market);
   const unit = market === "domestic" ? "원" : "USD";
+  const formatMoney = (value: number) => (market === "domestic" ? formatKrw(value) : formatForeign(value, "USD", 4));
   const amount =
-    type === "limit" && quantity !== null && price !== null
-      ? market === "domestic"
-        ? formatKrw(quantity * price)
-        : formatForeign(quantity * price, "USD", 4)
+    type === "limit" && quantity.quantity !== null && price.price !== null
+      ? formatMoney(quantity.quantity * price.price)
       : null;
+  const ready = quantity.text !== null && (type === "market" || price.text !== null);
+
+  const openConfirm = () => {
+    if (!ready || env.isReal) return;
+    // 최종 확인을 열 때마다 새 주문 키를 만든다. 이 확인에서 나가는 요청은 이 키를 쓴다.
+    orderKey.current = newOrderKey();
+    setStep("confirm");
+  };
+
+  const submit = async () => {
+    if (step !== "confirm" || quantity.text === null) return;
+    setStep("sending");
+    const key = orderKey.current;
+    try {
+      const { result, requestId } = await placeOrder(env.value, {
+        order_key: key,
+        code: target.code,
+        order_type: type,
+        quantity: quantity.text,
+        ...(type === "limit" && price.text !== null ? { price: price.text } : {}),
+      });
+      showToast({
+        tone: "success",
+        title: "매수 주문이 접수되었습니다",
+        body: `${target.name} · 주문번호 ${result.order_no}`,
+        meta: [`주문 키 ${key}`, ...(requestId ? [`요청 ID ${requestId}`] : [])],
+      });
+      onAccepted();
+    } catch (error) {
+      const apiError = error instanceof ApiError ? error : new ApiError("unknown", "알 수 없는 오류입니다.", null);
+      showToast({
+        tone: "error",
+        title: "주문하지 못했습니다",
+        body: apiError.message,
+        meta: [`주문 키 ${key}`, ...(apiError.requestId ? [`요청 ID ${apiError.requestId}`] : [])],
+      });
+      setStep("input");
+    }
+  };
+
+  if (step !== "input") {
+    const rows: [string, string][] = [
+      ["투자 환경", env.label],
+      ["종목", target.name],
+      ["종목코드", target.code],
+      ["거래소", market === "domestic" ? "KRX" : (target.exchange ?? "")],
+      ["주문 유형", ORDER_TYPES.find((option) => option.value === type)?.label ?? type],
+      ["가격", type === "limit" && price.price !== null ? formatMoney(price.price) : "시장가"],
+      ["수량", `${quantity.quantity?.toLocaleString("ko-KR")}주`],
+      ...(amount ? ([["예상 주문금액", amount]] as [string, string][]) : []),
+    ];
+    return (
+      <section aria-label="최종 확인" className="flex flex-1 flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-[17px] font-bold">최종 확인</h3>
+          <span className="rounded-full bg-brand-50 px-2.5 py-1 text-xs font-bold text-brand-700">모의투자 주문</span>
+        </div>
+        <dl className="divide-y divide-line rounded-2xl bg-canvas px-4">
+          {rows.map(([term, value]) => (
+            <div key={term} className="flex items-center justify-between gap-3 py-2.5">
+              <dt className="text-sm text-sub">{term}</dt>
+              <dd data-term={term} className="text-right text-[15px] font-semibold">
+                {value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        <p className="text-xs text-muted">주문하기를 누르면 이 내용으로 매수 주문을 보냅니다.</p>
+        <div className="sticky bottom-0 mt-auto grid grid-cols-2 gap-2 bg-surface pt-2">
+          <button
+            type="button"
+            disabled={step === "sending"}
+            onClick={() => setStep("input")}
+            className="rounded-2xl bg-canvas py-3.5 text-[15px] font-bold text-sub disabled:opacity-40"
+          >
+            취소
+          </button>
+          <button
+            type="button"
+            disabled={step === "sending"}
+            onClick={() => void submit()}
+            className="rounded-2xl bg-gain py-3.5 text-[15px] font-bold text-white disabled:opacity-60"
+          >
+            {step === "sending" ? "주문 중…" : "주문하기"}
+          </button>
+        </div>
+      </section>
+    );
+  }
 
   return (
-    <form className="flex flex-1 flex-col gap-4" aria-label="매수 주문" onSubmit={(event) => event.preventDefault()}>
+    <form
+      className="flex flex-1 flex-col gap-4"
+      aria-label="매수 주문"
+      onSubmit={(event) => {
+        event.preventDefault();
+        openConfirm();
+      }}
+    >
       <div role="radiogroup" aria-label="주문 유형" className="grid grid-cols-2 gap-1 rounded-2xl bg-canvas p-1">
         {ORDER_TYPES.map((option) => {
           const active = option.value === type;
@@ -196,7 +299,7 @@ function BuyForm({
       {type === "limit" && (
         <Field
           label={`가격 (${unit})`}
-          error={priceError}
+          error={price.error}
           hint={
             quoteStatus === "loading"
               ? "현재가를 불러오는 중입니다."
@@ -210,7 +313,7 @@ function BuyForm({
             onChange={(event) => setPriceText(event.target.value.replaceAll(",", ""))}
             inputMode={market === "domestic" ? "numeric" : "decimal"}
             placeholder={market === "domestic" ? "예: 70000" : "예: 213.04"}
-            aria-invalid={priceError !== null}
+            aria-invalid={price.error !== null}
             className={INPUT}
           />
         </Field>
@@ -221,13 +324,13 @@ function BuyForm({
         </p>
       )}
 
-      <Field label="수량 (주)" error={quantityError}>
+      <Field label="수량 (주)" error={quantity.error}>
         <input
           value={quantityText}
           onChange={(event) => setQuantityText(event.target.value)}
           inputMode="numeric"
           placeholder="예: 10"
-          aria-invalid={quantityError !== null}
+          aria-invalid={quantity.error !== null}
           className={INPUT}
         />
       </Field>
@@ -243,14 +346,20 @@ function BuyForm({
 
       {/* 패널이 화면 높이를 채우는 태블릿·데스크톱에서는 매수 버튼을 패널 맨 아래에 둔다. */}
       <div className="sticky bottom-0 mt-auto space-y-2 bg-surface pt-2">
-        <button
-          type="submit"
-          disabled
-          className="w-full rounded-2xl bg-gain py-3.5 text-[15px] font-bold text-white disabled:opacity-40"
-        >
-          매수
-        </button>
-        <p className="text-center text-xs text-muted">주문 전송은 아직 지원하지 않습니다.</p>
+        {env.isReal ? (
+          <p className="flex items-center justify-center gap-1.5 rounded-2xl bg-real-soft py-3.5 text-sm font-bold text-real">
+            <ShieldAlert className="size-4" aria-hidden />
+            실전투자에서는 주문할 수 없습니다.
+          </p>
+        ) : (
+          <button
+            type="submit"
+            disabled={!ready}
+            className="w-full rounded-2xl bg-gain py-3.5 text-[15px] font-bold text-white disabled:opacity-40"
+          >
+            매수
+          </button>
+        )}
       </div>
     </form>
   );

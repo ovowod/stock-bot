@@ -175,6 +175,49 @@ export function fetchQuote(
   return getJson<Quote>(`/api/environments/${environment}/quote?${params}`, signal);
 }
 
+export interface OrderRequest {
+  order_key: string;
+  code: string;
+  exchange?: string;
+  order_type: "limit" | "market";
+  quantity: string;
+  price?: string;
+}
+
+export interface OrderAccepted {
+  order_key: string;
+  order_no: string;
+  accepted_at: string;
+}
+
+/** 매수 주문을 보낸다. 실패해도 다시 보내지 않는다. */
+export async function placeOrder(
+  environment: EnvironmentValue,
+  order: OrderRequest,
+): Promise<{ result: OrderAccepted; requestId: string | null }> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/environments/${environment}/orders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(order),
+    });
+  } catch {
+    throw new ApiError("network", "서버에 연결할 수 없습니다.", null);
+  }
+  const requestId = response.headers.get("X-Request-ID");
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = body?.error;
+    throw new ApiError(
+      error?.kind ?? "unknown",
+      error?.message ?? `요청이 실패했습니다. (HTTP ${response.status})`,
+      error?.request_id ?? requestId,
+    );
+  }
+  return { result: body as OrderAccepted, requestId };
+}
+
 export function fetchAccount(environment: EnvironmentValue, signal: AbortSignal): Promise<Account> {
   return getJson<Account>(`/api/environments/${environment}/account`, signal);
 }
