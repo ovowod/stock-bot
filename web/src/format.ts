@@ -19,6 +19,36 @@ export function formatForeign(value: number | null, currency: string, digits = 2
   return currency === "USD" ? `${minus(value)}$${formatted}` : `${minus(value)}${formatted} ${currency}`;
 }
 
+/** 큰 원화 금액을 짧게: 5.36조, 5,308억, 1,234만 */
+export function formatCompactKrw(value: number | null): string {
+  if (value === null) return EMPTY;
+  const abs = Math.abs(value);
+  const body =
+    abs >= 1e12
+      ? `${(abs / 1e12).toFixed(2)}조`
+      : abs >= 1e8
+        ? `${krw.format(Math.round(abs / 1e8))}억`
+        : abs >= 1e4
+          ? `${krw.format(Math.round(abs / 1e4))}만`
+          : `${krw.format(abs)}원`;
+  return `${minus(value)}${body}`;
+}
+
+/** 큰 달러 금액을 짧게: $1.23B, $104.1M, $12.3K */
+export function formatCompactUsd(value: number | null): string {
+  if (value === null) return EMPTY;
+  const abs = Math.abs(value);
+  const body =
+    abs >= 1e9
+      ? `${(abs / 1e9).toFixed(2)}B`
+      : abs >= 1e6
+        ? `${(abs / 1e6).toFixed(1)}M`
+        : abs >= 1e3
+          ? `${(abs / 1e3).toFixed(1)}K`
+          : abs.toFixed(0);
+  return `${minus(value)}$${body}`;
+}
+
 export function formatRate(value: number | null): string {
   return value === null ? EMPTY : `${minus(value)}${Math.abs(value).toFixed(2)}%`;
 }

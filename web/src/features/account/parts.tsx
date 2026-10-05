@@ -180,16 +180,19 @@ const ERROR_TITLE: Record<string, string> = {
   incomplete_result: "조회 결과를 모두 가져오지 못했습니다",
   response_format_error: "키움 응답을 해석하지 못했습니다",
   kiwoom_error: "키움 API 오류",
+  bad_request: "요청 조건이 올바르지 않습니다",
 };
 
 export function ErrorNotice({
   error,
   onRetry,
   compact = false,
+  fallbackTitle = "계좌 정보를 불러오지 못했습니다",
 }: {
   error: ApiError;
   onRetry: () => void;
   compact?: boolean;
+  fallbackTitle?: string;
 }) {
   const Icon = ERROR_ICON[error.kind] ?? AlertTriangle;
   return (
@@ -200,7 +203,7 @@ export function ErrorNotice({
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-[17px] font-bold">
-            {ERROR_TITLE[error.kind] ?? "계좌 정보를 불러오지 못했습니다"}
+            {ERROR_TITLE[error.kind] ?? fallbackTitle}
           </p>
           <p className="mt-1 text-[15px] break-words text-sub">{error.message}</p>
           {error.missing.length > 0 && (

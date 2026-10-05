@@ -1,8 +1,9 @@
-import { ChevronRight, Menu, ShieldAlert, Sparkles, Wallet, X, type LucideIcon } from "lucide-react";
+import { ChevronRight, Menu, ShieldAlert, Sparkles, Trophy, Wallet, X, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { EnvironmentValue } from "./api";
 import { ENVIRONMENTS, findEnvironment, loadEnvironment, saveEnvironment } from "./environments";
 import { AccountPage } from "./features/account/AccountPage";
+import { RankingPage } from "./features/ranking/RankingPage";
 
 interface Feature {
   id: string;
@@ -27,6 +28,17 @@ const GROUPS: FeatureGroup[] = [
         icon: Wallet,
         // key로 투자 환경을 묶어, 환경을 바꾸면 이전 환경의 데이터와 진행 중인 요청을 버린다.
         render: (environment) => <AccountPage key={environment} environment={environment} />,
+      },
+    ],
+  },
+  {
+    title: "시세",
+    features: [
+      {
+        id: "ranking",
+        label: "순위",
+        icon: Trophy,
+        render: (environment) => <RankingPage key={environment} environment={environment} />,
       },
     ],
   },

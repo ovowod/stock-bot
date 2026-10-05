@@ -1,5 +1,6 @@
 """키움 REST API를 흉내 내는 가짜 서버. 응답 형태는 kra-docs의 responseExample을 따른다."""
 
+import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -215,3 +216,51 @@ def us_fake(account_no: str = "8200000222") -> FakeKiwoom:
         .reply("ust21070", UST21070_REPLY)
         .reply("ust21110", UST21110_REPLY)
     )
+
+
+# 순위 TR 응답. 값은 모의 서버에서 실제로 받은 형태를 따른다(국내 종목코드의 _AL 접미어 포함).
+KA10032_ROW = {
+    "stk_cd": "000660_AL",
+    "now_rank": "1",
+    "pred_rank": "2",
+    "stk_nm": "SK하이닉스",
+    "cur_prc": "+1841000",
+    "pred_pre_sig": "2",
+    "pred_pre": "+8000",
+    "flu_rt": "+0.44",
+    "sel_bid": "+1842000",
+    "buy_bid": "+1841000",
+    "now_trde_qty": "2911335",
+    "pred_trde_qty": "3274713",
+    "trde_prica": "5359250",
+}
+
+USA20540_ROW = {
+    "rank": "1",
+    "stex_tp": "NY",
+    "stk_cd": "SOXL",
+    "stk_nm": "미국 반도체 3배 디렉시온 ETF",
+    "stk_enm": "DIREXION DAILY SEMICONDUCTOR BULL 3X ETF",
+    "cur_prc": "-162.6000",
+    "pred_pre_sig": "5",
+    "pred_pre": "-1.1100",
+    "flu_rt": "-0.68",
+    "acc_trde_qty": "632235",
+    "pred_trde_qty": "62660789",
+    "trde_prica": "104125",
+}
+
+
+def ranking_fake(api_id: str, *pages: Reply) -> FakeKiwoom:
+    return FakeKiwoom().reply(api_id, *pages)
+
+
+class ThreadedTransport(httpx.AsyncBaseTransport):
+    """핸들러를 스레드에서 실행해, 한 요청이 기다리는 동안 다른 요청이 진행될 수 있게 한다."""
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self._handler = handler
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        return await asyncio.to_thread(self._handler, request)

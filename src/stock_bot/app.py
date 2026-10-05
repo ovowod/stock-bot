@@ -19,6 +19,7 @@ from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
+from stock_bot.ranking import RankingService
 
 logger = logging.getLogger("stock_bot.api")
 
@@ -38,6 +39,7 @@ def create_app(
 
     kiwoom = KiwoomClient(environ, transport=transport)
     accounts = AccountService(kiwoom)
+    rankings = RankingService(kiwoom)
     app = FastAPI(title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -102,6 +104,14 @@ def create_app(
         spec = parse_environment(environment)
         environment_var.set(spec.environment.value)
         return await accounts.fetch(spec)
+
+    @app.get("/api/environments/{environment}/rankings/{kind}")
+    async def get_ranking(
+        environment: str, kind: str, exchange: str | None = None
+    ) -> dict[str, Any]:
+        spec = parse_environment(environment)
+        environment_var.set(spec.environment.value)
+        return await rankings.fetch(spec, kind, exchange)
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

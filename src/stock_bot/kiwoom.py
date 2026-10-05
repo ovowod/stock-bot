@@ -104,6 +104,13 @@ class KiwoomClient:
             {"api_id": api_id},
         )
 
+    async def call_first_page(
+        self, spec: EnvironmentSpec, api_id: str, path: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """TR의 첫 페이지만 받는다. 다음 데이터가 있어도(cont-yn=Y) 이어 받지 않는다."""
+        page = await self._call_page(spec, api_id, path, body, "N", "", 1)
+        return page.data
+
     async def _call_page(
         self,
         spec: EnvironmentSpec,
