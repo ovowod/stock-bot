@@ -1,6 +1,7 @@
 """계좌 확인: 키움 계좌 TR을 호출해 화면에 필요한 필드만 정리한다."""
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,12 +14,23 @@ from stock_bot.reader import Reader, required
 
 logger = logging.getLogger("stock_bot.account")
 
+# 잔고 TR(ust21070)은 거래소를 한글명으로 준다. 순위·검색과 같은 영문명으로 바꾸고,
+# 모르는 이름은 그대로 둔다. 이름은 모의 서버 응답에서 확인했다.
+# 시세 데이터가 NYSE로 주는 NYSE Arca ETF(SPY 등)를 잔고는 아멕스로 준다.
+US_EXCHANGE_NAMES = {"뉴욕": "NYSE", "나스닥": "NASDAQ", "아멕스": "AMEX"}
+
 DOMESTIC_ACCOUNT_PATH = "/api/dostk/acnt"
 US_ACCOUNT_PATH = "/api/us/acnt"
 
 
+StockListings = Callable[[EnvironmentSpec], Awaitable[dict[str, dict[str, Any]]]]
+
+
 class AccountService:
-    def __init__(self, kiwoom: KiwoomClient) -> None:
+    def __init__(self, kiwoom: KiwoomClient, listings: StockListings | None = None) -> None:
+        # 잔고 TR은 미국 ETF를 영문명으로, NYSE Arca ETF를 아멕스로 준다.
+        # 순위·검색과 같은 이름과 거래소를 쓰려고 종목 목록에서 찾는다.
+        self._listings = listings
         self._kiwoom = kiwoom
 
     async def fetch(self, spec: EnvironmentSpec) -> dict[str, Any]:
@@ -97,6 +109,22 @@ class AccountService:
             ],
         }
 
+    async def _stock_listings(self, spec: EnvironmentSpec) -> dict[str, dict[str, Any]]:
+        """종목 목록을 받지 못해도 계좌 확인은 계속하고, 잔고 TR의 이름·거래소를 쓴다."""
+        if self._listings is None:
+            return {}
+        try:
+            return await self._listings(spec)
+        except AppError as error:
+            log(
+                logger,
+                logging.WARNING,
+                "stock_list_unavailable",
+                kind=error.kind,
+                cause=error.message,
+            )
+            return {}
+
     async def _us(self, spec: EnvironmentSpec) -> dict[str, Any]:
         balance = await self._kiwoom.call(
             spec, "ust21070", US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}
@@ -104,6 +132,7 @@ class AccountService:
         deposit = await self._kiwoom.call(spec, "ust21110", US_ACCOUNT_PATH, {})
         b = Reader(balance, "ust21070")
         d = Reader(deposit, "ust21110")
+        listings = await self._stock_listings(spec)
         return {
             "currency": b.text("crnc_code"),
             "summary": {
@@ -136,8 +165,9 @@ class AccountService:
             "holdings": [
                 {
                     "code": h.text("stk_cd"),
-                    "name": h.text("frgn_stk_nm"),
-                    "exchange": h.text("stex_nm"),
+                    "name": listings.get(h.text("stk_cd"), {}).get("name") or h.text("frgn_stk_nm"),
+                    "exchange": listings.get(h.text("stk_cd"), {}).get("exchange")
+                    or US_EXCHANGE_NAMES.get(h.text("stex_nm"), h.text("stex_nm")),
                     "currency": h.text("crnc_code"),
                     "quantity": h.integer("poss_qty"),
                     "sellable_quantity": h.integer("sell_alowq"),

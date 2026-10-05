@@ -43,9 +43,9 @@ def create_app(
         environ = os.environ
 
     kiwoom = KiwoomClient(environ, transport=transport)
-    accounts = AccountService(kiwoom)
     rankings = RankingService(kiwoom)
     stocks = StockSearchService(kiwoom, today or today_kst)
+    accounts = AccountService(kiwoom, stocks.listings)
     quotes = QuoteService(kiwoom)
     orders = OrderService(kiwoom)
     app = FastAPI(title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None)

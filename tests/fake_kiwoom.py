@@ -224,6 +224,8 @@ def us_fake(account_no: str = "8200000222") -> FakeKiwoom:
         .reply("ka00001", {"acctNo": account_no})
         .reply("ust21070", UST21070_REPLY)
         .reply("ust21110", UST21110_REPLY)
+        # 계좌 확인은 종목명을 맞추려고 종목 목록도 받는다. 기본은 빈 목록이라 잔고의 이름을 쓴다.
+        .reply("usa10099", {"list": []})
     )
 
 

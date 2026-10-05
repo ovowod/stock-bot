@@ -98,6 +98,17 @@ class StockSearchService:
             "items": [entry[3] for entry in ranked[:SEARCH_LIMIT]],
         }
 
+    async def listings(self, spec: EnvironmentSpec) -> dict[str, dict[str, Any]]:
+        """종목코드 -> 종목 목록 항목(이름, 거래소 등).
+
+        다른 화면이 순위·검색과 같은 이름과 거래소를 쓰도록 종목 목록에서 꺼낸다.
+        """
+        stock_list = await self._stock_list(spec)
+        listings: dict[str, dict[str, Any]] = {}
+        for stock in stock_list.stocks:
+            listings.setdefault(stock.item["code"], stock.item)
+        return listings
+
     async def _stock_list(self, spec: EnvironmentSpec) -> _StockList:
         environment = spec.environment
         today = self._today()
