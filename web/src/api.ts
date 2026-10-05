@@ -128,6 +128,36 @@ export interface Ranking {
   items: RankingItem[];
 }
 
+export interface StockSearchItem {
+  code: string;
+  name: string;
+  english_name: string | null;
+  exchange: string | null;
+  category: string | null;
+  industry: string | null;
+  status: string | null;
+  is_etf: boolean | null;
+}
+
+export interface StockSearchResult {
+  environment: EnvironmentValue;
+  market: "domestic" | "us";
+  query: string;
+  total: number;
+  truncated: boolean;
+  list_fetched_at: string;
+  items: StockSearchItem[];
+}
+
+export function searchStocks(
+  environment: EnvironmentValue,
+  query: string,
+  signal: AbortSignal,
+): Promise<StockSearchResult> {
+  const params = new URLSearchParams({ q: query });
+  return getJson<StockSearchResult>(`/api/environments/${environment}/stocks?${params}`, signal);
+}
+
 export function fetchAccount(environment: EnvironmentValue, signal: AbortSignal): Promise<Account> {
   return getJson<Account>(`/api/environments/${environment}/account`, signal);
 }

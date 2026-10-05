@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
 from stock_bot.ranking import RankingService
+from stock_bot.stock_search import StockSearchService, today_kst
 
 logger = logging.getLogger("stock_bot.api")
 
@@ -31,6 +33,7 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     static_dir: Path | None = WEB_DIST,
     log_dir: Path | None = LOG_DIR,
+    today: Callable[[], date] | None = None,
 ) -> FastAPI:
     setup_logging(log_dir)
     if environ is None:
@@ -40,6 +43,7 @@ def create_app(
     kiwoom = KiwoomClient(environ, transport=transport)
     accounts = AccountService(kiwoom)
     rankings = RankingService(kiwoom)
+    stocks = StockSearchService(kiwoom, today or today_kst)
     app = FastAPI(title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -112,6 +116,12 @@ def create_app(
         spec = parse_environment(environment)
         environment_var.set(spec.environment.value)
         return await rankings.fetch(spec, kind, {"exchange": exchange, "period": period})
+
+    @app.get("/api/environments/{environment}/stocks")
+    async def search_stocks(environment: str, q: str | None = None) -> dict[str, Any]:
+        spec = parse_environment(environment)
+        environment_var.set(spec.environment.value)
+        return await stocks.search(spec, q)
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")
