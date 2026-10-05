@@ -13,6 +13,7 @@ import {
   formatTime,
 } from "../../format";
 import { ErrorNotice } from "../account/parts";
+import { useOrderPanel } from "../order/OrderPanel";
 import { KINDS, useRankings, type CardState } from "./useRankings";
 
 type Market = "domestic" | "us";
@@ -43,6 +44,8 @@ interface CardSpec {
   title: string;
   metricLabel: string;
   metric: (item: RankingItem, market: Market) => ReactNode;
+  /** 인기 종목의 가격은 집계 시점 가격이라 주문 패널의 가격 칸에 채우지 않는다. */
+  pastPrice?: boolean;
 }
 
 const CARDS: Record<RankingKind, CardSpec> = {
@@ -76,6 +79,7 @@ const CARDS: Record<RankingKind, CardSpec> = {
     title: "인기 종목",
     metricLabel: "순위 변동",
     metric: (item) => <RankChange value={item.rank_change ?? null} />,
+    pastPrice: true,
   },
 };
 
@@ -249,7 +253,13 @@ function RankingCard({
               aria-busy={state.refreshing}
             >
               {state.data.items.map((item, index) => (
-                <RankingRow key={`${item.code}-${index}`} item={item} market={market} metric={spec.metric} />
+                <RankingRow
+                  key={`${item.code}-${index}`}
+                  item={item}
+                  market={market}
+                  metric={spec.metric}
+                  pastPrice={spec.pastPrice ?? false}
+                />
               ))}
             </ol>
           )}
@@ -263,26 +273,43 @@ function RankingRow({
   item,
   market,
   metric,
+  pastPrice,
 }: {
   item: RankingItem;
   market: Market;
   metric: CardSpec["metric"];
+  pastPrice: boolean;
 }) {
+  const openOrder = useOrderPanel();
   const price = market === "domestic" ? formatKrw(item.price) : formatForeign(item.price, "USD", 4);
+  const target = {
+    code: item.code,
+    name: item.name,
+    exchange: item.exchange,
+    category: null,
+    price: pastPrice ? null : item.price,
+    status: null,
+  };
   return (
-    <li className="flex items-center gap-3 rounded-2xl px-2 py-2.5 hover:bg-canvas/70">
-      <span className="w-6 shrink-0 text-center text-[15px] font-bold text-brand-600">{item.rank ?? EMPTY}</span>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-[15px] font-semibold">{item.name}</p>
-        <p className="truncate text-xs text-muted">
-          {item.exchange ? `${item.code} · ${item.exchange}` : item.code}
-        </p>
-      </div>
-      <div className="shrink-0 text-right">
-        <p className="text-sm font-semibold">{price}</p>
-        <RateChange direction={item.direction} rate={item.change_rate} className="text-xs font-medium" />
-      </div>
-      <div className="w-24 shrink-0 text-right">{metric(item, market)}</div>
+    <li>
+      <button
+        type="button"
+        onClick={() => openOrder(target)}
+        className="flex w-full items-center gap-3 rounded-2xl px-2 py-2.5 text-left hover:bg-canvas/70"
+      >
+        <span className="w-6 shrink-0 text-center text-[15px] font-bold text-brand-600">{item.rank ?? EMPTY}</span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[15px] font-semibold">{item.name}</p>
+          <p className="truncate text-xs text-muted">
+            {item.exchange ? `${item.code} · ${item.exchange}` : item.code}
+          </p>
+        </div>
+        <div className="shrink-0 text-right">
+          <p className="text-sm font-semibold">{price}</p>
+          <RateChange direction={item.direction} rate={item.change_rate} className="text-xs font-medium" />
+        </div>
+        <div className="w-24 shrink-0 text-right">{metric(item, market)}</div>
+      </button>
     </li>
   );
 }
