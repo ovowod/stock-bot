@@ -1,0 +1,217 @@
+"""키움 REST API를 흉내 내는 가짜 서버. 응답 형태는 kra-docs의 responseExample을 따른다."""
+
+import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+
+Reply = dict[str, Any] | httpx.Response
+
+FAKE_ENV = {
+    "REAL_APP_KEY": "real-key-AAAA1111",
+    "REAL_APP_SECRET": "real-secret-BBBB2222",
+    "REAL_ACCOUNT_NO": "5012345611",
+    "PAPER_KR_APP_KEY": "paperkr-key-CCCC3333",
+    "PAPER_KR_APP_SECRET": "paperkr-secret-DDDD4444",
+    "PAPER_KR_ACCOUNT_NO": "8100000111",
+    "PAPER_US_APP_KEY": "paperus-key-EEEE5555",
+    "PAPER_US_APP_SECRET": "paperus-secret-FFFF6666",
+    "PAPER_US_ACCOUNT_NO": "8200000222",
+}
+
+
+@dataclass
+class FakeKiwoom:
+    expires_dt: str = "29991231235959"
+    # api-id -> 응답 목록. 페이지마다 하나씩 꺼내 쓰고, 마지막 응답은 계속 재사용한다.
+    replies: dict[str, list[Reply]] = field(default_factory=dict)
+    requests: list[httpx.Request] = field(default_factory=list)
+    issued_tokens: list[str] = field(default_factory=list)
+    on_request: Callable[[httpx.Request], None] | None = None
+
+    def reply(self, api_id: str, *pages: Reply) -> FakeKiwoom:
+        self.replies[api_id] = list(pages)
+        return self
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.on_request:
+            self.on_request(request)
+        if request.url.path == "/oauth2/token":
+            token = f"token-{len(self.issued_tokens) + 1}-XYZW9876"
+            self.issued_tokens.append(token)
+            return httpx.Response(
+                200,
+                json={
+                    "expires_dt": self.expires_dt,
+                    "token_type": "bearer",
+                    "token": token,
+                    "return_code": 0,
+                    "return_msg": "정상적으로 처리되었습니다",
+                },
+            )
+        api_id = request.headers["api-id"]
+        pages = self.replies[api_id]
+        index = sum(1 for r in self.requests if r.headers.get("api-id") == api_id) - 1
+        page = pages[min(index, len(pages) - 1)]
+        if isinstance(page, httpx.Response):
+            return page
+        return page_response(page)
+
+    def calls(self, api_id: str) -> list[httpx.Request]:
+        return [r for r in self.requests if r.headers.get("api-id") == api_id]
+
+    def token_requests(self) -> list[httpx.Request]:
+        return [r for r in self.requests if r.url.path == "/oauth2/token"]
+
+
+def page_response(body: dict[str, Any], cont_yn: str = "N", next_key: str = "") -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"cont-yn": cont_yn, "next-key": next_key},
+        json={"return_code": 0, "return_msg": "조회가 완료되었습니다", **body},
+    )
+
+
+def body_of(request: httpx.Request) -> dict[str, Any]:
+    result: dict[str, Any] = json.loads(request.content or b"{}")
+    return result
+
+
+def kiwoom_error(code: int, message: str, status: int = 200) -> httpx.Response:
+    return httpx.Response(status, json={"return_code": code, "return_msg": message})
+
+
+ACCOUNT_REPLY = {"acctNo": "8100000111"}
+
+KT00018_HOLDING = {
+    "stk_cd": "A005930",
+    "stk_nm": "삼성전자",
+    "evltv_prft": "-00000000196888",
+    "prft_rt": "-52.71",
+    "pur_pric": "000000000124500",
+    "pred_close_pric": "000000045400",
+    "rmnd_qty": "000000000000003",
+    "trde_able_qty": "000000000000003",
+    "cur_prc": "000000059000",
+    "pred_buyq": "000000000000000",
+    "pred_sellq": "000000000000000",
+    "tdy_buyq": "000000000000000",
+    "tdy_sellq": "000000000000000",
+    "pur_amt": "000000000373500",
+    "pur_cmsn": "000000000000050",
+    "evlt_amt": "000000000177000",
+    "sell_cmsn": "000000000000020",
+    "tax": "000000000000318",
+    "sum_cmsn": "000000000000070",
+    "poss_rt": "2.12",
+    "crd_tp": "00",
+    "crd_tp_nm": "",
+    "crd_loan_dt": "",
+}
+
+KT00018_REPLY = {
+    "tot_pur_amt": "000000017598258",
+    "tot_evlt_amt": "000000025789890",
+    "tot_evlt_pl": "000000008138825",
+    "tot_prft_rt": "46.25",
+    "prsm_dpst_aset_amt": "000001012632507",
+    "tot_loan_amt": "000000000000000",
+    "tot_crd_loan_amt": "000000000000000",
+    "tot_crd_ls_amt": "000000000000000",
+    "acnt_evlt_remn_indv_tot": [KT00018_HOLDING],
+}
+
+KT00001_REPLY = {
+    "entr": "000000000017534",
+    "pymn_alow_amt": "000000000085341",
+    "ord_alow_amt": "000000000085341",
+    "d1_entra": "000000000017450",
+    "d2_entra": "000000000012550",
+    "stk_entr_prst": [],
+}
+
+UST21070_HOLDING = {
+    "stex_nm": "미국",
+    "crnc_code": "USD",
+    "stk_cd": "AAPL",
+    "frgn_stk_nm": "애플",
+    "qty": "000000000395",
+    "poss_qty": "000000000395",
+    "sell_alowq": "000000000395",
+    "pred_cntr_sellq": "000000000000",
+    "pred_cntr_buyq": "000000000000",
+    "tdy_cntr_sellq": "000000000000",
+    "tdy_cntr_buyq": "000000000000",
+    "frgn_stk_book_uv": "282.1603",
+    "now_pric": "275.2400",
+    "evlt_amt": "108719.8000",
+    "pl_amt": "-3283.9512",
+    "pl_rt": "-2.94",
+    "evlt_amt_krw": "000165743335",
+    "pl_amt_krw": "-00005006383",
+    "natn_nm": "미국",
+    "exch_rate": "1524.50",
+    "frgn_stk_book_uv_krw": "000000430153",
+    "now_pric_krw": "000000419603",
+    "frgn_stk_book_amt": "111453.3212",
+    "frgn_stk_book_amt_krw": "000169910588",
+}
+
+UST21070_REPLY = {
+    "stex_tp": "000030",
+    "crnc_code": "USD",
+    "tot_evlt_amt": "156464.6701",
+    "tot_prch_amt": "157279.9717",
+    "tot_pl_amt": "-1599.6616",
+    "tot_pl_rt": "-1.01",
+    "tdy_book_amt": "0.0000",
+    "tdy_pl_amt": "0.0000",
+    "tdy_pl_rt": "0.00",
+    "tot_evlt_amt_krw": "000000238530390",
+    "tot_prch_amt_krw": "000000239773317",
+    "tot_pl_amt_krw": "-00000002438684",
+    "tdy_book_amt_krw": "000000000000000",
+    "tdy_pl_amt_krw": "000000000000000",
+    "result_list": [UST21070_HOLDING],
+}
+
+UST21110_REPLY = {
+    "krw_entra": "000000930907881",
+    "ch_uncla": "000000000000000",
+    "etc_loana": "000000000000000",
+    "result_list": [
+        {
+            "crnc_code": "USD",
+            "crnc_nm": "미국달러",
+            "fc_entra": "18039493.57",
+            "fc_pymn_alowa": "18039493.57",
+            "futr_repl_profa": "0.00",
+            "fc_booka": "000027114520714",
+            "fc_ord_alowa": "18613792.11",
+            "futr_profa_booka": "000000000000000",
+            "fc_ch_uncla": "0.00",
+            "fc_etc_loana": "0.00",
+        }
+    ],
+}
+
+
+def domestic_fake(account_no: str = "8100000111") -> FakeKiwoom:
+    return (
+        FakeKiwoom()
+        .reply("ka00001", {"acctNo": account_no})
+        .reply("kt00018", KT00018_REPLY)
+        .reply("kt00001", KT00001_REPLY)
+    )
+
+
+def us_fake(account_no: str = "8200000222") -> FakeKiwoom:
+    return (
+        FakeKiwoom()
+        .reply("ka00001", {"acctNo": account_no})
+        .reply("ust21070", UST21070_REPLY)
+        .reply("ust21110", UST21110_REPLY)
+    )

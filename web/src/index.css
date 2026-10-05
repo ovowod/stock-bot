@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+    "Noto Sans KR", "Malgun Gothic", sans-serif;
+
+  --color-canvas: #f5f6f4;
+  --color-surface: #ffffff;
+  --color-line: #e3e6e1;
+  --color-ink: #1c2420;
+  --color-muted: #66706a;
+
+  --color-brand-50: #eef6f0;
+  --color-brand-100: #d9ebdf;
+  --color-brand-600: #1f6b3b;
+  --color-brand-700: #17562f;
+  --color-brand-900: #0f3a20;
+
+  /* 한국식 관례: 상승·수익은 빨강, 하락·손실은 파랑 */
+  --color-gain: #d12a2a;
+  --color-gain-soft: #fdecec;
+  --color-loss: #1f5fd1;
+  --color-loss-soft: #eaf1fd;
+
+  --color-real: #b42318;
+  --color-real-soft: #fef3f2;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-feature-settings: "tnum";
+}

@@ -1,0 +1,275 @@
+"""키움 REST API 클라이언트.
+
+투자 환경에 맞는 도메인·인증정보 선택, 접근 토큰 발급과 캐시, 공통 헤더, 연속조회,
+결과 코드 해석, 요청 로그를 이 모듈 안에서 처리한다. 호출하는 쪽은 TR과 요청 본문만 넘긴다.
+"""
+
+import asyncio
+import json
+import logging
+import re
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import httpx
+
+from stock_bot.config import Credentials, EnvironmentSpec, load_credentials
+from stock_bot.errors import AppError, response_format_error
+from stock_bot.logging_setup import log
+from stock_bot.masking import secrets
+
+logger = logging.getLogger("stock_bot.kiwoom")
+
+KST = ZoneInfo("Asia/Seoul")
+TOKEN_EXPIRY_MARGIN = timedelta(minutes=5)
+CONTENT_TYPE = "application/json;charset=UTF-8"
+MAX_PAGES = 10
+_LOG_BODY_LIMIT = 200
+
+INVALID_TOKEN = 8005
+CREDENTIAL_MISMATCH = {8030, 8031}
+RATE_LIMITED = {1700, 1701, 1702}
+# 실제 모의 서버는 return_code=5와 함께 메시지 안에 "[1700:...]"처럼 문서의 오류 코드를 넣어 보냈다.
+_EMBEDDED_CODE = re.compile(r"\[(\d{4}):")
+
+
+@dataclass(frozen=True)
+class _Token:
+    value: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class _Page:
+    data: dict[str, Any]
+    cont_yn: str
+    next_key: str
+
+
+class _KiwoomResult(Exception):
+    def __init__(self, api_id: str, return_code: Any, message: str) -> None:
+        super().__init__(message)
+        self.api_id = api_id
+        self.return_code = return_code
+        self.message = message
+        embedded = _EMBEDDED_CODE.search(message)
+        # 분류에는 메시지에 든 문서상 오류 코드를 우선 쓰고, 없으면 return_code를 쓴다.
+        self.code = int(embedded.group(1)) if embedded else return_code
+
+
+class KiwoomClient:
+    def __init__(
+        self,
+        environ: Mapping[str, str],
+        transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self._environ = environ
+        self._http = httpx.AsyncClient(transport=transport, timeout=timeout)
+        # 토큰은 인증정보 묶음별로 보관한다. 국내 실전과 미국 실전은 같은 앱 키를 쓰므로
+        # 토큰도 공유해야 서로의 발급이 상대 토큰을 무효로 만들 여지가 없다.
+        self._tokens: dict[str, _Token] = {}
+        self._token_locks: dict[str, asyncio.Lock] = {}
+
+    def credentials(self, spec: EnvironmentSpec) -> Credentials:
+        credentials = load_credentials(spec, self._environ)
+        secrets.add(*credentials.secrets())
+        return credentials
+
+    async def call(
+        self, spec: EnvironmentSpec, api_id: str, path: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """TR을 호출한다. 연속조회가 있으면 최대 MAX_PAGES까지 목록 필드를 이어 붙인다."""
+        merged: dict[str, Any] = {}
+        cont_yn, next_key = "N", ""
+        for page_no in range(1, MAX_PAGES + 1):
+            page = await self._call_page(spec, api_id, path, body, cont_yn, next_key, page_no)
+            for key, value in page.data.items():
+                if isinstance(value, list) and isinstance(merged.get(key), list):
+                    merged[key].extend(value)
+                elif key not in merged:
+                    merged[key] = value
+            if page.cont_yn != "Y":
+                return merged
+            cont_yn, next_key = "Y", page.next_key
+        log(logger, logging.WARNING, "kiwoom_incomplete", api_id=api_id, pages=MAX_PAGES)
+        raise AppError(
+            "incomplete_result",
+            f"조회 결과가 {MAX_PAGES}페이지를 넘어 전체를 가져오지 못했습니다.",
+            502,
+            {"api_id": api_id},
+        )
+
+    async def _call_page(
+        self,
+        spec: EnvironmentSpec,
+        api_id: str,
+        path: str,
+        body: dict[str, Any],
+        cont_yn: str,
+        next_key: str,
+        page_no: int,
+    ) -> _Page:
+        token = await self._token(spec)
+        for attempt in (1, 2):
+            headers = {
+                "api-id": api_id,
+                "authorization": f"Bearer {token.value}",
+                "cont-yn": cont_yn,
+                "next-key": next_key,
+                "Content-Type": CONTENT_TYPE,
+            }
+            try:
+                return await self._post(spec, api_id, path, body, headers, page_no)
+            except _KiwoomResult as result:
+                if result.code != INVALID_TOKEN or attempt == 2:
+                    raise _classify(result) from None
+                log(logger, logging.WARNING, "kiwoom_retry_invalid_token", api_id=api_id)
+                token = await self._token(spec, invalid=token)
+        raise AssertionError("unreachable")
+
+    async def _token(self, spec: EnvironmentSpec, invalid: _Token | None = None) -> _Token:
+        """캐시된 토큰을 돌려주거나 새로 발급한다. 같은 인증정보의 발급은 lock으로 하나만 진행한다.
+
+        invalid가 주어지면 그 토큰이 아직 캐시에 있을 때만 지운다. 늦게 도착한 8005가
+        그사이 다른 요청이 새로 받은 토큰을 지우지 않게 하기 위해서다.
+        """
+        key = spec.credential_prefix
+        lock = self._token_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = self._tokens.get(key)
+            if invalid is not None and cached == invalid:
+                del self._tokens[key]
+                cached = None
+            if cached and datetime.now(KST) < cached.expires_at - TOKEN_EXPIRY_MARGIN:
+                return cached
+            token = await self._issue_token(spec)
+            self._tokens[key] = token
+            return token
+
+    async def _issue_token(self, spec: EnvironmentSpec) -> _Token:
+        credentials = self.credentials(spec)
+        body = {
+            "grant_type": "client_credentials",
+            "appkey": credentials.app_key,
+            "secretkey": credentials.app_secret,
+        }
+        try:
+            page = await self._post(
+                spec, "au10001", "/oauth2/token", body, {"Content-Type": CONTENT_TYPE}, 1
+            )
+        except _KiwoomResult as result:
+            raise _classify(result) from None
+        value = page.data.get("token")
+        if not isinstance(value, str) or not value:
+            raise response_format_error("au10001", "token 필드가 없습니다.")
+        secrets.add(value)
+        token = _Token(value, _parse_expires_dt(page.data.get("expires_dt")))
+        log(
+            logger,
+            logging.INFO,
+            "token_issued",
+            api_id="au10001",
+            expires_at=token.expires_at.isoformat(),
+        )
+        return token
+
+    async def _post(
+        self,
+        spec: EnvironmentSpec,
+        api_id: str,
+        path: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        page_no: int,
+    ) -> _Page:
+        url = f"{spec.domain}{path}"
+        log(logger, logging.INFO, "kiwoom_request", api_id=api_id, target=url, page=page_no)
+        started = time.perf_counter()
+        try:
+            response = await self._http.post(url, content=json.dumps(body), headers=headers)
+        except httpx.HTTPError as exc:
+            log(
+                logger,
+                logging.ERROR,
+                "kiwoom_connection_failed",
+                api_id=api_id,
+                target=url,
+                error_type=type(exc).__name__,
+                cause=str(exc),
+            )
+            raise AppError(
+                "connection_error", "키움 서버에 연결하지 못했습니다.", 502, {"api_id": api_id}
+            ) from exc
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or "return_code" not in data:
+            log(
+                logger,
+                logging.ERROR,
+                "kiwoom_response_malformed",
+                api_id=api_id,
+                target=url,
+                http_status=response.status_code,
+                body_head=response.text[:_LOG_BODY_LIMIT],
+                elapsed_ms=elapsed_ms,
+            )
+            raise response_format_error(api_id, f"HTTP {response.status_code}, return_code 없음")
+
+        return_code = data["return_code"]
+        return_msg = str(data.get("return_msg", ""))
+        cont_yn = response.headers.get("cont-yn", "N")
+        log(
+            logger,
+            logging.INFO if return_code == 0 else logging.WARNING,
+            "kiwoom_response",
+            api_id=api_id,
+            target=url,
+            http_status=response.status_code,
+            return_code=return_code,
+            return_msg=return_msg,
+            cont_yn=cont_yn,
+            elapsed_ms=elapsed_ms,
+        )
+        if return_code != 0:
+            raise _KiwoomResult(api_id, return_code, return_msg)
+        return _Page(data, cont_yn, response.headers.get("next-key", ""))
+
+
+def _classify(result: _KiwoomResult) -> AppError:
+    detail = {"api_id": result.api_id, "return_code": result.code}
+    if result.code in CREDENTIAL_MISMATCH:
+        return AppError(
+            "config_error",
+            f"실전/모의 인증정보가 맞지 않습니다. [{result.code}] {result.message}",
+            503,
+            detail,
+        )
+    if result.code in RATE_LIMITED:
+        return AppError(
+            "rate_limited",
+            f"키움 API 호출 한도를 넘었습니다. 잠시 후 다시 시도하세요. [{result.code}]",
+            429,
+            detail,
+        )
+    return AppError("kiwoom_error", f"키움 오류 [{result.code}] {result.message}", 502, detail)
+
+
+def _parse_expires_dt(value: Any) -> datetime:
+    """expires_dt(YYYYMMDDHHMMSS)를 한국시간으로 해석한다.
+
+    키움 문서에 시간대가 없다. 실제가 UTC라면 한국시간 해석은 9시간 일찍 재발급할 뿐이지만,
+    반대로 UTC로 해석했는데 실제가 한국시간이면 만료된 토큰을 쓰게 된다. 틀려도 안전한 쪽을 택했다.
+    """
+    try:
+        return datetime.strptime(str(value), "%Y%m%d%H%M%S").replace(tzinfo=KST)
+    except ValueError:
+        raise response_format_error("au10001", "expires_dt 형식이 올바르지 않습니다.") from None
