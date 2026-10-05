@@ -31,9 +31,15 @@ class FakeKiwoom:
     requests: list[httpx.Request] = field(default_factory=list)
     issued_tokens: list[str] = field(default_factory=list)
     on_request: Callable[[httpx.Request], None] | None = None
+    # api-id -> 요청을 보고 응답을 고르는 함수. 요청 본문에 따라 다른 응답이 필요할 때 쓴다.
+    responders: dict[str, Callable[[httpx.Request], Reply]] = field(default_factory=dict)
 
     def reply(self, api_id: str, *pages: Reply) -> FakeKiwoom:
         self.replies[api_id] = list(pages)
+        return self
+
+    def respond(self, api_id: str, responder: Callable[[httpx.Request], Reply]) -> FakeKiwoom:
+        self.responders[api_id] = responder
         return self
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -54,9 +60,12 @@ class FakeKiwoom:
                 },
             )
         api_id = request.headers["api-id"]
-        pages = self.replies[api_id]
-        index = sum(1 for r in self.requests if r.headers.get("api-id") == api_id) - 1
-        page = pages[min(index, len(pages) - 1)]
+        if api_id in self.responders:
+            page = self.responders[api_id](request)
+        else:
+            pages = self.replies[api_id]
+            index = sum(1 for r in self.requests if r.headers.get("api-id") == api_id) - 1
+            page = pages[min(index, len(pages) - 1)]
         if isinstance(page, httpx.Response):
             return page
         return page_response(page)
@@ -357,6 +366,79 @@ USA01980_REPLY = {
         }
     ],
 }
+
+
+# 종목 목록 TR 응답. 값은 모의 서버에서 실제로 받은 형태를 따른다.
+def ka10099_row(code: str, name: str, market: str = "거래소", **extra: str) -> dict[str, str]:
+    return {
+        "code": code,
+        "name": name,
+        "listCount": "0000000027931470",
+        "auditInfo": "정상",
+        "regDay": "19760324",
+        "lastPrice": "00005130",
+        "state": "증거금40%|담보대출|신용가능",
+        "marketCode": "0",
+        "marketName": market,
+        "upName": "전기전자",
+        "upSizeName": "대형주",
+        "companyClassName": "",
+        "orderWarning": "0",
+        "nxtEnable": "Y",
+        "kind": "A",
+        **extra,
+    }
+
+
+def usa10099_row(
+    code: str, name: str, english: str, stex: str = "ND", **extra: str
+) -> dict[str, str]:
+    names = {"NY": "NYSE", "ND": "NASDAQ", "NA": "AMEX", "NP": "OTC"}
+    return {
+        "stex_tp": stex,
+        "stk_cd": code,
+        "stk_nm": name,
+        "stk_enm": english,
+        "mkgb": names.get(stex, stex),
+        "upgb": "컴퓨터 및 전자장비",
+        "isEtf": "N",
+        **extra,
+    }
+
+
+KOSPI_ROWS = [
+    ka10099_row("005930", "삼성전자"),
+    ka10099_row("000660", "SK하이닉스"),
+    ka10099_row("069500", "KODEX 200", "ETF", upName=""),
+    ka10099_row("000040", "KR모터스", auditInfo="관리종목", upName="운송장비/부품"),
+]
+KOSDAQ_ROWS = [ka10099_row("247540", "에코프로비엠", "코스닥", upName="일반전기전자")]
+US_ROWS = [
+    usa10099_row("AAPL", "애플", "APPLE INC"),
+    usa10099_row(
+        "SPY", "S&P 500 SPDR ETF", "STATE STREET SPDR S&P 500 ETF", "NY", isEtf="Y", upgb=""
+    ),
+    usa10099_row(
+        "SPY", "S&P 500 SPDR ETF", "STATE STREET SPDR S&P 500 ETF", "NY", isEtf="Y", upgb=""
+    ),
+    usa10099_row("APLE", "애플 호스피탈리티", "APPLE HOSPITALITY REIT INC", "NY"),
+    usa10099_row("OTCX", "장외종목", "OTC EXAMPLE", "NP"),
+]
+
+
+def stock_list_fake(
+    kospi: Reply | None = None, kosdaq: Reply | None = None, us: Reply | None = None
+) -> FakeKiwoom:
+    """ka10099는 mrkt_tp(0 코스피, 10 코스닥)에 따라, usa10099는 하나의 응답을 준다."""
+    domestic = {
+        "0": kospi if kospi is not None else {"list": KOSPI_ROWS},
+        "10": kosdaq if kosdaq is not None else {"list": KOSDAQ_ROWS},
+    }
+    return (
+        FakeKiwoom()
+        .respond("ka10099", lambda request: domestic[body_of(request)["mrkt_tp"]])
+        .reply("usa10099", us if us is not None else {"list": US_ROWS})
+    )
 
 
 def ranking_fake(api_id: str, *pages: Reply) -> FakeKiwoom:

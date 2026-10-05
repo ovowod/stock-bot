@@ -16,6 +16,12 @@ class Reader:
     def text(self, key: str) -> str:
         return str(required(self._data, key, self._api_id)).strip()
 
+    def optional(self, key: str) -> str | None:
+        """없어도 되는 글자 필드. 없거나 빈 값이면 None."""
+        value = self._data.get(key)
+        text = "" if value is None else str(value).strip()
+        return text or None
+
     def integer(self, key: str) -> int | None:
         value = self.number(key)
         return None if value is None else int(value)

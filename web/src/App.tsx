@@ -1,9 +1,10 @@
-import { ChevronRight, Menu, ShieldAlert, Sparkles, Trophy, Wallet, X, type LucideIcon } from "lucide-react";
+import { ChevronRight, Menu, Search, ShieldAlert, Sparkles, Trophy, Wallet, X, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { EnvironmentValue } from "./api";
 import { ENVIRONMENTS, findEnvironment, loadEnvironment, saveEnvironment } from "./environments";
 import { AccountPage } from "./features/account/AccountPage";
 import { RankingPage } from "./features/ranking/RankingPage";
+import { StockSearchPage } from "./features/search/StockSearchPage";
 
 interface Feature {
   id: string;
@@ -34,6 +35,12 @@ const GROUPS: FeatureGroup[] = [
   {
     title: "시세",
     features: [
+      {
+        id: "stock-search",
+        label: "종목 검색",
+        icon: Search,
+        render: (environment) => <StockSearchPage key={environment} environment={environment} />,
+      },
       {
         id: "ranking",
         label: "순위",

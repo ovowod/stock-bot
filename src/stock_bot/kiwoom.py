@@ -88,6 +88,13 @@ class KiwoomClient:
         cont_yn, next_key = "N", ""
         for page_no in range(1, MAX_PAGES + 1):
             page = await self._call_page(spec, api_id, path, body, cont_yn, next_key, page_no)
+            # 앞 페이지에서 목록이던 필드가 빠지거나 목록이 아니면,
+            # 일부만 받은 결과를 돌려주지 않고 응답 형식 오류로 처리한다.
+            for key, value in merged.items():
+                if isinstance(value, list) and not isinstance(page.data.get(key), list):
+                    raise response_format_error(
+                        api_id, f"{page_no}페이지의 {key} 필드가 목록이 아닙니다."
+                    )
             for key, value in page.data.items():
                 if isinstance(value, list) and isinstance(merged.get(key), list):
                     merged[key].extend(value)
