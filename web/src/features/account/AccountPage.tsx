@@ -2,6 +2,7 @@ import { Clock, Landmark, RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
 import type { DomesticAccount, EnvironmentValue, UsAccount } from "../../api";
 import { findEnvironment } from "../../environments";
+import { useOrderPanel } from "../order/OrderPanel";
 import { formatCount, formatForeign, formatKrw, formatRate, formatTime } from "../../format";
 import {
   AccountSkeleton,
@@ -61,9 +62,9 @@ export function AccountPage({ environment }: { environment: EnvironmentValue }) 
         >
           {ready.refreshError && <ErrorNotice error={ready.refreshError} onRetry={refresh} compact />}
           {ready.data.market === "domestic" ? (
-            <DomesticView data={ready.data} />
+            <DomesticView data={ready.data} onSold={refresh} />
           ) : (
-            <UsView data={ready.data} />
+            <UsView data={ready.data} onSold={refresh} />
           )}
         </div>
       )}
@@ -90,8 +91,9 @@ function HeroValue({ children }: { children: ReactNode }) {
   );
 }
 
-function DomesticView({ data }: { data: DomesticAccount }) {
+function DomesticView({ data, onSold }: { data: DomesticAccount; onSold: () => void }) {
   const { summary, deposit } = data;
+  const openOrder = useOrderPanel();
   return (
     <Layout
       hero={
@@ -148,6 +150,15 @@ function DomesticView({ data }: { data: DomesticAccount }) {
                 { label: "보유비중", value: formatRate(h.weight) },
                 ...sellableDetail(h.quantity, h.tradable_quantity),
               ],
+              onSell: () =>
+                openOrder({
+                  code: h.code,
+                  name: h.name,
+                  exchange: null,
+                  category: null,
+                  status: null,
+                  sell: { quantity: h.quantity, sellableQuantity: h.tradable_quantity, onAccepted: onSold },
+                }),
               value: formatKrw(h.evaluation_amount),
               change: (
                 <>
@@ -163,8 +174,9 @@ function DomesticView({ data }: { data: DomesticAccount }) {
   );
 }
 
-function UsView({ data }: { data: UsAccount }) {
+function UsView({ data, onSold }: { data: UsAccount; onSold: () => void }) {
   const { summary, summary_krw: krw, deposit } = data;
+  const openOrder = useOrderPanel();
   const currency = data.currency || "USD";
   const usd = (value: number | null) => formatForeign(value, currency);
   const price = (value: number | null) => formatForeign(value, currency, 4);
@@ -252,6 +264,15 @@ function UsView({ data }: { data: UsAccount }) {
                 { label: "원화 평가금액", value: formatKrw(h.evaluation_amount_krw) },
                 ...sellableDetail(h.quantity, h.sellable_quantity),
               ],
+              onSell: () =>
+                openOrder({
+                  code: h.code,
+                  name: h.name,
+                  exchange: h.exchange,
+                  category: null,
+                  status: null,
+                  sell: { quantity: h.quantity, sellableQuantity: h.sellable_quantity, onAccepted: onSold },
+                }),
               value: usd(h.evaluation_amount),
               valueSub: formatKrw(h.evaluation_amount_krw),
               change: (

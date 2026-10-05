@@ -175,8 +175,22 @@ export function fetchQuote(
   return getJson<Quote>(`/api/environments/${environment}/quote?${params}`, signal);
 }
 
+/** 한 종목의 보유수량과 매도 가능 수량. 보유하지 않으면 held가 false이고 두 수량은 0이다. */
+export interface Holding {
+  code: string;
+  held: boolean;
+  quantity: number;
+  sellable_quantity: number;
+  fetched_at: string;
+}
+
+export function fetchHolding(environment: EnvironmentValue, code: string, signal: AbortSignal): Promise<Holding> {
+  return getJson<Holding>(`/api/environments/${environment}/holdings/${encodeURIComponent(code)}`, signal);
+}
+
 export interface OrderRequest {
   order_key: string;
+  side: "buy" | "sell";
   code: string;
   exchange?: string;
   order_type: "limit" | "market";
@@ -196,7 +210,7 @@ export const ORDER_RESULT_UNKNOWN = "order_result_unknown";
 const UNKNOWN_KINDS = new Set([ORDER_RESULT_UNKNOWN, "duplicate_order"]);
 
 /**
- * 매수 주문을 보낸다. 어떤 경우에도 다시 보내지 않는다.
+ * 매수·매도 주문을 보낸다. 어떤 경우에도 다시 보내지 않는다.
  * 응답을 받지 못했거나(연결 끊김, 시간 초과) 해석하지 못하면 접수 여부 확인 불가로 던진다.
  * 같은 주문 키의 중복 거부(409)도 이전 요청이 접수됐을 수 있으므로 확인 불가로 본다.
  */

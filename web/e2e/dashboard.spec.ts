@@ -143,7 +143,7 @@ test("처음에는 국내 모의로 열리고 계좌 요약·예수금·보유�
   const samsung = page.getByRole("listitem").filter({ hasText: "삼성전자" }).filter({ visible: true }).first();
   if (info.project.name.includes("mobile")) {
     // 모바일 목록은 이름·수량과 평가금액·손익만 보여주고, 줄을 누르면 세부 정보를 펼친다.
-    const toggle = samsung.getByRole("button", { name: /삼성전자/ });
+    const toggle = samsung.locator("button[aria-expanded]");
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await expect(samsung.getByText("100주", { exact: true }).filter({ visible: true })).toBeVisible();
     await expect(samsung.getByText("8,450,000원", { exact: true }).filter({ visible: true })).toBeVisible();

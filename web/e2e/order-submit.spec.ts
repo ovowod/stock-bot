@@ -93,6 +93,10 @@ const confirmation = (page: Page) => page.getByRole("region", { name: "최종 �
 
 test("국내 모의에서 최종 확인을 거쳐 지정가 매수 주문을 보내고, 접수 알림을 본다", async ({ page }) => {
   const orders = await mockApi(page);
+  const holdingRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/holdings/")) holdingRequests.push(request.url());
+  });
   const dialog = await openPanel(page);
   await dialog.getByLabel("수량 (주)").fill("2");
   await dialog.getByRole("button", { name: "매수" }).click();
@@ -113,6 +117,8 @@ test("국내 모의에서 최종 확인을 거쳐 지정가 매수 주문을 보
   }
   expect(orders).toEqual([]);
 
+  // 매수는 최종 확인에서 잔고를 다시 조회하지 않는다.
+  expect(holdingRequests).toEqual([]);
   await confirm.getByRole("button", { name: "주문하기" }).click();
   const toast = page.getByRole("status").filter({ hasText: "매수 주문이 접수되었습니다" });
   await expect(toast).toContainText("주문번호 00024");
@@ -120,7 +126,7 @@ test("국내 모의에서 최종 확인을 거쳐 지정가 매수 주문을 보
 
   expect(orders).toHaveLength(1);
   const { order_key: orderKey, ...rest } = orders[0].body;
-  expect(rest).toEqual({ code: "000660", order_type: "limit", quantity: "2", price: "190000" });
+  expect(rest).toEqual({ side: "buy", code: "000660", order_type: "limit", quantity: "2", price: "190000" });
   expect(typeof orderKey).toBe("string");
   await expect(toast).toContainText(`주문 키 ${orderKey}`);
   await expect(toast).toContainText("요청 ID req-ok-1");
@@ -241,7 +247,7 @@ test("국내 시장가 주문은 가격 없이 보내고, 최종 확인에 시�
 
   await expect(page.getByRole("status").filter({ hasText: "매수 주문이 접수되었습니다" })).toBeVisible();
   const { order_key: _, ...rest } = orders[0].body;
-  expect(rest).toEqual({ code: "000660", order_type: "market", quantity: "1" });
+  expect(rest).toEqual({ side: "buy", code: "000660", order_type: "market", quantity: "1" });
 });
 
 test("미국 모의에서 거래소와 USD 금액을 확인하고 지정가 주문을 보낸다", async ({ page }) => {
@@ -260,7 +266,14 @@ test("미국 모의에서 거래소와 USD 금액을 확인하고 지정가 주�
   await expect(page.getByRole("status").filter({ hasText: "매수 주문이 접수되었습니다" })).toBeVisible();
   expect(orders[0].environment).toBe("us_paper");
   const { order_key: _, ...rest } = orders[0].body;
-  expect(rest).toEqual({ code: "SOXL", exchange: "NYSE", order_type: "limit", quantity: "2", price: "170.25" });
+  expect(rest).toEqual({
+    side: "buy",
+    code: "SOXL",
+    exchange: "NYSE",
+    order_type: "limit",
+    quantity: "2",
+    price: "170.25",
+  });
 });
 
 test("미국 실전에서도 매수 버튼 대신 안내가 보이고 주문 요청이 나가지 않는다", async ({ page }) => {

@@ -1,10 +1,14 @@
-"""매수 주문 접수: 모의투자 환경에서만 키움에 매수 주문을 보낸다(국내 kt10000, 미국 ust20000).
+"""주문 접수: 모의투자 환경에서만 키움에 주문을 보낸다.
 
+매수는 국내 kt10000·미국 ust20000, 매도는 국내 kt10001·미국 ust20001이다.
+매도는 보내기 직전에 잔고를 다시 확인한다.
 주문은 중복될 수 있으므로 키움 호출을 자동으로 다시 보내지 않는다.
 """
 
+import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -34,6 +38,11 @@ UNKNOWN_RESULT_MESSAGE = (
 MAX_NUMBER_LENGTH = 12
 _INTEGER = re.compile(r"^\d+$")
 _DECIMAL = re.compile(r"^\d+(\.\d+)?$")
+SIDES = {"buy", "sell"}
+ORDER_API_IDS: dict[Market, dict[str, str]] = {
+    Market.DOMESTIC: {"buy": "kt10000", "sell": "kt10001"},
+    Market.US: {"buy": "ust20000", "sell": "ust20001"},
+}
 # 지금은 지정가·시장가만 지원한다. 다른 매매구분은 .scratch/order-panel/spec.md의 Out of Scope 참고.
 TRADE_TYPES: dict[Market, dict[str, str]] = {
     Market.DOMESTIC: {"limit": "0", "market": "3"},
@@ -41,12 +50,18 @@ TRADE_TYPES: dict[Market, dict[str, str]] = {
 }
 
 
+HoldingLookup = Callable[[EnvironmentSpec, str], Awaitable[dict[str, Any]]]
+
+
 class OrderService:
-    def __init__(self, kiwoom: KiwoomClient) -> None:
+    def __init__(self, kiwoom: KiwoomClient, holding: HoldingLookup) -> None:
         self._kiwoom = kiwoom
+        # 매도 직전 잔고 확인. 계좌 서비스가 준다.
+        self._holding = holding
         # 받은 주문 키. 처리 중이거나 이미 처리한 키로 다시 오면 키움에 보내지 않는다.
         # 서버가 다시 시작될 때까지만 기억한다.
         self._order_keys: dict[Environment, set[str]] = {}
+        self._sell_locks: dict[tuple[Environment, str], asyncio.Lock] = {}
 
     async def place(self, spec: EnvironmentSpec, request: Any) -> dict[str, Any]:
         """request는 브라우저가 보낸 JSON 본문이다. 해석하지 못했으면 None이다."""
@@ -67,9 +82,67 @@ class OrderService:
             )
         seen.add(order["order_key"])
         log(logger, logging.INFO, "order_requested", **order)
+        if order["side"] == "sell":
+            # 서로 다른 주문 키라도 같은 종목의 매도가 같은 매도 가능 수량을 함께 쓰지 않게,
+            # 잔고 확인부터 주문 응답까지 하나씩 처리한다.
+            lock = self._sell_locks.setdefault((spec.environment, order["code"]), asyncio.Lock())
+            async with lock:
+                await self._check_sellable(spec, order)
+                return await self._send(spec, order)
+        return await self._send(spec, order)
+
+    async def _check_sellable(self, spec: EnvironmentSpec, order: dict[str, str]) -> None:
+        """매도 주문 직전에 잔고를 다시 조회한다. 확인하지 못하거나 넘치면 주문을 보내지 않는다."""
+        try:
+            holding = await self._holding(spec, order["code"])
+        except AppError as error:
+            log(
+                logger,
+                logging.WARNING,
+                "sellable_check_failed",
+                order_key=order["order_key"],
+                kind=error.kind,
+                cause=error.message,
+            )
+            # 주문 TR을 부르기 전이므로 접수 여부 확인 불가가 아니라 실패다.
+            raise AppError(
+                "sellable_check_failed",
+                f"잔고를 확인하지 못해 주문하지 않았습니다. {error.message}",
+                502,
+                {"api_id": error.detail.get("api_id")},
+            ) from error
+        sellable = holding["sellable_quantity"]
+        log(
+            logger,
+            logging.INFO,
+            "sellable_checked",
+            order_key=order["order_key"],
+            code=order["code"],
+            quantity=holding["quantity"],
+            sellable_quantity=sellable,
+        )
+        if int(order["quantity"]) > sellable:
+            log(
+                logger,
+                logging.WARNING,
+                "order_blocked_sellable",
+                order_key=order["order_key"],
+                quantity=order["quantity"],
+                sellable_quantity=sellable,
+            )
+            raise AppError(
+                "sellable_exceeded",
+                f"매도 가능 수량({sellable:,}주)을 넘어 주문하지 않았습니다.",
+                400,
+                {"sellable_quantity": sellable},
+            )
+
+    async def _send(self, spec: EnvironmentSpec, order: dict[str, str]) -> dict[str, Any]:
+        """주문 TR을 한 번만 호출하고 결과를 분류한다."""
+        api_id = ORDER_API_IDS[spec.market][order["side"]]
         trde_tp = TRADE_TYPES[spec.market][order["order_type"]]
         if spec.market is Market.DOMESTIC:
-            api_id, path = "kt10000", DOMESTIC_ORDER_PATH
+            path = DOMESTIC_ORDER_PATH
             body = {
                 "dmst_stex_tp": "KRX",
                 "stk_cd": order["code"],
@@ -79,7 +152,7 @@ class OrderService:
                 "cond_uv": "",
             }
         else:
-            api_id, path = "ust20000", US_ORDER_PATH
+            path = US_ORDER_PATH
             body = {
                 "stex_tp": US_EXCHANGE_CODES[order["exchange"]],
                 "stk_cd": order["code"],
@@ -87,6 +160,9 @@ class OrderService:
                 "ord_uv": order["price"],
                 "trde_tp": trde_tp,
             }
+            if order["side"] == "sell":
+                # 매도 TR(ust20001)에만 있는 칸. STOP 주문만 쓰므로 지정가·시장가는 빈 값이다.
+                body["stop_pric"] = ""
         try:
             data = await self._kiwoom.call_once(spec, api_id, path, body)
             order_no = Reader(data, api_id).text("ord_no")
@@ -132,6 +208,9 @@ def _validate(request: Any, market: Market) -> dict[str, str]:
     order_key = _text(request, "order_key")
     if not order_key or len(order_key) > MAX_ORDER_KEY_LENGTH:
         raise _invalid("주문 키가 필요합니다.")
+    side = _text(request, "side")
+    if side not in SIDES:
+        raise _invalid("매수·매도 구분이 올바르지 않습니다.")
     code = _text(request, "code")
     if not code:
         raise _invalid("종목코드가 필요합니다.")
@@ -161,6 +240,7 @@ def _validate(request: Any, market: Market) -> dict[str, str]:
                 raise _invalid(US_DECIMALS_MESSAGE)
     return {
         "order_key": order_key,
+        "side": side,
         "code": code,
         "exchange": exchange,
         "order_type": order_type,
