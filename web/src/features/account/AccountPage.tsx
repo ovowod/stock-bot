@@ -205,10 +205,16 @@ function UsView({ data }: { data: UsAccount }) {
                   key={c.currency}
                   label={`${c.currency} ${c.currency_name}`}
                   value={formatForeign(c.deposit, c.currency)}
-                  sub={`주문가능 ${formatForeign(c.orderable, c.currency)} · 출금가능 ${formatForeign(
-                    c.withdrawable,
-                    c.currency,
-                  )}`}
+                  sub={
+                    <>
+                      <span className="block whitespace-nowrap">
+                        주문가능 {formatForeign(c.orderable, c.currency)}
+                      </span>
+                      <span className="block whitespace-nowrap">
+                        출금가능 {formatForeign(c.withdrawable, c.currency)}
+                      </span>
+                    </>
+                  }
                 />
               ))}
             </dl>

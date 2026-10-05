@@ -199,6 +199,13 @@ test("미국 계좌는 USD와 원화 환산, 통화별 예수금, 거래소명�
   await expect(page.getByText("238,530,390원")).toBeVisible();
   await expect(page.getByText("미국달러")).toBeVisible();
   await expect(visibleText(page, "AAPL · 미국")).toBeVisible();
+  // 외화예수금의 주문가능·출금가능은 각각 한 줄로, 낱말 중간에서 끊기지 않는다.
+  for (const text of ["주문가능 $100,000.00", "출금가능 $100,000.00"]) {
+    const line = visibleText(page, text);
+    await expect(line).toHaveText(text);
+    const lineHeight = await line.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
+    expect((await line.boundingBox())!.height).toBeLessThan(lineHeight * 1.5);
+  }
   // 보유종목 상세 칸(넓은 화면에서만 보임)의 긴 원화 금액이 줄바꿈되지 않는다.
   const krwValue = page.locator("dd", { hasText: "165,743,335원" });
   if (await krwValue.isVisible()) {
