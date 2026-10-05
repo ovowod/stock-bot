@@ -296,6 +296,7 @@ def test_connection_failure_is_an_unknown_result_without_resending(make_client, 
 def test_malformed_order_responses_are_unknown_results(make_client):
     for reply in (
         {},  # return_code=0인데 주문번호가 없음
+        {"ord_no": ""},  # 주문번호가 빈 값
         httpx.Response(200, text="<html>bad gateway</html>"),
         httpx.Response(502, json={"message": "no return_code"}),
     ):

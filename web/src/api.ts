@@ -225,7 +225,7 @@ export async function placeOrder(
   }
   const requestId = body?.error?.request_id ?? response.headers.get("X-Request-ID");
   if (response.ok) {
-    if (typeof body?.order_no !== "string") throw unknown(requestId);
+    if (typeof body?.order_no !== "string" || !body.order_no) throw unknown(requestId);
     return { result: body as OrderAccepted, requestId };
   }
   const kind = body?.error?.kind;

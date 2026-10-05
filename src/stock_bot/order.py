@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Any
 
 from stock_bot.config import Environment, EnvironmentSpec, Market
-from stock_bot.errors import AppError
+from stock_bot.errors import AppError, response_format_error
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
 from stock_bot.quote import US_EXCHANGE_CODES
@@ -86,6 +86,8 @@ class OrderService:
         try:
             data = await self._kiwoom.call_once(spec, api_id, path, body)
             order_no = Reader(data, api_id).text("ord_no")
+            if not order_no:
+                raise response_format_error(api_id, "ord_no 값이 비어 있습니다.")
         except AppError as error:
             if error.kind in UNKNOWN_RESULT_KINDS:
                 log(
