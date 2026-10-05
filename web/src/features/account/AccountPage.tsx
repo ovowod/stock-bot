@@ -138,7 +138,7 @@ function DomesticView({ data }: { data: DomesticAccount }) {
               change: (
                 <>
                   <Change value={h.profit_loss} format={formatKrw} />{" "}
-                  <Change value={h.return_rate} format={formatRate} mark={false} />
+                  <Change value={h.return_rate} format={formatRate} parens />
                 </>
               ),
               details: [
@@ -226,7 +226,7 @@ function UsView({ data }: { data: UsAccount }) {
               change: (
                 <>
                   <Change value={h.profit_loss} format={usd} />{" "}
-                  <Change value={h.return_rate} format={formatRate} mark={false} />
+                  <Change value={h.return_rate} format={formatRate} parens />
                 </>
               ),
               details: [

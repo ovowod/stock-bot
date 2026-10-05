@@ -141,7 +141,7 @@ test("처음에는 국내 모의로 열리고 계좌 요약·예수금·보유�
   await page.screenshot({ path: `screenshots/${info.project.name}-domestic-paper.png`, fullPage: true });
 });
 
-test("수익은 빨강 ▲ +, 손실은 파랑 ▼ − 로 표시한다", async ({ page }) => {
+test("수익은 빨강 +, 손실은 파랑 − 로 표시하고 수익률은 괄호로 붙인다", async ({ page }) => {
   await mockAccount(page, { domestic_paper: { body: domestic() } });
   await page.goto("/");
 
@@ -152,8 +152,14 @@ test("수익은 빨강 ▲ +, 손실은 파랑 ▼ − 로 표시한다", async 
   const color = (locator: typeof gain) => locator.evaluate((el) => getComputedStyle(el).color);
   expect(await color(gain)).toBe("rgb(240, 68, 82)");
   expect(await color(loss)).toBe("rgb(49, 130, 246)");
-  await expect(gain).toContainText("▲");
-  await expect(loss).toContainText("▼");
+  // 화살표 없이 부호와 색으로만 방향을 보여주고, 수익률은 금액 뒤 괄호에 둔다.
+  const holding = (name: string) =>
+    page.getByRole("listitem").filter({ hasText: name }).filter({ visible: true }).first();
+  await expect(holding("삼성전자")).not.toContainText("▲");
+  await expect(holding("삼성전자")).not.toContainText("▼");
+  await expect(visibleText(page, "(+20.71%)")).toBeVisible();
+  await expect(visibleText(page, "(−2.60%)")).toBeVisible();
+  await expect(visibleText(page, "(+12.23%)")).toBeVisible();
 });
 
 test("부호 없이 표시하는 금액도 음수면 − 를 유지한다", async ({ page }) => {

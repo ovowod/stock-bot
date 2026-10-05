@@ -4,34 +4,31 @@ import type { ApiError } from "../../api";
 import { direction, EMPTY } from "../../format";
 
 const TONE = {
-  up: { text: "text-gain", soft: "bg-gain-soft", mark: "▲", sign: "+" },
-  down: { text: "text-loss", soft: "bg-loss-soft", mark: "▼", sign: "−" },
-  flat: { text: "text-muted", soft: "bg-canvas", mark: "", sign: "" },
+  up: { text: "text-gain", soft: "bg-gain-soft", sign: "+" },
+  down: { text: "text-loss", soft: "bg-loss-soft", sign: "−" },
+  flat: { text: "text-muted", soft: "bg-canvas", sign: "" },
 } as const;
 
-/** 수익·상승은 빨강 ▲ +, 손실·하락은 파랑 ▼ −, 0은 회색. 색을 못 구분해도 기호로 알 수 있다. */
+/** 수익·상승은 빨강 +, 손실·하락은 파랑 −, 0은 회색. 색을 못 구분해도 부호로 알 수 있다. 수익률은 parens로 괄호에 넣는다. */
 export function Change({
   value,
   format,
   className = "",
-  mark = true,
+  parens = false,
 }: {
   value: number | null;
   format: (value: number | null) => string;
   className?: string;
-  mark?: boolean;
+  parens?: boolean;
 }) {
   if (value === null) return <span className={`text-muted ${className}`}>{EMPTY}</span>;
   const tone = TONE[direction(value)];
   return (
     <span className={`whitespace-nowrap ${tone.text} ${className}`}>
-      {mark && tone.mark && (
-        <span className="mr-0.5 text-[0.75em]" aria-hidden>
-          {tone.mark}
-        </span>
-      )}
+      {parens && "("}
       {tone.sign}
       {format(Math.abs(value))}
+      {parens && ")"}
     </span>
   );
 }
@@ -55,7 +52,7 @@ export function ChangePill({
       }`}
     >
       <Change value={amount} format={formatAmount} />
-      <Change value={rate} format={formatRate} mark={false} />
+      <Change value={rate} format={formatRate} parens />
     </span>
   );
 }

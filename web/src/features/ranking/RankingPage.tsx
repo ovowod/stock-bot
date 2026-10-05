@@ -296,11 +296,11 @@ function RankingRow({
   );
 }
 
-const TONE: Record<RankingDirection, { text: string; mark: string; sign: string }> = {
-  up: { text: "text-gain", mark: "▲", sign: "+" },
-  down: { text: "text-loss", mark: "▼", sign: "−" },
-  flat: { text: "text-muted", mark: "", sign: "" },
-  unknown: { text: "text-muted", mark: "", sign: "" },
+const TONE: Record<RankingDirection, { text: string; sign: string }> = {
+  up: { text: "text-gain", sign: "+" },
+  down: { text: "text-loss", sign: "−" },
+  flat: { text: "text-muted", sign: "" },
+  unknown: { text: "text-muted", sign: "" },
 };
 
 /** 등락 방향은 키움이 준 기호를 따른다. 알 수 없는 기호는 보합으로 단정하지 않고 중립으로 둔다. */
@@ -317,11 +317,6 @@ export function RateChange({
   const tone = TONE[direction];
   return (
     <p className={`whitespace-nowrap ${tone.text} ${className}`} data-direction={direction}>
-      {tone.mark && (
-        <span className="mr-0.5 text-[0.75em]" aria-hidden>
-          {tone.mark}
-        </span>
-      )}
       {/* 방향을 모르거나 보합이어도 음수 등락률의 부호는 남긴다. */}
       {tone.sign || (rate < 0 ? "−" : "")}
       {Math.abs(rate).toFixed(2)}%

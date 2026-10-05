@@ -227,7 +227,7 @@ test("상승률은 등락률을 크게, 거래량은 거래량을 짧게 보여�
   await mockRankings(page, ({ environment, kind }) => ({ body: ranking(environment, kind, [item]) }));
   await openRanking(page);
 
-  await expect(card(page, "상승률 상위").locator("[data-direction=up]").last()).toHaveText("▲+29.96%");
+  await expect(card(page, "상승률 상위").locator("[data-direction=up]").last()).toHaveText("+29.96%");
   await expect(card(page, "거래량 상위")).toContainText("5.05억주");
 });
 
