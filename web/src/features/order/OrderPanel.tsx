@@ -12,6 +12,7 @@ import {
   newOrderKey,
   parsePrice,
   parseQuantity,
+  quoteToPriceText,
   type OrderTarget,
   type OrderType,
 } from "./order";
@@ -135,16 +136,16 @@ type QuoteStatus = "loading" | "ready" | "error";
  * 패널이 열릴 때 현재가를 한 번 조회해 가격 칸을 채운다.
  * 사용자가 가격 칸을 이미 건드렸으면 성공·실패 모두 그 값을 그대로 둔다.
  */
-function usePriceWithQuote(environment: EnvironmentValue, target: OrderTarget) {
+function usePriceWithQuote(env: EnvironmentOption, target: OrderTarget) {
   const [priceText, setPriceText] = useState("");
   const [status, setStatus] = useState<QuoteStatus>("loading");
   const touched = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchQuote(environment, target.code, target.exchange, controller.signal).then(
+    fetchQuote(env.value, target.code, target.exchange, controller.signal).then(
       (quote) => {
-        if (!touched.current && quote.price !== null) setPriceText(String(quote.price));
+        if (!touched.current && quote.price !== null) setPriceText(quoteToPriceText(quote.price, env.market));
         setStatus("ready");
       },
       () => {
@@ -152,7 +153,7 @@ function usePriceWithQuote(environment: EnvironmentValue, target: OrderTarget) {
       },
     );
     return () => controller.abort();
-  }, [environment, target.code, target.exchange]);
+  }, [env.value, env.market, target.code, target.exchange]);
 
   const change = (value: string) => {
     touched.current = true;
@@ -178,7 +179,7 @@ function BuyForm({
   const showToast = useToast();
   const [type, setType] = useState<OrderType>("limit");
   const [quantityText, setQuantityText] = useState("1");
-  const { priceText, change: setPriceText, status: quoteStatus } = usePriceWithQuote(env.value, target);
+  const { priceText, change: setPriceText, status: quoteStatus } = usePriceWithQuote(env, target);
   const [step, setStep] = useState<Step>("input");
   const orderKey = useRef("");
   const quantity = parseQuantity(quantityText);

@@ -83,6 +83,16 @@ export function parsePrice(
   };
 }
 
+/**
+ * 조회한 현재가를 가격 칸에 넣을 문자열로 바꾼다. 미국 현재가는 소수 넷째 자리까지 오지만
+ * 주문은 $1 이상이면 둘째 자리까지만 받으므로 반올림한다(예: 747.7512 -> 747.75).
+ */
+export function quoteToPriceText(price: number, market: Market): string {
+  if (market === "domestic" || price < 1) return String(price);
+  // 1.005 * 100이 100.49999...가 되는 부동소수 오차를 피하려고 먼저 자릿수를 정리한다.
+  return String(Math.round(Number((price * 100).toFixed(6))) / 100);
+}
+
 /** 최종 확인마다 새로 만드는 주문 키. 보안 연결이 아니어도 쓸 수 있는 getRandomValues로 만든다. */
 export function newOrderKey(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));

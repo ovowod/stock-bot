@@ -293,3 +293,35 @@ test("바깥 영역을 누르면 패널이 닫히고, 패널이 열려도 가로
   await page.getByRole("button", { name: "주문 패널 닫기" }).click({ position: { x: 5, y: 5 } });
   await expect(panel(page, "SK하이닉스")).toHaveCount(0);
 });
+
+test("미국 현재가가 소수 넷째 자리로 오면 $1 이상은 둘째 자리로 반올림해 채운다", async ({ page }) => {
+  const prices: Record<string, number> = { SOXL: 747.7512, PENY: 0.1234, EDGE: 1.005 };
+  await mockApi(
+    page,
+    {
+      domestic: [],
+      us: [
+        rankingItem("SOXL", "디렉시온 반도체", "NYSE", 747),
+        rankingItem("PENY", "페니 종목", "NASDAQ", 0.12),
+        rankingItem("EDGE", "경계 종목", "AMEX", 1),
+      ],
+    },
+    [],
+    ({ code }) => ({ body: { code, price: prices[code], fetched_at: "2026-10-05T06:30:00+00:00" } }),
+  );
+  await page.goto("/");
+  await selectEnvironment(page, "미국 모의");
+  await selectMenu(page, "순위");
+
+  for (const [name, expected] of [
+    ["디렉시온 반도체", "747.75"],
+    ["페니 종목", "0.1234"],
+    ["경계 종목", "1.01"],
+  ]) {
+    await tradingValueCard(page).getByRole("button", { name }).click();
+    const dialog = panel(page, name);
+    await expect(dialog.getByLabel("가격 (USD)")).toHaveValue(expected);
+    await expect(dialog.getByRole("button", { name: "매수" })).toBeEnabled();
+    await page.keyboard.press("Escape");
+  }
+});
