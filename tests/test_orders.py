@@ -130,3 +130,84 @@ def test_order_events_are_logged_with_the_order_key(make_client, caplog):
     assert events["order_requested"]["order_key"] == "key-77"
     assert events["order_requested"]["quantity"] == "3"
     assert events["order_accepted"]["order_no"] == "00024"
+
+
+US_URL = "/api/environments/us_paper/orders"
+
+
+def us_order(**overrides: object) -> dict[str, object]:
+    return {
+        "order_key": "key-us-1",
+        "code": "NVDA",
+        "exchange": "NASDAQ",
+        "order_type": "limit",
+        "quantity": "10",
+        "price": "213.04",
+        **overrides,
+    }
+
+
+def test_domestic_market_order_sends_trde_tp_3_without_a_price(make_client):
+    fake = FakeKiwoom().reply("kt10000", ORDER_REPLY)
+    order = {k: v for k, v in domestic_order(order_type="market").items() if k != "price"}
+    response = make_client(fake).post(DOMESTIC_URL, json=order)
+
+    assert response.status_code == 200
+    body = body_of(fake.calls("kt10000")[0])
+    assert body["trde_tp"] == "3"
+    assert body["ord_uv"] == ""
+
+
+def test_market_order_with_a_price_is_rejected(make_client):
+    fake = FakeKiwoom()
+    client = make_client(fake)
+    assert client.post(DOMESTIC_URL, json=domestic_order(order_type="market")).status_code == 400
+    assert client.post(US_URL, json=us_order(order_type="market")).status_code == 400
+    assert fake.requests == []
+
+
+def test_us_limit_order_is_sent_to_ust20000(make_client):
+    fake = FakeKiwoom().reply("ust20000", {"ord_no": "000000282", "stk_nm": "엔비디아"})
+    response = make_client(fake).post(US_URL, json=us_order())
+
+    assert response.status_code == 200
+    assert response.json()["order_no"] == "000000282"
+    request = fake.calls("ust20000")[0]
+    assert request.url.host == "mockapi.kiwoom.com"
+    assert request.url.path == "/api/us/ordr"
+    assert body_of(request) == {
+        "stex_tp": "ND",
+        "stk_cd": "NVDA",
+        "ord_qty": "10",
+        "ord_uv": "213.04",
+        "trde_tp": "00",
+    }
+
+
+def test_us_market_order_sends_trde_tp_03_without_a_price(make_client):
+    fake = FakeKiwoom().reply("ust20000", {"ord_no": "000000283"})
+    order = {k: v for k, v in us_order(order_type="market").items() if k != "price"}
+    response = make_client(fake).post(US_URL, json=order)
+
+    assert response.status_code == 200
+    body = body_of(fake.calls("ust20000")[0])
+    assert body["trde_tp"] == "03"
+    assert body["ord_uv"] == ""
+
+
+def test_us_price_accepts_decimals_up_to_twelve_characters(make_client):
+    fake = FakeKiwoom().reply("ust20000", {"ord_no": "000000284"})
+    client = make_client(fake)
+    assert client.post(US_URL, json=us_order(price="0.0001")).status_code == 200
+    assert body_of(fake.calls("ust20000")[0])["ord_uv"] == "0.0001"
+    for price in ("0", "0.0000", "1234567890123", "213.040000000", "1e3", "-1"):
+        assert client.post(US_URL, json=us_order(price=price)).status_code == 400, price
+
+
+def test_us_order_needs_a_supported_exchange(make_client):
+    fake = FakeKiwoom()
+    client = make_client(fake)
+    for exchange in (None, "", "OTC"):
+        response = client.post(US_URL, json=us_order(exchange=exchange))
+        assert response.status_code == 400, exchange
+    assert fake.requests == []

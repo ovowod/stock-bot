@@ -16,6 +16,9 @@ const RANKING_ITEM = {
   rank_change: 0,
 };
 
+const US_ITEM = { ...RANKING_ITEM, code: "SOXL", name: "디렉시온 반도체", exchange: "NYSE", price: 162.6 };
+const QUOTES: Record<string, number> = { "000660": 190_000, SOXL: 170.25 };
+
 type Reply = { status?: number; body?: unknown; delayMs?: number; headers?: Record<string, string> };
 type OrderRequest = { environment: string; body: Record<string, unknown> };
 
@@ -39,7 +42,8 @@ async function mockApi(page: Page, order: (request: OrderRequest) => Reply = acc
         .fulfill({ status: reply.status ?? 200, json: reply.body, headers: reply.headers })
         .catch(() => {});
     } else if (resource === "quote") {
-      await route.fulfill({ json: { code: "000660", price: 190_000, fetched_at: "2026-10-05T01:00:00+00:00" } });
+      const code = url.searchParams.get("code") ?? "";
+      await route.fulfill({ json: { code, price: QUOTES[code], fetched_at: "2026-10-05T01:00:00+00:00" } });
     } else if (resource === "rankings") {
       await route.fulfill({
         json: {
@@ -48,7 +52,7 @@ async function mockApi(page: Page, order: (request: OrderRequest) => Reply = acc
           kind,
           exchange: "all",
           fetched_at: "2026-10-05T01:00:00+00:00",
-          items: market === "domestic" ? [RANKING_ITEM] : [],
+          items: market === "domestic" ? [RANKING_ITEM] : [US_ITEM],
         },
       });
     } else {
@@ -58,15 +62,15 @@ async function mockApi(page: Page, order: (request: OrderRequest) => Reply = acc
   return orders;
 }
 
-async function openPanel(page: Page, environment = "국내 모의") {
+async function openPanel(page: Page, environment = "국내 모의", name = "SK하이닉스", price = "190,000") {
   await page.goto("/");
   await page.getByRole("radio", { name: environment }).filter({ visible: true }).click();
   const menu = page.getByRole("button", { name: "메뉴 열기" });
   if (await menu.isVisible()) await menu.click();
   await page.getByRole("button", { name: "순위" }).filter({ visible: true }).click();
-  await page.getByRole("region", { name: "거래대금 상위" }).getByRole("button", { name: /SK하이닉스/ }).click();
-  const dialog = page.getByRole("dialog", { name: "SK하이닉스 주문" });
-  await expect(dialog.getByLabel("가격 (원)")).toHaveValue("190,000");
+  await page.getByRole("region", { name: "거래대금 상위" }).getByRole("button", { name }).click();
+  const dialog = page.getByRole("dialog", { name: `${name} 주문` });
+  await expect(dialog.getByLabel(/가격/)).toHaveValue(price);
   return dialog;
 }
 
@@ -206,4 +210,48 @@ test("알림이 떠도 가로 스크롤이 생기지 않는다", async ({ page }
   await expect(page.getByRole("status").filter({ hasText: "매수 주문이 접수되었습니다" })).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
+});
+
+test("국내 시장가 주문은 가격 없이 보내고, 최종 확인에 시장가로 보인다", async ({ page }) => {
+  const orders = await mockApi(page);
+  const dialog = await openPanel(page);
+  await dialog.getByRole("radio", { name: "시장가" }).click();
+  await dialog.getByRole("button", { name: "매수" }).click();
+
+  const confirm = confirmation(page);
+  await expect(confirm.locator('dd[data-term="주문 유형"]')).toHaveText("시장가");
+  await expect(confirm.locator('dd[data-term="가격"]')).toHaveText("시장가");
+  await expect(confirm.locator('dd[data-term="예상 주문금액"]')).toHaveCount(0);
+  await confirm.getByRole("button", { name: "주문하기" }).click();
+
+  await expect(page.getByRole("status").filter({ hasText: "매수 주문이 접수되었습니다" })).toBeVisible();
+  const { order_key: _, ...rest } = orders[0].body;
+  expect(rest).toEqual({ code: "000660", order_type: "market", quantity: "1" });
+});
+
+test("미국 모의에서 거래소와 USD 금액을 확인하고 지정가 주문을 보낸다", async ({ page }) => {
+  const orders = await mockApi(page);
+  const dialog = await openPanel(page, "미국 모의", "디렉시온 반도체", "170.25");
+  await dialog.getByLabel("수량 (주)").fill("2");
+  await dialog.getByRole("button", { name: "매수" }).click();
+
+  const confirm = confirmation(page);
+  await expect(confirm.locator('dd[data-term="투자 환경"]')).toHaveText("미국 모의");
+  await expect(confirm.locator('dd[data-term="거래소"]')).toHaveText("NYSE");
+  await expect(confirm.locator('dd[data-term="가격"]')).toHaveText("$170.25");
+  await expect(confirm.locator('dd[data-term="예상 주문금액"]')).toHaveText("$340.50");
+  await confirm.getByRole("button", { name: "주문하기" }).click();
+
+  await expect(page.getByRole("status").filter({ hasText: "매수 주문이 접수되었습니다" })).toBeVisible();
+  expect(orders[0].environment).toBe("us_paper");
+  const { order_key: _, ...rest } = orders[0].body;
+  expect(rest).toEqual({ code: "SOXL", exchange: "NYSE", order_type: "limit", quantity: "2", price: "170.25" });
+});
+
+test("미국 실전에서도 매수 버튼 대신 안내가 보이고 주문 요청이 나가지 않는다", async ({ page }) => {
+  const orders = await mockApi(page);
+  const dialog = await openPanel(page, "미국 실전", "디렉시온 반도체", "170.25");
+  await expect(dialog.getByText("실전투자에서는 주문할 수 없습니다.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "매수" })).toHaveCount(0);
+  expect(orders).toEqual([]);
 });

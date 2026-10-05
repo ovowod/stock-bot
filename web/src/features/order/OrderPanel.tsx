@@ -194,6 +194,7 @@ function BuyForm({
       const { result, requestId } = await placeOrder(env.value, {
         order_key: key,
         code: target.code,
+        ...(market === "us" && target.exchange ? { exchange: target.exchange } : {}),
         order_type: type,
         quantity: quantity.text,
         ...(type === "limit" && price.text !== null ? { price: price.text } : {}),
