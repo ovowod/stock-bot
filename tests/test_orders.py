@@ -15,6 +15,7 @@ ORDER_REPLY = {"ord_no": "00024"}
 def domestic_order(**overrides: object) -> dict[str, object]:
     return {
         "order_key": "key-1",
+        "side": "buy",
         "code": "005930",
         "order_type": "limit",
         "quantity": "3",
@@ -66,6 +67,8 @@ def test_invalid_orders_are_rejected_without_calling_kiwoom(make_client):
         domestic_order(order_key=""),
         {k: v for k, v in domestic_order().items() if k != "order_key"},
         domestic_order(code=""),
+        {k: v for k, v in domestic_order().items() if k != "side"},
+        domestic_order(side="short"),
         domestic_order(order_type="stop"),
         domestic_order(quantity="0"),
         domestic_order(quantity="1.5"),
@@ -144,6 +147,7 @@ US_URL = "/api/environments/us_paper/orders"
 def us_order(**overrides: object) -> dict[str, object]:
     return {
         "order_key": "key-us-1",
+        "side": "buy",
         "code": "NVDA",
         "exchange": "NASDAQ",
         "order_type": "limit",

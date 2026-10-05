@@ -120,6 +120,8 @@ export interface HoldingView {
   /** 평가금액 아래 줄(예: 원화 환산 평가금액). */
   valueSub?: ReactNode;
   change: ReactNode;
+  /** 있으면 매도 버튼을 보여준다. */
+  onSell?: () => void;
 }
 
 export function HoldingsList({ items }: { items: HoldingView[] }) {
@@ -153,6 +155,7 @@ export function HoldingsList({ items }: { items: HoldingView[] }) {
               {item.valueSub && <p className={SUB_TEXT}>{item.valueSub}</p>}
               <p className="text-[13px] font-medium">{item.change}</p>
             </div>
+            {item.onSell && <SellButton item={item} className="self-center px-3.5 py-2" />}
           </div>
           <MobileHolding item={item} />
         </li>
@@ -194,9 +197,23 @@ function MobileHolding({ item }: { item: HoldingView }) {
               </dd>
             </div>
           ))}
+          {item.onSell && <SellButton item={item} className="col-span-2 py-2.5" />}
         </dl>
       )}
     </div>
+  );
+}
+
+function SellButton({ item, className }: { item: HoldingView; className: string }) {
+  return (
+    <button
+      type="button"
+      aria-label={`${item.name} 매도`}
+      onClick={item.onSell}
+      className={`shrink-0 rounded-xl bg-loss-soft text-sm font-bold text-loss hover:bg-loss hover:text-white ${className}`}
+    >
+      매도
+    </button>
   );
 }
 

@@ -177,6 +177,7 @@ export function fetchQuote(
 
 export interface OrderRequest {
   order_key: string;
+  side: "buy" | "sell";
   code: string;
   exchange?: string;
   order_type: "limit" | "market";
@@ -196,7 +197,7 @@ export const ORDER_RESULT_UNKNOWN = "order_result_unknown";
 const UNKNOWN_KINDS = new Set([ORDER_RESULT_UNKNOWN, "duplicate_order"]);
 
 /**
- * 매수 주문을 보낸다. 어떤 경우에도 다시 보내지 않는다.
+ * 매수·매도 주문을 보낸다. 어떤 경우에도 다시 보내지 않는다.
  * 응답을 받지 못했거나(연결 끊김, 시간 초과) 해석하지 못하면 접수 여부 확인 불가로 던진다.
  * 같은 주문 키의 중복 거부(409)도 이전 요청이 접수됐을 수 있으므로 확인 불가로 본다.
  */

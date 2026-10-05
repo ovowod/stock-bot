@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { createPortal } from "react-dom";
 import { ApiError, fetchQuote, ORDER_RESULT_UNKNOWN, placeOrder, type EnvironmentValue } from "../../api";
 import { findEnvironment, type EnvironmentOption } from "../../environments";
-import { formatForeign, formatKrw } from "../../format";
+import { formatCount, formatForeign, formatKrw } from "../../format";
 import { useToast } from "../toast/Toasts";
 import {
   ORDER_TYPES,
@@ -13,6 +13,7 @@ import {
   parsePrice,
   parseQuantity,
   quoteToPriceText,
+  sellQuantityError,
   stepPrice,
   type OrderTarget,
   type OrderType,
@@ -34,7 +35,7 @@ export function OrderPanelProvider({ environment, children }: { environment: Env
       {children}
       {target && (
         <OrderPanel
-          key={`${target.exchange ?? target.category}-${target.code}`}
+          key={`${target.sell ? "sell" : "buy"}-${target.exchange ?? target.category}-${target.code}`}
           environment={environment}
           target={target}
           onClose={close}
@@ -64,6 +65,7 @@ function OrderPanel({
   const requestClose = useCallback(() => {
     if (!lockedRef.current) onClose();
   }, [onClose]);
+  const side = target.sell ? "매도" : "매수";
   const unavailable = buyUnavailableReason(env.market, env.isReal, target.exchange);
   const meta = [target.code, target.exchange ?? target.category].filter(Boolean).join(" · ");
 
@@ -89,7 +91,7 @@ function OrderPanel({
         <div className="flex items-start gap-3 px-5 pt-5 pb-3">
           <div className="min-w-0 flex-1">
             <p className="flex items-center gap-1.5 text-xs font-semibold text-sub">
-              {env.label} 매수
+              {env.label} {side}
               {env.isReal && (
                 <span className="inline-flex items-center gap-0.5 rounded-full bg-real-soft px-2 py-0.5 text-[11px] font-bold text-real">
                   <ShieldAlert className="size-3" aria-hidden />
@@ -118,11 +120,11 @@ function OrderPanel({
             </Callout>
           )}
           {unavailable ? (
-            <Callout tone="muted" icon={Info} title="매수할 수 없는 종목입니다">
+            <Callout tone="muted" icon={Info} title={`${side}할 수 없는 종목입니다`}>
               {unavailable}
             </Callout>
           ) : (
-            <BuyForm env={env} target={target} onAccepted={onClose} onSendingChange={setLocked} />
+            <OrderForm env={env} target={target} onAccepted={onClose} onSendingChange={setLocked} />
           )}
         </div>
       </div>
@@ -169,7 +171,7 @@ function usePriceWithQuote(env: EnvironmentOption, target: OrderTarget) {
 
 type Step = "input" | "confirm" | "sending";
 
-function BuyForm({
+function OrderForm({
   env,
   target,
   onAccepted,
@@ -182,14 +184,21 @@ function BuyForm({
 }) {
   const market = env.market;
   const showToast = useToast();
+  const sell = target.sell;
+  const side = sell ? "매도" : "매수";
   const [type, setType] = useState<OrderType>("limit");
-  const [quantityText, setQuantityText] = useState("1");
+  // 매수는 1주, 매도는 매도 가능 수량(전량)으로 시작한다. 매도 가능 수량이 없거나 모르면 비워 둔다.
+  const [quantityText, setQuantityText] = useState(() =>
+    !sell ? "1" : sell.sellableQuantity ? String(sell.sellableQuantity) : "",
+  );
   const { priceText, change: setPriceText, status: quoteStatus, quoteText } = usePriceWithQuote(env, target);
   const priceDown = stepPrice(priceText, -1, market, target.category);
   const priceUp = stepPrice(priceText, 1, market, target.category);
   const [step, setStep] = useState<Step>("input");
   const orderKey = useRef("");
   const quantity = parseQuantity(quantityText);
+  const quantityError = quantity.error ?? (sell ? sellQuantityError(quantity.quantity, sell.sellableQuantity) : null);
+  const nothingToSell = sell?.sellableQuantity === 0;
   const price = parsePrice(priceText, market);
   const unit = market === "domestic" ? "원" : "USD";
   const formatMoney = (value: number) => (market === "domestic" ? formatKrw(value) : formatForeign(value, "USD", 4));
@@ -197,7 +206,11 @@ function BuyForm({
     type === "limit" && quantity.quantity !== null && price.price !== null
       ? formatMoney(quantity.quantity * price.price)
       : null;
-  const ready = quantity.text !== null && (type === "market" || price.text !== null);
+  const ready =
+    quantity.text !== null &&
+    quantityError === null &&
+    !nothingToSell &&
+    (type === "market" || price.text !== null);
 
   const openConfirm = () => {
     if (!ready || env.isReal) return;
@@ -214,6 +227,7 @@ function BuyForm({
     try {
       const { result, requestId } = await placeOrder(env.value, {
         order_key: key,
+        side: sell ? "sell" : "buy",
         code: target.code,
         ...(market === "us" && target.exchange ? { exchange: target.exchange } : {}),
         order_type: type,
@@ -222,11 +236,12 @@ function BuyForm({
       });
       showToast({
         tone: "success",
-        title: "매수 주문이 접수되었습니다",
+        title: `${side} 주문이 접수되었습니다`,
         body: `${target.name} · 주문번호 ${result.order_no}`,
         meta: [`주문 키 ${key}`, ...(requestId ? [`요청 ID ${requestId}`] : [])],
       });
       onSendingChange(false);
+      sell?.onAccepted();
       onAccepted();
     } catch (error) {
       const apiError = error instanceof ApiError ? error : new ApiError("unknown", "알 수 없는 오류입니다.", null);
@@ -249,6 +264,7 @@ function BuyForm({
   if (step !== "input") {
     const rows: [string, string][] = [
       ["투자 환경", env.label],
+      ["주문", side],
       ["종목", target.name],
       ["종목코드", target.code],
       ["거래소", market === "domestic" ? "KRX" : (target.exchange ?? "")],
@@ -273,7 +289,7 @@ function BuyForm({
             </div>
           ))}
         </dl>
-        <p className="text-xs text-muted">주문하기를 누르면 이 내용으로 매수 주문을 보냅니다.</p>
+        <p className="text-xs text-muted">주문하기를 누르면 이 내용으로 {side} 주문을 보냅니다.</p>
         <div className="sticky bottom-0 mt-auto grid grid-cols-2 gap-2 bg-surface pt-2">
           <button
             type="button"
@@ -287,7 +303,7 @@ function BuyForm({
             type="button"
             disabled={step === "sending"}
             onClick={() => void submit()}
-            className="rounded-2xl bg-gain py-3.5 text-[15px] font-bold text-white disabled:opacity-60"
+            className={`rounded-2xl py-3.5 text-[15px] font-bold text-white disabled:opacity-60 ${sell ? "bg-loss" : "bg-gain"}`}
           >
             {step === "sending" ? "주문 중…" : "주문하기"}
           </button>
@@ -299,12 +315,35 @@ function BuyForm({
   return (
     <form
       className="flex flex-1 flex-col gap-4"
-      aria-label="매수 주문"
+      aria-label={`${side} 주문`}
       onSubmit={(event) => {
         event.preventDefault();
         openConfirm();
       }}
     >
+      {sell && (
+        <dl className="grid grid-cols-2 gap-2">
+          {(
+            [
+              ["보유 수량", sell.quantity],
+              ["매도 가능 수량", sell.sellableQuantity],
+            ] as [string, number | null][]
+          ).map(([term, value]) => (
+            <div key={term} className="rounded-2xl bg-canvas px-4 py-3">
+              <dt className="text-xs text-muted">{term}</dt>
+              <dd aria-label={term} className="text-[15px] font-bold">
+                {value === null ? "확인 불가" : formatCount(value)}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {nothingToSell && (
+        <Callout tone="muted" icon={Info} title="매도 가능 수량이 없습니다">
+          체결되지 않은 매도 주문에 묶였거나 팔 수 있는 수량이 없습니다.
+        </Callout>
+      )}
+
       <div role="radiogroup" aria-label="주문 유형" className="grid grid-cols-2 gap-1 rounded-2xl bg-canvas p-1">
         {ORDER_TYPES.map((option) => {
           const active = option.value === type;
@@ -374,13 +413,13 @@ function BuyForm({
         </p>
       )}
 
-      <Field label="수량 (주)" error={quantity.error}>
+      <Field label="수량 (주)" error={quantityError}>
         <input
           value={quantityText}
           onChange={(event) => setQuantityText(event.target.value)}
           inputMode="numeric"
           placeholder="예: 10"
-          aria-invalid={quantity.error !== null}
+          aria-invalid={quantityError !== null}
           className={INPUT}
         />
       </Field>
@@ -394,7 +433,7 @@ function BuyForm({
         </div>
       )}
 
-      {/* 패널이 화면 높이를 채우는 태블릿·데스크톱에서는 매수 버튼을 패널 맨 아래에 둔다. */}
+      {/* 패널이 화면 높이를 채우는 태블릿·데스크톱에서는 주문 버튼을 패널 맨 아래에 둔다. */}
       <div className="sticky bottom-0 mt-auto space-y-2 bg-surface pt-2">
         {env.isReal ? (
           <p className="flex items-center justify-center gap-1.5 rounded-2xl bg-real-soft py-3.5 text-sm font-bold text-real">
@@ -405,9 +444,9 @@ function BuyForm({
           <button
             type="submit"
             disabled={!ready}
-            className="w-full rounded-2xl bg-gain py-3.5 text-[15px] font-bold text-white disabled:opacity-40"
+            className={`w-full rounded-2xl py-3.5 text-[15px] font-bold text-white disabled:opacity-40 ${sell ? "bg-loss" : "bg-gain"}`}
           >
-            매수
+            {side}
           </button>
         )}
       </div>

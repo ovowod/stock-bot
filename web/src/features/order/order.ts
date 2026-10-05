@@ -12,6 +12,22 @@ export interface OrderTarget {
   category: string | null;
   /** 관리종목 등 종목 상태. 정상이면 null. */
   status: string | null;
+  /** 계좌 확인의 보유종목에서 매도로 열 때만 있다. 없으면 매수 패널이다. */
+  sell?: SellTarget;
+}
+
+/** 매도 패널을 연 보유종목의 수량. 계좌 확인이 읽지 못한 수량은 null이다. */
+export interface SellTarget {
+  quantity: number | null;
+  sellableQuantity: number | null;
+  /** 매도 주문이 접수되면 부른다. 계좌 확인을 다시 조회하는 데 쓴다. */
+  onAccepted: () => void;
+}
+
+/** 매도 수량이 매도 가능 수량을 넘으면 그 안내를 돌려준다. 매도 가능 수량을 모르면 검사하지 않는다. */
+export function sellQuantityError(quantity: number | null, sellableQuantity: number | null): string | null {
+  if (quantity === null || sellableQuantity === null || quantity <= sellableQuantity) return null;
+  return `매도 가능 수량(${sellableQuantity.toLocaleString("ko-KR")}주)을 넘을 수 없습니다.`;
 }
 
 export type OrderType = "limit" | "market";

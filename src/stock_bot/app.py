@@ -47,7 +47,7 @@ def create_app(
     stocks = StockSearchService(kiwoom, today or today_kst)
     accounts = AccountService(kiwoom, stocks.listings)
     quotes = QuoteService(kiwoom)
-    orders = OrderService(kiwoom)
+    orders = OrderService(kiwoom, accounts.holding)
     app = FastAPI(title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")

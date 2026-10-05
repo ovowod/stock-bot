@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from stock_bot.config import EnvironmentSpec, Market
-from stock_bot.errors import AppError
+from stock_bot.errors import AppError, response_format_error
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
 from stock_bot.masking import mask_account_no, secrets
@@ -126,6 +126,45 @@ class AccountService:
             ],
         }
 
+    async def holding(self, spec: EnvironmentSpec, code: str) -> dict[str, Any]:
+        """한 종목의 보유수량과 매도 가능 수량. 매도 주문 직전 확인에 쓴다.
+
+        보유하지 않으면 두 수량이 0이다. 수량을 읽지 못하면 추측하지 않고 오류로 돌려준다.
+        """
+        if spec.market is not Market.DOMESTIC:
+            raise AppError("invalid_request", "미국 잔고 확인은 아직 지원하지 않습니다.", 400)
+        api_id = "kt00018"
+        data = await self._kiwoom.call(
+            spec, api_id, DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+        )
+        # 현금 매도(kt10001) 대상인 현금잔고(crd_tp=00) 줄만 센다. 신용 보유분은 세지 않는다.
+        rows = [
+            row
+            for row in Reader(data, api_id).rows("acnt_evlt_remn_indv_tot")
+            if _strip_prefix(row.text("stk_cd")) == code and row.text("crd_tp") == "00"
+        ]
+        if len(rows) > 1:
+            # 문서 예제가 합산 조회인데도 같은 종목 두 줄을 준다.
+            # 뜻을 모르므로 더하지도 고르지도 않는다.
+            raise AppError(
+                "unsupported_holding",
+                "지원하지 않는 잔고 형태입니다. (같은 종목이 여러 줄)",
+                502,
+                {"api_id": api_id},
+            )
+        quantity = sellable = 0
+        if rows:
+            quantity = _required_count(rows[0], "rmnd_qty", api_id)
+            sellable = _required_count(rows[0], "trde_able_qty", api_id)
+        result = {
+            "code": code,
+            "held": bool(rows),
+            "quantity": quantity,
+            "sellable_quantity": sellable,
+        }
+        log(logger, logging.INFO, "holding_checked", api_id=api_id, **result)
+        return result
+
     async def _stock_listings(self, spec: EnvironmentSpec) -> dict[str, dict[str, Any]]:
         """종목 목록을 받지 못해도 계좌 확인은 계속하고, 잔고 TR의 이름·거래소를 쓴다."""
         if self._listings is None:
@@ -200,6 +239,13 @@ class AccountService:
                 for h in b.rows("result_list", _HoldingReader)
             ],
         }
+
+
+def _required_count(row: Reader, key: str, api_id: str) -> int:
+    value = row.integer(key)
+    if value is None:
+        raise response_format_error(api_id, f"{key} 값이 비어 있습니다.")
+    return value
 
 
 def _digits(value: str) -> str:
