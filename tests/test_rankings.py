@@ -1,0 +1,541 @@
+import asyncio
+import threading
+
+import httpx
+import pytest
+
+from stock_bot.app import create_app
+from tests.fake_kiwoom import (
+    FAKE_ENV,
+    KA00198_ROW,
+    KA10027_ROW,
+    KA10030_ROW,
+    KA10032_ROW,
+    USA01980_REPLY,
+    USA20530_ROW,
+    USA20540_ROW,
+    USA20910_ROW,
+    ThreadedTransport,
+    body_of,
+    kiwoom_error,
+    page_response,
+    ranking_fake,
+)
+
+DOMESTIC_URL = "/api/environments/domestic_paper/rankings/trading_value"
+US_URL = "/api/environments/us_paper/rankings/trading_value"
+
+
+def test_domestic_trading_value_calls_ka10032_on_the_paper_domain(make_client):
+    fake = ranking_fake("ka10032", {"trde_prica_upper": [KA10032_ROW]})
+    response = make_client(fake).get(DOMESTIC_URL)
+
+    assert response.status_code == 200
+    request = fake.calls("ka10032")[0]
+    assert request.url.host == "mockapi.kiwoom.com"
+    assert request.url.path == "/api/dostk/rkinfo"
+    assert body_of(request) == {"mrkt_tp": "000", "mang_stk_incls": "1", "stex_tp": "3"}
+
+
+def test_domestic_trading_value_is_converted_for_the_screen(make_client):
+    fake = ranking_fake("ka10032", {"trde_prica_upper": [KA10032_ROW]})
+    body = make_client(fake).get(DOMESTIC_URL).json()
+
+    assert body["environment"] == "domestic_paper"
+    assert body["market"] == "domestic"
+    assert body["kind"] == "trading_value"
+    assert body["exchange"] == "all"
+    assert body["fetched_at"]
+    assert body["items"] == [
+        {
+            "rank": 1,
+            "code": "000660",
+            "name": "SK하이닉스",
+            "exchange": None,
+            "price": 1841000,
+            "direction": "up",
+            "change_rate": 0.44,
+            "trading_value": 5_359_250_000_000,
+            "previous_rank": 2,
+        }
+    ]
+
+
+def test_us_trading_value_calls_usa20540_and_converts_usd(make_client):
+    fake = ranking_fake("usa20540", {"result_list": [USA20540_ROW]})
+    response = make_client(fake).get(US_URL)
+
+    assert response.status_code == 200
+    request = fake.calls("usa20540")[0]
+    assert request.url.path == "/api/us/rkinfo"
+    assert body_of(request) == {
+        "stex_tp": "0",
+        "inds_cd": "000",
+        "stk_tp": "0",
+        "trde_qty_tp": "0",
+        "stk_cnd": "0",
+        "pric_cnd": "0",
+        "trde_prica_cnd": "0",
+    }
+    assert response.json()["items"] == [
+        {
+            "rank": 1,
+            "code": "SOXL",
+            "name": "미국 반도체 3배 디렉시온 ETF",
+            "exchange": "NYSE",
+            "price": 162.6,
+            "direction": "down",
+            "change_rate": -0.68,
+            "trading_value": 104_125_000,
+            "previous_rank": None,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("environment", "api_id", "field", "exchange", "code"),
+    [
+        ("domestic_paper", "ka10032", "mrkt_tp", "kospi", "001"),
+        ("domestic_paper", "ka10032", "mrkt_tp", "kosdaq", "101"),
+        ("domestic_paper", "ka10032", "mrkt_tp", "all", "000"),
+        ("us_paper", "usa20540", "stex_tp", "nyse", "1"),
+        ("us_paper", "usa20540", "stex_tp", "nasdaq", "2"),
+        ("us_paper", "usa20540", "stex_tp", "amex", "3"),
+    ],
+)
+def test_exchange_is_mapped_to_the_kiwoom_code(
+    make_client, environment, api_id, field, exchange, code
+):
+    list_key = "trde_prica_upper" if api_id == "ka10032" else "result_list"
+    fake = ranking_fake(api_id, {list_key: []})
+    url = f"/api/environments/{environment}/rankings/trading_value?exchange={exchange}"
+    response = make_client(fake).get(url)
+
+    assert response.status_code == 200
+    assert response.json()["exchange"] == exchange
+    assert body_of(fake.calls(api_id)[0])[field] == code
+
+
+def test_real_environment_uses_the_real_domain(make_client):
+    fake = ranking_fake("ka10032", {"trde_prica_upper": []})
+    response = make_client(fake).get("/api/environments/domestic_real/rankings/trading_value")
+
+    assert response.status_code == 200
+    assert {r.url.host for r in fake.requests} == {"api.kiwoom.com"}
+
+
+def test_only_the_first_page_is_fetched_and_cut_to_30(make_client):
+    rows = [{**KA10032_ROW, "now_rank": str(i)} for i in range(1, 101)]
+    fake = ranking_fake(
+        "ka10032", page_response({"trde_prica_upper": rows}, cont_yn="Y", next_key="next")
+    )
+    response = make_client(fake).get(DOMESTIC_URL)
+
+    assert response.status_code == 200
+    assert len(fake.calls("ka10032")) == 1
+    assert [item["rank"] for item in response.json()["items"]] == list(range(1, 31))
+
+
+def test_empty_list_is_a_normal_response(make_client):
+    fake = ranking_fake("ka10032", {"trde_prica_upper": []})
+    response = make_client(fake).get(DOMESTIC_URL)
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+
+
+@pytest.mark.parametrize(
+    ("url", "status", "kind"),
+    [
+        ("/api/environments/us_paper/rankings/trading_value?exchange=kospi", 400, "bad_request"),
+        (
+            "/api/environments/domestic_paper/rankings/trading_value?exchange=nyse",
+            400,
+            "bad_request",
+        ),
+        ("/api/environments/domestic_paper/rankings/unknown", 404, "unknown_ranking"),
+        ("/api/environments/nowhere/rankings/trading_value", 404, "unknown_environment"),
+    ],
+)
+def test_invalid_conditions_are_rejected_without_calling_kiwoom(make_client, url, status, kind):
+    response = make_client().get(url)
+
+    assert response.status_code == status
+    assert response.json()["error"]["kind"] == kind
+
+
+@pytest.mark.parametrize(
+    ("reply", "status"),
+    [
+        ({}, 502),
+        ({"trde_prica_upper": None}, 502),
+        ({"trde_prica_upper": {"stk_cd": "005930"}}, 502),
+        ({"trde_prica_upper": [{k: v for k, v in KA10032_ROW.items() if k != "stk_cd"}]}, 502),
+        ({"trde_prica_upper": [{k: v for k, v in KA10032_ROW.items() if k != "stk_nm"}]}, 502),
+        ({"trde_prica_upper": [{**KA10032_ROW, "cur_prc": "abc"}]}, 502),
+    ],
+)
+def test_malformed_responses_are_response_format_errors(make_client, reply, status):
+    response = make_client(ranking_fake("ka10032", reply)).get(DOMESTIC_URL)
+
+    assert response.status_code == status
+    assert response.json()["error"]["kind"] == "response_format_error"
+
+
+def test_empty_numbers_become_null(make_client):
+    row = {**KA10032_ROW, "cur_prc": "", "flu_rt": "", "trde_prica": "", "pred_rank": ""}
+    item = (
+        make_client(ranking_fake("ka10032", {"trde_prica_upper": [row]}))
+        .get(DOMESTIC_URL)
+        .json()["items"][0]
+    )
+
+    assert item["price"] is None
+    assert item["change_rate"] is None
+    assert item["trading_value"] is None
+    assert item["previous_rank"] is None
+
+
+@pytest.mark.parametrize(
+    ("sign", "direction"),
+    [("1", "up"), ("2", "up"), ("3", "flat"), ("4", "down"), ("5", "down"), ("9", "unknown")],
+)
+def test_direction_follows_the_sign_code(make_client, sign, direction):
+    row = {**KA10032_ROW, "pred_pre_sig": sign}
+    item = (
+        make_client(ranking_fake("ka10032", {"trde_prica_upper": [row]}))
+        .get(DOMESTIC_URL)
+        .json()["items"][0]
+    )
+
+    assert item["direction"] == direction
+
+
+def test_unknown_us_exchange_code_is_kept(make_client):
+    row = {**USA20540_ROW, "stex_tp": "XX"}
+    item = (
+        make_client(ranking_fake("usa20540", {"result_list": [row]})).get(US_URL).json()["items"][0]
+    )
+
+    assert item["exchange"] == "XX"
+
+
+def test_rate_limit_is_reported_as_429(make_client):
+    fake = ranking_fake("ka10032", kiwoom_error(1700, "허용된 API 요청 개수를 초과하였습니다"))
+    response = make_client(fake).get(DOMESTIC_URL)
+
+    assert response.status_code == 429
+    assert response.json()["error"]["kind"] == "rate_limited"
+
+
+@pytest.mark.anyio
+async def test_concurrent_ranking_requests_reach_kiwoom_one_at_a_time():
+    fake = ranking_fake("ka10032", {"trde_prica_upper": [KA10032_ROW]})
+    state = {"active": 0, "max_active": 0}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("api-id") != "ka10032":
+            return fake(request)
+        with lock:
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+        release.wait(timeout=0.2)
+        with lock:
+            state["active"] -= 1
+        return fake(request)
+
+    app = create_app(
+        environ=FAKE_ENV, transport=ThreadedTransport(handler), static_dir=None, log_dir=None
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        pending = [asyncio.create_task(client.get(DOMESTIC_URL)) for _ in range(2)]
+        await asyncio.sleep(0.05)
+        release.set()
+        responses = await asyncio.gather(*pending)
+
+    assert [r.status_code for r in responses] == [200, 200]
+    assert len(fake.calls("ka10032")) == 2
+    assert state["max_active"] == 1
+
+
+DOMESTIC_GAINERS_BODY = {
+    "mrkt_tp": "000",
+    "sort_tp": "1",
+    "trde_qty_cnd": "0000",
+    "stk_cnd": "0",
+    "crd_cnd": "0",
+    "updown_incls": "1",
+    "pric_cnd": "0",
+    "trde_prica_cnd": "0",
+    "stex_tp": "3",
+}
+DOMESTIC_VOLUME_BODY = {
+    "mrkt_tp": "000",
+    "sort_tp": "1",
+    "mang_stk_incls": "0",
+    "crd_tp": "0",
+    "trde_qty_tp": "0",
+    "pric_tp": "0",
+    "trde_prica_tp": "0",
+    "mrkt_open_tp": "0",
+    "stex_tp": "3",
+}
+US_GAINERS_BODY = {
+    "stex_tp": "0",
+    "inds_cd": "000",
+    "inds_cls_tp": "0",
+    "sort_tp": "1",
+    "stk_tp": "0",
+    "stk_cnd": "0",
+    "pric_cnd": "0",
+    "trde_prica_cnd": "0",
+    "trde_qty_tp": "0",
+}
+US_VOLUME_BODY = {
+    "stex_tp": "0",
+    "inds_cd": "000",
+    "stk_tp": "0",
+    "trde_qty_tp": "0",
+    "qry_tp": "0",
+    "stk_cnd": "0",
+    "pric_cnd": "0",
+    "trde_prica_cnd": "0",
+}
+
+
+@pytest.mark.parametrize(
+    ("environment", "kind", "api_id", "path", "list_key", "row", "body"),
+    [
+        (
+            "domestic_paper",
+            "gainers",
+            "ka10027",
+            "/api/dostk/rkinfo",
+            "pred_pre_flu_rt_upper",
+            KA10027_ROW,
+            DOMESTIC_GAINERS_BODY,
+        ),
+        (
+            "domestic_paper",
+            "volume",
+            "ka10030",
+            "/api/dostk/rkinfo",
+            "tdy_trde_qty_upper",
+            KA10030_ROW,
+            DOMESTIC_VOLUME_BODY,
+        ),
+        (
+            "us_paper",
+            "gainers",
+            "usa20910",
+            "/api/us/rkinfo",
+            "result_list",
+            USA20910_ROW,
+            US_GAINERS_BODY,
+        ),
+        (
+            "us_paper",
+            "volume",
+            "usa20530",
+            "/api/us/rkinfo",
+            "result_list",
+            USA20530_ROW,
+            US_VOLUME_BODY,
+        ),
+    ],
+)
+def test_gainers_and_volume_call_their_trs(
+    make_client, environment, kind, api_id, path, list_key, row, body
+):
+    fake = ranking_fake(api_id, {list_key: [row]})
+    response = make_client(fake).get(f"/api/environments/{environment}/rankings/{kind}")
+
+    assert response.status_code == 200
+    request = fake.calls(api_id)[0]
+    assert request.url.path == path
+    assert body_of(request) == body
+
+
+def test_domestic_gainers_use_list_order_as_rank_and_carry_volume(make_client):
+    rows = [KA10027_ROW, {**KA10027_ROW, "stk_cd": "306040_AL", "stk_nm": "에스제이그룹"}]
+    fake = ranking_fake("ka10027", {"pred_pre_flu_rt_upper": rows})
+    items = (
+        make_client(fake).get("/api/environments/domestic_paper/rankings/gainers").json()["items"]
+    )
+
+    assert items[0] == {
+        "rank": 1,
+        "code": "069920",
+        "name": "엑시온그룹",
+        "exchange": None,
+        "price": 1349,
+        "direction": "up",
+        "change_rate": 29.96,
+        "volume": 1306705,
+    }
+    assert [item["rank"] for item in items] == [1, 2]
+
+
+def test_domestic_volume_uses_list_order_as_rank(make_client):
+    fake = ranking_fake("ka10030", {"tdy_trde_qty_upper": [KA10030_ROW]})
+    item = (
+        make_client(fake).get("/api/environments/domestic_paper/rankings/volume").json()["items"][0]
+    )
+
+    assert item == {
+        "rank": 1,
+        "code": "114800",
+        "name": "KODEX 인버스",
+        "exchange": None,
+        "price": 975,
+        "direction": "down",
+        "change_rate": -0.61,
+        "volume": 505027412,
+    }
+
+
+def test_us_gainers_and_volume_carry_volume(make_client):
+    gainers = ranking_fake("usa20910", {"result_list": [USA20910_ROW]})
+    volume = ranking_fake("usa20530", {"result_list": [USA20530_ROW]})
+
+    gainer = (
+        make_client(gainers).get("/api/environments/us_paper/rankings/gainers").json()["items"][0]
+    )
+    top = make_client(volume).get("/api/environments/us_paper/rankings/volume").json()["items"][0]
+
+    assert gainer["exchange"] == "NASDAQ"
+    assert gainer["price"] == 12.91
+    assert gainer["change_rate"] == 597.84
+    assert gainer["volume"] == 5005644
+    assert top["exchange"] == "AMEX"
+    assert top["volume"] == 2603716
+
+
+def test_exchange_applies_to_gainers_and_volume(make_client):
+    fake = ranking_fake("ka10030", {"tdy_trde_qty_upper": []})
+    url = "/api/environments/domestic_paper/rankings/volume?exchange=kosdaq"
+    response = make_client(fake).get(url)
+
+    assert response.json()["exchange"] == "kosdaq"
+    assert body_of(fake.calls("ka10030")[0])["mrkt_tp"] == "101"
+
+
+def test_domestic_popular_calls_ka00198_with_the_period_code(make_client):
+    fake = ranking_fake("ka00198", {"item_inq_rank": [KA00198_ROW]})
+    response = make_client(fake).get("/api/environments/domestic_paper/rankings/popular")
+
+    assert response.status_code == 200
+    request = fake.calls("ka00198")[0]
+    assert request.url.path == "/api/dostk/stkinfo"
+    assert body_of(request) == {"qry_tp": "3"}
+    body = response.json()
+    assert body["period"] == "1h"
+    assert body["base_time"] == "2026-10-05T17:00:00+09:00"
+    assert body["items"] == [
+        {
+            "rank": 3,
+            "code": "043260",
+            "name": "성호전자",
+            "exchange": None,
+            "price": 31400,
+            "direction": "up",
+            "change_rate": 10.18,
+            "rank_change": 3,
+        }
+    ]
+
+
+def test_us_popular_calls_usa01980_and_applies_signs(make_client):
+    fake = ranking_fake("usa01980", USA01980_REPLY)
+    response = make_client(fake).get("/api/environments/us_paper/rankings/popular?period=today")
+
+    assert response.status_code == 200
+    request = fake.calls("usa01980")[0]
+    assert request.url.path == "/api/us/rkinfo"
+    assert body_of(request) == {"svc_type": "B284"}
+    body = response.json()
+    assert body["period"] == "today"
+    assert body["base_time"] == "2026-10-05T17:00:00+09:00"
+    assert body["items"] == [
+        {
+            "rank": 4,
+            "code": "NVDA",
+            "name": "엔비디아",
+            "exchange": "NASDAQ",
+            "price": 233.95,
+            "direction": "down",
+            "change_rate": -0.62,
+            "rank_change": -2,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("period", "domestic", "us"),
+    [
+        ("30s", "5", "B286"),
+        ("1m", "1", "B281"),
+        ("10m", "2", "B282"),
+        ("1h", "3", "B283"),
+        ("today", "4", "B284"),
+    ],
+)
+def test_period_is_mapped_to_the_kiwoom_code(make_client, period, domestic, us):
+    kr = ranking_fake("ka00198", {"item_inq_rank": []})
+    make_client(kr).get(f"/api/environments/domestic_paper/rankings/popular?period={period}")
+    usa = ranking_fake("usa01980", {**USA01980_REPLY, "result_list": []})
+    make_client(usa).get(f"/api/environments/us_paper/rankings/popular?period={period}")
+
+    assert body_of(kr.calls("ka00198")[0]) == {"qry_tp": domestic}
+    assert body_of(usa.calls("usa01980")[0]) == {"svc_type": us}
+
+
+def test_invalid_period_is_rejected_without_calling_kiwoom(make_client):
+    response = make_client().get("/api/environments/domestic_paper/rankings/popular?period=2h")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["kind"] == "bad_request"
+
+
+@pytest.mark.parametrize(
+    ("change", "sign", "expected"),
+    [("+3", "+", 3), ("-2", "-", -2), ("0", "", 0), ("", "", 0), ("2", "?", None)],
+)
+def test_domestic_rank_change_follows_the_sign(make_client, change, sign, expected):
+    row = {**KA00198_ROW, "rank_chg": change, "rank_chg_sign": sign}
+    fake = ranking_fake("ka00198", {"item_inq_rank": [row]})
+    item = (
+        make_client(fake)
+        .get("/api/environments/domestic_paper/rankings/popular")
+        .json()["items"][0]
+    )
+
+    assert item["rank_change"] == expected
+
+
+def test_domestic_popular_without_items_has_no_base_time(make_client):
+    fake = ranking_fake("ka00198", {"item_inq_rank": []})
+    body = make_client(fake).get("/api/environments/domestic_paper/rankings/popular").json()
+
+    assert body["items"] == []
+    assert body["base_time"] is None
+
+
+def test_us_popular_unchanged_rank_and_flat_rate(make_client):
+    row = {
+        **USA01980_REPLY["result_list"][0],
+        "sign": "",
+        "chg_val": "00",
+        "sign_for_gjga": "",
+        "diff_rate_for_gjga": "0.0000",
+    }
+    fake = ranking_fake("usa01980", {**USA01980_REPLY, "result_list": [row]})
+    item = make_client(fake).get("/api/environments/us_paper/rankings/popular").json()["items"][0]
+
+    assert item["rank_change"] == 0
+    assert item["direction"] == "flat"
+    assert item["change_rate"] == 0

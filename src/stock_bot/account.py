@@ -2,14 +2,14 @@
 
 import logging
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from stock_bot.config import EnvironmentSpec, Market
-from stock_bot.errors import AppError, response_format_error
+from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
 from stock_bot.masking import mask_account_no, secrets
+from stock_bot.reader import Reader, required
 
 logger = logging.getLogger("stock_bot.account")
 
@@ -46,7 +46,7 @@ class AccountService:
         """토큰이 가리키는 계좌가 .env의 계좌번호와 같을 때만 진행한다."""
         expected = self._kiwoom.credentials(spec).account_no
         data = await self._kiwoom.call(spec, "ka00001", DOMESTIC_ACCOUNT_PATH, {})
-        actual = _required(data, "acctNo", "ka00001")
+        actual = required(data, "acctNo", "ka00001")
         secrets.add(str(actual))
         if not _same_account(str(actual), expected):
             raise AppError(
@@ -62,8 +62,8 @@ class AccountService:
             spec, "kt00018", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
         )
         deposit = await self._kiwoom.call(spec, "kt00001", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "3"})
-        b = _Reader(balance, "kt00018")
-        d = _Reader(deposit, "kt00001")
+        b = Reader(balance, "kt00018")
+        d = Reader(deposit, "kt00001")
         return {
             "summary": {
                 "estimated_assets": b.integer("prsm_dpst_aset_amt"),
@@ -102,8 +102,8 @@ class AccountService:
             spec, "ust21070", US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}
         )
         deposit = await self._kiwoom.call(spec, "ust21110", US_ACCOUNT_PATH, {})
-        b = _Reader(balance, "ust21070")
-        d = _Reader(deposit, "ust21110")
+        b = Reader(balance, "ust21070")
+        d = Reader(deposit, "ust21110")
         return {
             "currency": b.text("crnc_code"),
             "summary": {
@@ -153,47 +153,6 @@ class AccountService:
                 for h in b.rows("result_list")
             ],
         }
-
-
-class _Reader:
-    """키움 응답에서 필드를 꺼낸다. 필요한 필드가 없으면 응답 형식 오류로 처리한다."""
-
-    def __init__(self, data: dict[str, Any], api_id: str) -> None:
-        self._data = data
-        self._api_id = api_id
-
-    def text(self, key: str) -> str:
-        return str(_required(self._data, key, self._api_id)).strip()
-
-    def integer(self, key: str) -> int | None:
-        value = self._number(key)
-        return None if value is None else int(value)
-
-    def decimal(self, key: str) -> float | None:
-        value = self._number(key)
-        return None if value is None else float(value)
-
-    def rows(self, key: str) -> list[_Reader]:
-        value = _required(self._data, key, self._api_id)
-        if not isinstance(value, list):
-            raise response_format_error(self._api_id, f"{key} 필드가 목록이 아닙니다.")
-        return [_Reader(row, self._api_id) for row in value if isinstance(row, dict)]
-
-    def _number(self, key: str) -> Decimal | None:
-        """'-00000000196888', '156464.6701' 같은 문자열을 숫자로 바꾼다. 빈 값은 None."""
-        raw = self.text(key)
-        if raw == "":
-            return None
-        try:
-            return Decimal(raw)
-        except InvalidOperation:
-            raise response_format_error(self._api_id, f"{key} 값이 숫자가 아닙니다.") from None
-
-
-def _required(data: dict[str, Any], key: str, api_id: str) -> Any:
-    if key not in data or data[key] is None:
-        raise response_format_error(api_id, f"{key} 필드가 없습니다.")
-    return data[key]
 
 
 def _digits(value: str) -> str:

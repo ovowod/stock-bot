@@ -3,14 +3,15 @@ import type { EnvironmentValue } from "./api";
 export interface EnvironmentOption {
   value: EnvironmentValue;
   label: string;
+  market: "domestic" | "us";
   isReal: boolean;
 }
 
 export const ENVIRONMENTS: EnvironmentOption[] = [
-  { value: "domestic_real", label: "국내 실전", isReal: true },
-  { value: "us_real", label: "미국 실전", isReal: true },
-  { value: "domestic_paper", label: "국내 모의", isReal: false },
-  { value: "us_paper", label: "미국 모의", isReal: false },
+  { value: "domestic_real", label: "국내 실전", market: "domestic", isReal: true },
+  { value: "us_real", label: "미국 실전", market: "us", isReal: true },
+  { value: "domestic_paper", label: "국내 모의", market: "domestic", isReal: false },
+  { value: "us_paper", label: "미국 모의", market: "us", isReal: false },
 ];
 
 export const DEFAULT_ENVIRONMENT: EnvironmentValue = "domestic_paper";

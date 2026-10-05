@@ -1,5 +1,6 @@
 """키움 REST API를 흉내 내는 가짜 서버. 응답 형태는 kra-docs의 responseExample을 따른다."""
 
+import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -215,3 +216,159 @@ def us_fake(account_no: str = "8200000222") -> FakeKiwoom:
         .reply("ust21070", UST21070_REPLY)
         .reply("ust21110", UST21110_REPLY)
     )
+
+
+# 순위 TR 응답. 값은 모의 서버에서 실제로 받은 형태를 따른다(국내 종목코드의 _AL 접미어 포함).
+KA10032_ROW = {
+    "stk_cd": "000660_AL",
+    "now_rank": "1",
+    "pred_rank": "2",
+    "stk_nm": "SK하이닉스",
+    "cur_prc": "+1841000",
+    "pred_pre_sig": "2",
+    "pred_pre": "+8000",
+    "flu_rt": "+0.44",
+    "sel_bid": "+1842000",
+    "buy_bid": "+1841000",
+    "now_trde_qty": "2911335",
+    "pred_trde_qty": "3274713",
+    "trde_prica": "5359250",
+}
+
+USA20540_ROW = {
+    "rank": "1",
+    "stex_tp": "NY",
+    "stk_cd": "SOXL",
+    "stk_nm": "미국 반도체 3배 디렉시온 ETF",
+    "stk_enm": "DIREXION DAILY SEMICONDUCTOR BULL 3X ETF",
+    "cur_prc": "-162.6000",
+    "pred_pre_sig": "5",
+    "pred_pre": "-1.1100",
+    "flu_rt": "-0.68",
+    "acc_trde_qty": "632235",
+    "pred_trde_qty": "62660789",
+    "trde_prica": "104125",
+}
+
+
+KA10027_ROW = {
+    "stk_cls": "14",
+    "stk_cd": "069920_AL",
+    "stk_nm": "엑시온그룹",
+    "cur_prc": "+1349",
+    "pred_pre_sig": "1",
+    "pred_pre": "+311",
+    "flu_rt": "+29.96",
+    "sel_req": "0",
+    "buy_req": "95187",
+    "now_trde_qty": "1306705",
+    "cntr_str": "118.83",
+    "cnt": "1",
+}
+
+KA10030_ROW = {
+    "stk_cd": "114800_AL",
+    "stk_nm": "KODEX 인버스",
+    "cur_prc": "-975",
+    "pred_pre_sig": "5",
+    "pred_pre": "-6",
+    "flu_rt": "-0.61",
+    "trde_qty": "505027412",
+    "pred_rt": "+100.00",
+    "trde_tern_rt": "+68.45",
+    "trde_amt": "495085",
+    "opmr_trde_qty": "",
+    "opmr_pred_rt": "",
+    "opmr_trde_rt": "",
+    "opmr_trde_amt": "",
+    "af_mkrt_trde_qty": "",
+    "af_mkrt_pred_rt": "",
+    "af_mkrt_trde_rt": "",
+    "af_mkrt_trde_amt": "",
+    "bf_mkrt_trde_qty": "",
+    "bf_mkrt_pred_rt": "",
+    "bf_mkrt_trde_rt": "",
+    "bf_mkrt_trde_amt": "",
+}
+
+USA20910_ROW = {
+    "rank": "1",
+    "stex_tp": "ND",
+    "stk_cd": "SAIQ",
+    "stk_nm": "와이즈샛.스페이스",
+    "stk_enm": "WISESAT.SPACE HOLDINGS CORPORATION",
+    "cur_prc": "+12.9100",
+    "pred_pre_sig": "2",
+    "pred_pre": "+11.0600",
+    "flu_rt": "+597.84",
+    "sel_req": "1484",
+    "buy_req": "647",
+    "trde_qty": "5005644",
+    "cnt": "1",
+}
+
+USA20530_ROW = {
+    "rank": "1",
+    "stex_tp": "NA",
+    "stk_cd": "SDEV",
+    "stk_nm": "스테이블코인 개발",
+    "stk_enm": "STABLECOIN DEVELOPMENT CORPORATION",
+    "cur_prc": "+9.1864",
+    "pred_pre_sig": "2",
+    "pred_pre": "+1.7064",
+    "flu_rt": "+22.81",
+    "acc_trde_qty": "2603716",
+    "pred_rt": "-98.30",
+    "trde_prica": "23701",
+}
+
+
+KA00198_ROW = {
+    "stk_nm": "성호전자",
+    "bigd_rank": "3",
+    "rank_chg": "+3",
+    "rank_chg_sign": "+",
+    "past_curr_prc": "+31400",
+    "base_comp_sign": "2",
+    "base_comp_chgr": "+10.18",
+    "prev_base_sign": "3",
+    "prev_base_chgr": "0.00",
+    "dt": "20261005",
+    "tm": "170000",
+    "stk_cd": "043260",
+}
+
+USA01980_REPLY = {
+    "base_date": "20261005",
+    "base_time": "170000",
+    "result_list": [
+        {
+            "rank": "04",
+            "stk_cd": "NVDA",
+            "stk_nm": "엔비디아",
+            "sign": "-",
+            "chg_val": "02",
+            "curr_pric": "233.9500",
+            "sign_for_gjga": "-",
+            "diff_rate_for_gjga": "0.6200",
+            "sign_for_prev": "",
+            "diff_rate_for_prev": "0.0000",
+            "stex_tp": "ND",
+        }
+    ],
+}
+
+
+def ranking_fake(api_id: str, *pages: Reply) -> FakeKiwoom:
+    return FakeKiwoom().reply(api_id, *pages)
+
+
+class ThreadedTransport(httpx.AsyncBaseTransport):
+    """핸들러를 스레드에서 실행해, 한 요청이 기다리는 동안 다른 요청이 진행될 수 있게 한다."""
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self._handler = handler
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        return await asyncio.to_thread(self._handler, request)

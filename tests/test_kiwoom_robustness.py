@@ -10,6 +10,7 @@ from tests.fake_kiwoom import (
     FAKE_ENV,
     KT00018_HOLDING,
     KT00018_REPLY,
+    ThreadedTransport,
     domestic_fake,
     kiwoom_error,
     page_response,
@@ -149,7 +150,7 @@ async def test_concurrent_first_requests_issue_a_single_token():
 
     fake.on_request = slow_token
     app = create_app(
-        environ=FAKE_ENV, transport=_ThreadedTransport(fake), static_dir=None, log_dir=None
+        environ=FAKE_ENV, transport=ThreadedTransport(fake), static_dir=None, log_dir=None
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -181,7 +182,7 @@ async def test_late_invalid_token_does_not_discard_a_newer_token():
         return fake(request)
 
     app = create_app(
-        environ=FAKE_ENV, transport=_ThreadedTransport(handler), static_dir=None, log_dir=None
+        environ=FAKE_ENV, transport=ThreadedTransport(handler), static_dir=None, log_dir=None
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -199,17 +200,6 @@ async def test_late_invalid_token_does_not_discard_a_newer_token():
     assert slow_response.status_code == 200
     # 늦게 도착한 8005는 이미 갱신된 token-2를 지우지 않으므로 추가 발급 없이 token-2로 재시도한다.
     assert len(fake.token_requests()) == 2
-
-
-class _ThreadedTransport(httpx.AsyncBaseTransport):
-    """핸들러를 스레드에서 실행해, 한 요청이 기다리는 동안 다른 요청이 진행될 수 있게 한다."""
-
-    def __init__(self, handler) -> None:  # type: ignore[no-untyped-def]
-        self._handler = handler
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        await request.aread()
-        return await asyncio.to_thread(self._handler, request)
 
 
 def test_documented_code_inside_message_is_used_for_classification(make_client):
