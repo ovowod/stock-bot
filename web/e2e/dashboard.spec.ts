@@ -119,6 +119,8 @@ const visibleText = (page: Page, text: string) => page.getByText(text).filter({ 
 async function expectNoHorizontalScroll(page: Page) {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
+  // 내용이 넓으면 모바일 브라우저는 화면 자체를 넓혀 버려 위 검사만으로는 잡히지 않는다.
+  expect(await page.evaluate(() => window.innerWidth)).toBe(page.viewportSize()!.width);
 }
 
 test("처음에는 국내 모의로 열리고 계좌 요약·예수금·보유종목을 보여준다", async ({ page }, info) => {
@@ -129,6 +131,7 @@ test("처음에는 국내 모의로 열리고 계좌 요약·예수금·보유�
   await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
   if (!info.project.name.includes("mobile")) {
     await expect(page.getByRole("button", { name: "계좌 확인" })).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("group", { name: "자산" }).getByRole("button", { name: "계좌 확인" })).toBeVisible();
   }
   await expect(page.getByText("512,345,678원")).toBeVisible();
   await expect(page.getByText("8135****11")).toBeVisible();
@@ -147,8 +150,8 @@ test("수익은 빨강 ▲ +, 손실은 파랑 ▼ − 로 표시한다", async 
   await expect(gain).toBeVisible();
   await expect(loss).toBeVisible();
   const color = (locator: typeof gain) => locator.evaluate((el) => getComputedStyle(el).color);
-  expect(await color(gain)).toBe("rgb(209, 42, 42)");
-  expect(await color(loss)).toBe("rgb(31, 95, 209)");
+  expect(await color(gain)).toBe("rgb(240, 68, 82)");
+  expect(await color(loss)).toBe("rgb(49, 130, 246)");
   await expect(gain).toContainText("▲");
   await expect(loss).toContainText("▼");
 });
@@ -343,7 +346,7 @@ for (const [label, amountPattern] of [
     await envButton(page, label).click();
     await expect(page.getByRole("heading", { name: "예수금" })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole("alert")).toHaveCount(0);
-    const firstStat = page.locator("main p.text-lg").first();
+    const firstStat = page.getByTestId("hero-value");
     await expect(firstStat).toHaveText(amountPattern);
     await page.screenshot({ path: `screenshots/live-${info.project.name}-${label}.png`, fullPage: true });
   });

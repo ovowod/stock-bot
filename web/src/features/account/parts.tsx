@@ -14,16 +14,18 @@ export function Change({
   value,
   format,
   className = "",
+  mark = true,
 }: {
   value: number | null;
   format: (value: number | null) => string;
   className?: string;
+  mark?: boolean;
 }) {
   if (value === null) return <span className={`text-muted ${className}`}>{EMPTY}</span>;
   const tone = TONE[direction(value)];
   return (
     <span className={`whitespace-nowrap ${tone.text} ${className}`}>
-      {tone.mark && (
+      {mark && tone.mark && (
         <span className="mr-0.5 text-[0.75em]" aria-hidden>
           {tone.mark}
         </span>
@@ -34,157 +36,130 @@ export function Change({
   );
 }
 
-export function toneSoft(value: number | null): string {
-  return TONE[direction(value)].soft;
+/** 손익과 수익률을 한 줄 알약 모양으로 묶는다. */
+export function ChangePill({
+  amount,
+  rate,
+  formatAmount,
+  formatRate,
+}: {
+  amount: number | null;
+  rate: number | null;
+  formatAmount: (value: number | null) => string;
+  formatRate: (value: number | null) => string;
+}) {
+  return (
+    <span
+      className={`inline-flex flex-wrap items-center gap-x-1.5 rounded-full px-3 py-1 text-sm font-semibold ${
+        TONE[direction(amount)].soft
+      }`}
+    >
+      <Change value={amount} format={formatAmount} />
+      <Change value={rate} format={formatRate} mark={false} />
+    </span>
+  );
 }
 
-export function Card({
+export function Panel({
   title,
-  icon,
+  aside,
   children,
   className = "",
 }: {
   title?: string;
-  icon?: ReactNode;
+  aside?: ReactNode;
   children: ReactNode;
   className?: string;
 }) {
   return (
-    <section className={`rounded-xl border border-line bg-surface ${className}`}>
+    <section className={`rounded-3xl bg-surface p-5 md:p-6 ${className}`}>
       {title && (
-        <h3 className="flex items-center gap-2 border-b border-line px-4 py-3 text-sm font-semibold md:px-5">
-          {icon}
-          {title}
-        </h3>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-[17px] font-bold">{title}</h3>
+          {aside && <span className="text-sm text-muted">{aside}</span>}
+        </div>
       )}
       {children}
     </section>
   );
 }
 
-export function StatCard({
-  label,
-  value,
-  sub,
-  highlight,
-}: {
-  label: string;
+export function Row({ label, value, sub }: { label: string; value: ReactNode; sub?: ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-4 py-2.5">
+      <dt className="shrink-0 text-[15px] whitespace-nowrap text-sub">{label}</dt>
+      <dd className="text-right">
+        <div className="text-[15px] font-semibold">{value}</div>
+        {sub && <div className="text-xs text-muted">{sub}</div>}
+      </dd>
+    </div>
+  );
+}
+
+export function MiniStat({ label, value, sub }: { label: string; value: ReactNode; sub?: ReactNode }) {
+  return (
+    <div className="min-w-0 rounded-2xl bg-canvas px-4 py-3.5">
+      <p className="text-[13px] text-muted">{label}</p>
+      <p className="mt-0.5 truncate text-[17px] font-bold">{value}</p>
+      {sub && <p className="truncate text-xs text-muted">{sub}</p>}
+    </div>
+  );
+}
+
+export interface HoldingView {
+  key: string;
+  name: string;
+  meta: ReactNode;
   value: ReactNode;
-  sub?: ReactNode;
-  highlight?: string;
-}) {
-  return (
-    <div className={`rounded-xl border border-line p-4 md:p-5 ${highlight ?? "bg-surface"}`}>
-      <p className="text-xs font-medium text-muted md:text-sm">{label}</p>
-      <p className="mt-1.5 text-lg font-semibold tracking-tight break-words md:text-2xl">{value}</p>
-      {sub && <p className="mt-1 text-xs text-muted md:text-sm">{sub}</p>}
-    </div>
-  );
+  change: ReactNode;
+  details: { label: string; value: ReactNode }[];
 }
 
-export function KeyValue({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between gap-4 py-2.5">
-      <dt className="text-sm text-muted">{label}</dt>
-      <dd className="text-right text-sm font-medium">{value}</dd>
-    </div>
-  );
-}
-
-export interface Column<T> {
-  header: string;
-  align?: "left" | "right";
-  cell: (row: T) => ReactNode;
-}
-
-/** 데스크톱은 표, 모바일은 카드 목록. 화면 전체가 가로로 밀리지 않는다. */
-export function HoldingsTable<T>({
-  rows,
-  rowKey,
-  title,
-  subtitle,
-  aside,
-  columns,
-}: {
-  rows: T[];
-  rowKey: (row: T, index: number) => string;
-  title: (row: T) => ReactNode;
-  subtitle: (row: T) => ReactNode;
-  aside: (row: T) => ReactNode;
-  columns: Column<T>[];
-}) {
-  if (rows.length === 0) {
+/** 토스식 종목 목록. 넓은 화면에서는 가운데에 세부 값을 함께 펼친다. */
+export function HoldingsList({ items }: { items: HoldingView[] }) {
+  if (items.length === 0) {
     return (
-      <div className="flex flex-col items-center gap-2 px-4 py-12 text-center text-muted">
-        <Inbox className="size-8" aria-hidden />
-        <p className="text-sm font-medium text-ink">보유종목이 없습니다</p>
-        <p className="text-xs">이 계좌에는 현재 보유 중인 종목이 없습니다.</p>
+      <div className="flex flex-col items-center gap-2 py-12 text-center">
+        <span className="flex size-12 items-center justify-center rounded-full bg-canvas text-muted">
+          <Inbox className="size-6" aria-hidden />
+        </span>
+        <p className="mt-1 text-[15px] font-semibold">보유종목이 없습니다</p>
+        <p className="text-sm text-muted">이 계좌에는 현재 보유 중인 종목이 없습니다.</p>
       </div>
     );
   }
   return (
-    <>
-      <div className="hidden overflow-x-auto md:block">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-xs text-muted">
-              <th className="px-5 py-2.5 text-left font-medium">종목</th>
-              {columns.map((column) => (
-                <th
-                  key={column.header}
-                  className={`px-3 py-2.5 font-medium whitespace-nowrap last:pr-5 ${
-                    column.align === "left" ? "text-left" : "text-right"
-                  }`}
-                >
-                  {column.header}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, index) => (
-              <tr key={rowKey(row, index)} className="border-b border-line last:border-0 hover:bg-canvas/60">
-                <td className="px-5 py-3">
-                  <div className="font-medium">{title(row)}</div>
-                  <div className="text-xs text-muted">{subtitle(row)}</div>
-                </td>
-                {columns.map((column) => (
-                  <td
-                    key={column.header}
-                    className={`px-3 py-3 whitespace-nowrap last:pr-5 ${
-                      column.align === "left" ? "text-left" : "text-right"
-                    }`}
-                  >
-                    {column.cell(row)}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <ul className="divide-y divide-line md:hidden">
-        {rows.map((row, index) => (
-          <li key={rowKey(row, index)} className="px-4 py-3.5">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="truncate font-medium">{title(row)}</div>
-                <div className="text-xs text-muted">{subtitle(row)}</div>
+    <ul className="-mx-2">
+      {items.map((item) => (
+        <li
+          key={item.key}
+          className="flex items-center gap-3 rounded-2xl px-2 py-3 transition hover:bg-canvas/70"
+        >
+          <span
+            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-50 text-[15px] font-bold text-brand-600"
+            aria-hidden
+          >
+            {item.name.slice(0, 1)}
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[15px] font-semibold">{item.name}</p>
+            <p className="truncate text-[13px] text-muted">{item.meta}</p>
+          </div>
+          <dl className="hidden shrink-0 gap-6 xl:flex">
+            {item.details.map((detail) => (
+              <div key={detail.label} className="w-24 text-right">
+                <dt className="text-xs text-muted">{detail.label}</dt>
+                <dd className="text-sm font-medium">{detail.value}</dd>
               </div>
-              <div className="text-right text-sm font-semibold">{aside(row)}</div>
-            </div>
-            <dl className="mt-2.5 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-              {columns.map((column) => (
-                <div key={column.header} className="flex justify-between gap-2">
-                  <dt className="text-muted">{column.header}</dt>
-                  <dd className="text-right font-medium">{column.cell(row)}</dd>
-                </div>
-              ))}
-            </dl>
-          </li>
-        ))}
-      </ul>
-    </>
+            ))}
+          </dl>
+          <div className="shrink-0 text-right xl:w-44">
+            <p className="text-[15px] font-bold">{item.value}</p>
+            <p className="text-[13px] font-medium">{item.change}</p>
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -218,21 +193,22 @@ export function ErrorNotice({
 }) {
   const Icon = ERROR_ICON[error.kind] ?? AlertTriangle;
   return (
-    <div
-      role="alert"
-      className={`rounded-xl border border-real/25 bg-real-soft text-real ${compact ? "p-3" : "p-5 md:p-6"}`}
-    >
-      <div className="flex items-start gap-3">
-        <Icon className="mt-0.5 size-5 shrink-0" aria-hidden />
+    <div role="alert" className={`rounded-3xl bg-surface ${compact ? "p-4" : "p-6 md:p-8"}`}>
+      <div className={`flex gap-4 ${compact ? "items-center" : "flex-col items-start md:flex-row"}`}>
+        <span className="flex size-11 shrink-0 items-center justify-center rounded-full bg-real-soft text-real">
+          <Icon className="size-5" aria-hidden />
+        </span>
         <div className="min-w-0 flex-1">
-          <p className="font-semibold">{ERROR_TITLE[error.kind] ?? "계좌 정보를 불러오지 못했습니다"}</p>
-          <p className="mt-1 text-sm break-words text-ink/80">{error.message}</p>
+          <p className="text-[17px] font-bold">
+            {ERROR_TITLE[error.kind] ?? "계좌 정보를 불러오지 못했습니다"}
+          </p>
+          <p className="mt-1 text-[15px] break-words text-sub">{error.message}</p>
           {error.missing.length > 0 && (
-            <p className="mt-2 text-sm text-ink/80">
-              프로젝트 최상위 <code className="rounded bg-surface px-1">.env</code>에 다음 값을 채워
-              주세요:{" "}
+            <p className="mt-2 text-sm text-sub">
+              프로젝트 최상위 <code className="rounded-md bg-canvas px-1.5 py-0.5">.env</code>에 다음
+              값을 채워 주세요:{" "}
               {error.missing.map((name) => (
-                <code key={name} className="mr-1 rounded bg-surface px-1">
+                <code key={name} className="mr-1 rounded-md bg-canvas px-1.5 py-0.5">
                   {name}
                 </code>
               ))}
@@ -243,7 +219,7 @@ export function ErrorNotice({
         <button
           type="button"
           onClick={onRetry}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-real/30 bg-surface px-3 py-1.5 text-sm font-medium text-real hover:bg-real-soft"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-brand-50 px-4 py-2.5 text-sm font-semibold text-brand-700 hover:bg-brand-100"
         >
           <RefreshCw className="size-4" aria-hidden />
           다시 시도
@@ -254,18 +230,35 @@ export function ErrorNotice({
 }
 
 export function AccountSkeleton() {
+  const bar = "rounded-lg bg-canvas";
   return (
-    <div className="animate-pulse space-y-5" aria-label="계좌 정보를 불러오는 중" role="status">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {Array.from({ length: 4 }, (_, i) => (
-          <div key={i} className="h-24 rounded-xl border border-line bg-surface p-4 md:h-28">
-            <div className="h-3 w-20 rounded bg-line" />
-            <div className="mt-3 h-6 w-28 rounded bg-line" />
+    <div className="animate-pulse" aria-label="계좌 정보를 불러오는 중" role="status">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="space-y-4">
+          <div className="rounded-3xl bg-surface p-6">
+            <div className={`h-4 w-24 ${bar}`} />
+            <div className={`mt-3 h-9 w-56 ${bar}`} />
+            <div className="mt-3 h-7 w-40 rounded-full bg-canvas" />
+            <div className="mt-6 grid grid-cols-2 gap-3">
+              <div className="h-16 rounded-2xl bg-canvas" />
+              <div className="h-16 rounded-2xl bg-canvas" />
+            </div>
           </div>
-        ))}
+          <div className="space-y-4 rounded-3xl bg-surface p-6">
+            {Array.from({ length: 3 }, (_, i) => (
+              <div key={i} className="flex items-center gap-3">
+                <div className="size-10 rounded-full bg-canvas" />
+                <div className="flex-1 space-y-2">
+                  <div className={`h-4 w-28 ${bar}`} />
+                  <div className={`h-3 w-20 ${bar}`} />
+                </div>
+                <div className={`h-4 w-20 ${bar}`} />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="h-72 rounded-3xl bg-surface" />
       </div>
-      <div className="h-40 rounded-xl border border-line bg-surface" />
-      <div className="h-64 rounded-xl border border-line bg-surface" />
     </div>
   );
 }
