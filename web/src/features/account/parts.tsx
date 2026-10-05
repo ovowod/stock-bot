@@ -144,9 +144,9 @@ export function HoldingsList({ items }: { items: HoldingView[] }) {
           </div>
           <dl className="hidden shrink-0 gap-6 xl:flex">
             {item.details.map((detail) => (
-              <div key={detail.label} className="w-24 text-right">
+              <div key={detail.label} className="min-w-24 text-right">
                 <dt className="text-xs text-muted">{detail.label}</dt>
-                <dd className="text-sm font-medium">{detail.value}</dd>
+                <dd className="text-sm font-medium whitespace-nowrap">{detail.value}</dd>
               </div>
             ))}
           </dl>
