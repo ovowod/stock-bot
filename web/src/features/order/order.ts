@@ -62,6 +62,15 @@ export function parsePrice(
   if (text === "") return { price: null, text: null, error: null };
   const pattern = market === "domestic" ? /^\d+$/ : /^\d+(\.\d+)?$/;
   if (pattern.test(text) && text.length <= MAX_LENGTH && Number(text) > 0) {
+    // 키움 1517 응답에 적힌 규칙: 미국 가격은 $1 미만은 소수 넷째 자리, $1 이상은 소수 둘째 자리까지.
+    const decimals = text.split(".")[1]?.length ?? 0;
+    if (market === "us" && decimals > (Number(text) < 1 ? 4 : 2)) {
+      return {
+        price: null,
+        text: null,
+        error: "미국 주식 가격은 $1 이상이면 소수 둘째 자리, $1 미만이면 소수 넷째 자리까지 입력할 수 있습니다.",
+      };
+    }
     return { price: Number(text), text, error: null };
   }
   return {

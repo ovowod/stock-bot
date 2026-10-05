@@ -23,6 +23,10 @@ US_ORDER_PATH = "/api/us/ordr"
 MAX_ORDER_KEY_LENGTH = 64
 # 키움까지 갔는지 알 수 없는 오류. 접수됐을 수 있으므로 거부가 아니라 확인 불가로 알린다.
 UNKNOWN_RESULT_KINDS = {"connection_error", "response_format_error"}
+US_DECIMALS_MESSAGE = (
+    "미국 주식 가격은 $1 이상이면 소수 둘째 자리, "
+    "$1 미만이면 소수 넷째 자리까지 입력할 수 있습니다."
+)
 UNKNOWN_RESULT_MESSAGE = (
     "접수 여부를 확인할 수 없습니다. 키움에서 주문 내역을 확인한 뒤 다시 주문하세요."
 )
@@ -150,8 +154,11 @@ def _validate(request: Any, market: Market) -> dict[str, str]:
         price = _text(request, "price")
         if market is Market.DOMESTIC and not (_number(price, _INTEGER) and int(price) >= 1):
             raise _invalid("가격은 1원 이상, 12자리 이하의 정수로 입력하세요.")
-        if market is Market.US and not (_number(price, _DECIMAL) and Decimal(price) > 0):
-            raise _invalid("가격은 0보다 크고 12글자 이하인 숫자로 입력하세요.")
+        if market is Market.US:
+            if not (_number(price, _DECIMAL) and Decimal(price) > 0):
+                raise _invalid("가격은 0보다 크고 12글자 이하인 숫자로 입력하세요.")
+            if not _us_decimals_ok(price):
+                raise _invalid(US_DECIMALS_MESSAGE)
     return {
         "order_key": order_key,
         "code": code,
@@ -160,6 +167,12 @@ def _validate(request: Any, market: Market) -> dict[str, str]:
         "quantity": quantity,
         "price": price,
     }
+
+
+def _us_decimals_ok(price: str) -> bool:
+    """키움 1517 응답에 적힌 규칙: $1 미만은 소수 넷째 자리, $1 이상은 소수 둘째 자리까지."""
+    decimals = len(price.partition(".")[2])
+    return decimals <= (4 if Decimal(price) < 1 else 2)
 
 
 def _number(text: str, pattern: re.Pattern[str]) -> bool:

@@ -245,6 +245,15 @@ test("미국 모의에서 NYSE·NASDAQ·AMEX가 아닌 종목은 현재가를 �
   expect(quotes).toEqual([{ environment: "us_paper", code: "SOXL", exchange: "NYSE" }]);
   await dialog.getByLabel("수량 (주)").fill("2");
   await expect(dialog.getByLabel("예상 주문금액")).toHaveText("$340.50");
+  // 키움 규칙: $1 이상은 소수 둘째 자리, $1 미만은 소수 넷째 자리까지 받는다.
+  const decimalsError = dialog.getByText("미국 주식 가격은 $1 이상이면 소수 둘째 자리", { exact: false });
+  await dialog.getByLabel("가격 (USD)").fill("629.71323");
+  await expect(decimalsError).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "매수" })).toBeDisabled();
+  await dialog.getByLabel("가격 (USD)").fill("0.12345");
+  await expect(decimalsError).toBeVisible();
+  await dialog.getByLabel("가격 (USD)").fill("629.71");
+  await expect(decimalsError).toHaveCount(0);
   // 1달러 미만 가격도 예상 주문금액이 0으로 보이지 않는다.
   await dialog.getByLabel("가격 (USD)").fill("0.0001");
   await dialog.getByLabel("수량 (주)").fill("1");

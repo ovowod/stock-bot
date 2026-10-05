@@ -305,3 +305,17 @@ def test_malformed_order_responses_are_unknown_results(make_client):
         assert response.status_code == 502, reply
         assert response.json()["error"]["kind"] == "order_result_unknown"
         assert len(fake.calls("kt10000")) == 1
+
+
+def test_us_price_decimals_follow_kiwoom_tick_rule(make_client):
+    """키움 1517 응답: $1 미만은 소수 넷째 자리, $1 이상은 소수 둘째 자리까지 받는다."""
+    fake = FakeKiwoom().reply("ust20000", {"ord_no": "000000290"})
+    client = make_client(fake)
+    for price in ("629.71", "629.7", "629", "0.1234", "0.99"):
+        order = us_order(order_key=f"ok-{price}", price=price)
+        assert client.post(US_URL, json=order).status_code == 200, price
+    for price in ("629.71323", "629.715", "1.001", "1.0000", "0.12345"):
+        response = client.post(US_URL, json=us_order(order_key=f"bad-{price}", price=price))
+        assert response.status_code == 400, price
+        assert "소수" in response.json()["error"]["message"]
+    assert len(fake.calls("ust20000")) == 5
