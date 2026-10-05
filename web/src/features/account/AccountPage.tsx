@@ -133,7 +133,21 @@ function DomesticView({ data }: { data: DomesticAccount }) {
             items={data.holdings.map((h, i) => ({
               key: `${h.code}-${i}`,
               name: h.name,
-              meta: `${h.code} · ${formatCount(h.quantity)} · 평균 ${formatKrw(h.purchase_price)}`,
+              quantity: formatCount(h.quantity),
+              position: [formatCount(h.quantity), `현재가 ${formatKrw(h.current_price)}`],
+              info: [
+                h.code,
+                `평균 ${formatKrw(h.purchase_price)}`,
+                `보유비중 ${formatRate(h.weight)}`,
+                ...sellable(h.quantity, h.tradable_quantity),
+              ],
+              details: [
+                { label: "현재가", value: formatKrw(h.current_price) },
+                { label: "평균단가", value: formatKrw(h.purchase_price) },
+                { label: "종목코드", value: h.code },
+                { label: "보유비중", value: formatRate(h.weight) },
+                ...sellableDetail(h.quantity, h.tradable_quantity),
+              ],
               value: formatKrw(h.evaluation_amount),
               change: (
                 <>
@@ -141,11 +155,6 @@ function DomesticView({ data }: { data: DomesticAccount }) {
                   <Change value={h.return_rate} format={formatRate} parens />
                 </>
               ),
-              details: [
-                { label: "현재가", value: formatKrw(h.current_price) },
-                { label: "매입금액", value: formatKrw(h.purchase_amount) },
-                { label: "보유비중", value: formatRate(h.weight) },
-              ],
             }))}
           />
         </Panel>
@@ -227,23 +236,48 @@ function UsView({ data }: { data: UsAccount }) {
             items={data.holdings.map((h, i) => ({
               key: `${h.code}-${i}`,
               name: h.name,
-              meta: `${h.code} · ${h.exchange} · ${formatCount(h.quantity)} · 평균 ${price(h.purchase_price)}`,
+              quantity: formatCount(h.quantity),
+              position: [formatCount(h.quantity), `현재가 ${price(h.current_price)}`],
+              info: [
+                h.code,
+                h.exchange,
+                `평균 ${price(h.purchase_price)}`,
+                ...sellable(h.quantity, h.sellable_quantity),
+              ],
+              details: [
+                { label: "현재가", value: price(h.current_price) },
+                { label: "평균단가", value: price(h.purchase_price) },
+                { label: "종목코드", value: h.code },
+                { label: "거래소", value: h.exchange },
+                { label: "원화 평가금액", value: formatKrw(h.evaluation_amount_krw) },
+                ...sellableDetail(h.quantity, h.sellable_quantity),
+              ],
               value: usd(h.evaluation_amount),
+              valueSub: formatKrw(h.evaluation_amount_krw),
               change: (
                 <>
                   <Change value={h.profit_loss} format={usd} />{" "}
                   <Change value={h.return_rate} format={formatRate} parens />
                 </>
               ),
-              details: [
-                { label: "현재가", value: price(h.current_price) },
-                { label: "매도가능", value: formatCount(h.sellable_quantity) },
-                { label: "평가금액(원)", value: formatKrw(h.evaluation_amount_krw) },
-              ],
             }))}
           />
         </Panel>
       }
     />
   );
+}
+
+/** 매도가능 수량은 보유 수량보다 적을 때(예: 매도 주문이 걸려 있을 때)만 보여준다. */
+function sellableDetail(
+  quantity: number | null,
+  sellableQuantity: number | null,
+): { label: string; value: string }[] {
+  return quantity !== null && sellableQuantity !== null && sellableQuantity < quantity
+    ? [{ label: "매도가능", value: formatCount(sellableQuantity) }]
+    : [];
+}
+
+function sellable(quantity: number | null, sellableQuantity: number | null): string[] {
+  return sellableDetail(quantity, sellableQuantity).map((detail) => `${detail.label} ${detail.value}`);
 }
