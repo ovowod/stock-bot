@@ -1,10 +1,14 @@
+import httpx
+
 from tests.fake_kiwoom import (
     KT00018_HOLDING,
     KT00018_REPLY,
+    UST21070_HOLDING,
     UST21070_REPLY,
     FakeKiwoom,
     body_of,
     kiwoom_error,
+    page_response,
 )
 
 
@@ -25,13 +29,26 @@ def test_domestic_holding_returns_the_cash_quantities(make_client):
     assert fake.calls("kt00018")[0].url.host == "mockapi.kiwoom.com"
 
 
-def test_us_holding_is_looked_up_by_ticker(make_client):
-    fake = FakeKiwoom().reply("ust21070", UST21070_REPLY)
+def us_balance_like_kiwoom(request: httpx.Request) -> httpx.Response:
+    """모의 서버는 종목코드만 넣고 거래소를 비우면 1517로 거부했다(2026-10-06 EWZ 매도 확인)."""
+    body = body_of(request)
+    if body["stk_cd"] and not body["stex_tp"]:
+        return kiwoom_error(
+            1517,
+            "입력 값 형식이 올바르지 않습니다. 파라미터=stex_tp 실패사유= 거래소 구분값이 없습니다",
+        )
+    other = {**UST21070_HOLDING, "stk_cd": "EWZ", "frgn_stk_nm": "MSCI 브라질", "sell_alowq": "1"}
+    return page_response({**UST21070_REPLY, "result_list": [other, UST21070_HOLDING]})
+
+
+def test_us_holding_is_found_by_ticker_in_the_whole_balance(make_client):
+    fake = FakeKiwoom().respond("ust21070", us_balance_like_kiwoom)
     response = make_client(fake).get("/api/environments/us_paper/holdings/AAPL")
 
     assert response.status_code == 200
     assert response.json()["sellable_quantity"] == 395
-    assert body_of(fake.calls("ust21070")[0]) == {"stex_tp": "", "stk_cd": "AAPL"}
+    # 거래소 표기가 주문과 다를 수 있어 거래소를 지정하지 않고 전체를 받는다.
+    assert body_of(fake.calls("ust21070")[0]) == {"stex_tp": "", "stk_cd": ""}
 
 
 def test_a_stock_not_held_is_not_an_error(make_client):

@@ -229,14 +229,14 @@ def us_holding(**overrides: object) -> dict[str, object]:
     return {**UST21070_HOLDING, **overrides}
 
 
-def test_us_limit_sell_checks_the_ticker_balance_then_sends_ust20001(make_client):
+def test_us_limit_sell_checks_the_balance_then_sends_ust20001(make_client):
     fake = FakeKiwoom().reply("ust21070", us_balance(us_holding()))
     fake.reply("ust20001", US_SELL_REPLY)
     response = make_client(fake).post(US_URL, json=us_sell())
 
     assert response.status_code == 200
     assert response.json()["order_no"] == "000000283"
-    assert body_of(fake.calls("ust21070")[0]) == {"stex_tp": "", "stk_cd": "AAPL"}
+    assert body_of(fake.calls("ust21070")[0]) == {"stex_tp": "", "stk_cd": ""}
     request = fake.calls("ust20001")[0]
     assert request.url.host == "mockapi.kiwoom.com"
     assert request.url.path == "/api/us/ordr"

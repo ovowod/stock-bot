@@ -144,10 +144,11 @@ class AccountService:
             ]
         else:
             api_id, quantity_key, sellable_key = "ust21070", "poss_qty", "sell_alowq"
-            # 잔고의 거래소 표기가 주문과 다를 수 있어(NYSE Arca ETF를 아멕스로 준다)
-            # 거래소로 거르지 않는다.
+            # 종목코드를 넣으면 거래소도 넣어야 한다(모의 서버 1517).
+            # 그런데 잔고의 거래소 표기가 주문과 다를 수 있어(NYSE Arca ETF를 아멕스로 준다)
+            # 계좌 확인처럼 전체를 받아 티커로 찾는다.
             data = await self._kiwoom.call(
-                spec, api_id, US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": code}
+                spec, api_id, US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}
             )
             rows = [
                 row
