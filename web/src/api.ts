@@ -158,6 +158,23 @@ export function searchStocks(
   return getJson<StockSearchResult>(`/api/environments/${environment}/stocks?${params}`, signal);
 }
 
+export interface Quote {
+  code: string;
+  price: number | null;
+  fetched_at: string;
+}
+
+export function fetchQuote(
+  environment: EnvironmentValue,
+  code: string,
+  exchange: string | null,
+  signal: AbortSignal,
+): Promise<Quote> {
+  const params = new URLSearchParams({ code });
+  if (exchange) params.set("exchange", exchange);
+  return getJson<Quote>(`/api/environments/${environment}/quote?${params}`, signal);
+}
+
 export function fetchAccount(environment: EnvironmentValue, signal: AbortSignal): Promise<Account> {
   return getJson<Account>(`/api/environments/${environment}/account`, signal);
 }

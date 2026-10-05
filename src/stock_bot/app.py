@@ -20,6 +20,7 @@ from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
+from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
 from stock_bot.stock_search import StockSearchService, today_kst
 
@@ -44,6 +45,7 @@ def create_app(
     accounts = AccountService(kiwoom)
     rankings = RankingService(kiwoom)
     stocks = StockSearchService(kiwoom, today or today_kst)
+    quotes = QuoteService(kiwoom)
     app = FastAPI(title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -122,6 +124,14 @@ def create_app(
         spec = parse_environment(environment)
         environment_var.set(spec.environment.value)
         return await stocks.search(spec, q)
+
+    @app.get("/api/environments/{environment}/quote")
+    async def get_quote(
+        environment: str, code: str | None = None, exchange: str | None = None
+    ) -> dict[str, Any]:
+        spec = parse_environment(environment)
+        environment_var.set(spec.environment.value)
+        return await quotes.fetch(spec, code, exchange)
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

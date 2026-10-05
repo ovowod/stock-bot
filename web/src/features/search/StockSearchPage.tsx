@@ -87,12 +87,11 @@ function Results({ result, dimmed }: { result: StockSearchResult; dimmed: boolea
 function ResultRow({ item }: { item: StockSearchItem }) {
   const openOrder = useOrderPanel();
   const meta = [item.code, item.exchange ?? item.category, item.industry].filter(Boolean).join(" · ");
-  const target = { ...item, price: null };
   return (
     <li>
       <button
         type="button"
-        onClick={() => openOrder(target)}
+        onClick={() => openOrder(item)}
         className="flex w-full items-center gap-3 rounded-2xl px-2 py-2.5 text-left hover:bg-canvas/70"
       >
         <span

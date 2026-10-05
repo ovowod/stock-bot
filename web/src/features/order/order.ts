@@ -10,8 +10,6 @@ export interface OrderTarget {
   exchange: string | null;
   /** 국내 종목 구분(코스피·코스닥·ETF 등). 미국은 null. */
   category: string | null;
-  /** 현재가. 지정가 가격 칸에 미리 채운다. */
-  price: number | null;
   /** 관리종목 등 종목 상태. 정상이면 null. */
   status: string | null;
 }

@@ -1,7 +1,7 @@
 import { CircleAlert, Info, ShieldAlert, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { EnvironmentValue } from "../../api";
+import { fetchQuote, type EnvironmentValue } from "../../api";
 import { findEnvironment } from "../../environments";
 import { formatForeign, formatKrw } from "../../format";
 import {
@@ -108,7 +108,7 @@ function OrderPanel({
               {unavailable}
             </Callout>
           ) : (
-            <BuyForm market={env.market} target={target} />
+            <BuyForm environment={environment} market={env.market} target={target} />
           )}
         </div>
       </div>
@@ -117,10 +117,50 @@ function OrderPanel({
   );
 }
 
-function BuyForm({ market, target }: { market: "domestic" | "us"; target: OrderTarget }) {
+type QuoteStatus = "loading" | "ready" | "error";
+
+/**
+ * 패널이 열릴 때 현재가를 한 번 조회해 가격 칸을 채운다.
+ * 사용자가 가격 칸을 이미 건드렸으면 성공·실패 모두 그 값을 그대로 둔다.
+ */
+function usePriceWithQuote(environment: EnvironmentValue, target: OrderTarget) {
+  const [priceText, setPriceText] = useState("");
+  const [status, setStatus] = useState<QuoteStatus>("loading");
+  const touched = useRef(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchQuote(environment, target.code, target.exchange, controller.signal).then(
+      (quote) => {
+        if (!touched.current && quote.price !== null) setPriceText(String(quote.price));
+        setStatus("ready");
+      },
+      () => {
+        if (!controller.signal.aborted) setStatus("error");
+      },
+    );
+    return () => controller.abort();
+  }, [environment, target.code, target.exchange]);
+
+  const change = (value: string) => {
+    touched.current = true;
+    setPriceText(value);
+  };
+  return { priceText, change, status };
+}
+
+function BuyForm({
+  environment,
+  market,
+  target,
+}: {
+  environment: EnvironmentValue;
+  market: "domestic" | "us";
+  target: OrderTarget;
+}) {
   const [type, setType] = useState<OrderType>("limit");
-  const [quantityText, setQuantityText] = useState("");
-  const [priceText, setPriceText] = useState(target.price === null ? "" : String(target.price));
+  const [quantityText, setQuantityText] = useState("1");
+  const { priceText, change: setPriceText, status: quoteStatus } = usePriceWithQuote(environment, target);
   const { quantity, error: quantityError } = parseQuantity(quantityText);
   const { price, error: priceError } = parsePrice(priceText, market);
   const unit = market === "domestic" ? "원" : "USD";
@@ -154,7 +194,17 @@ function BuyForm({ market, target }: { market: "domestic" | "us"; target: OrderT
       </div>
 
       {type === "limit" && (
-        <Field label={`가격 (${unit})`} error={priceError}>
+        <Field
+          label={`가격 (${unit})`}
+          error={priceError}
+          hint={
+            quoteStatus === "loading"
+              ? "현재가를 불러오는 중입니다."
+              : quoteStatus === "error"
+                ? "현재가를 불러오지 못했습니다. 가격을 직접 입력하세요."
+                : null
+          }
+        >
           <input
             value={groupThousands(priceText)}
             onChange={(event) => setPriceText(event.target.value.replaceAll(",", ""))}
@@ -209,12 +259,23 @@ function BuyForm({ market, target }: { market: "domestic" | "us"; target: OrderT
 const INPUT =
   "w-full rounded-2xl bg-canvas px-4 py-3 text-[16px] outline-none placeholder:text-muted focus:ring-2 focus:ring-brand-100 aria-invalid:ring-2 aria-invalid:ring-real/40";
 
-function Field({ label, error, children }: { label: string; error: string | null; children: ReactNode }) {
+function Field({
+  label,
+  error,
+  hint = null,
+  children,
+}: {
+  label: string;
+  error: string | null;
+  hint?: string | null;
+  children: ReactNode;
+}) {
   return (
     <label className="block space-y-1.5">
       <span className="text-sm font-semibold text-sub">{label}</span>
       {children}
       {error && <span className="block text-xs font-semibold text-real">{error}</span>}
+      {hint && <span className="block text-xs text-muted">{hint}</span>}
     </label>
   );
 }
