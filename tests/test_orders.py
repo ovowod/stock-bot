@@ -1,6 +1,12 @@
+import asyncio
 import logging
+import threading
 
-from tests.fake_kiwoom import FakeKiwoom, body_of, kiwoom_error
+import httpx
+import pytest
+
+from stock_bot.app import create_app
+from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, ThreadedTransport, body_of, kiwoom_error
 
 DOMESTIC_URL = "/api/environments/domestic_paper/orders"
 ORDER_REPLY = {"ord_no": "00024"}
@@ -211,3 +217,90 @@ def test_us_order_needs_a_supported_exchange(make_client):
         response = client.post(US_URL, json=us_order(exchange=exchange))
         assert response.status_code == 400, exchange
     assert fake.requests == []
+
+
+def test_the_same_order_key_is_sent_to_kiwoom_only_once(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    fake = FakeKiwoom().reply("kt10000", ORDER_REPLY)
+    client = make_client(fake)
+
+    first = client.post(DOMESTIC_URL, json=domestic_order(order_key="key-dup"))
+    second = client.post(DOMESTIC_URL, json=domestic_order(order_key="key-dup"))
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["error"]["kind"] == "duplicate_order"
+    assert len(fake.calls("kt10000")) == 1
+    duplicates = [r for r in caplog.records if r.getMessage() == "order_duplicate"]
+    assert duplicates[0].fields["order_key"] == "key-dup"  # type: ignore[attr-defined]
+
+
+def test_a_rejected_order_key_is_still_not_reused(make_client):
+    fake = FakeKiwoom().reply("kt10000", kiwoom_error(20, "거부"), ORDER_REPLY)
+    client = make_client(fake)
+    assert client.post(DOMESTIC_URL, json=domestic_order(order_key="k")).status_code == 502
+    assert client.post(DOMESTIC_URL, json=domestic_order(order_key="k")).status_code == 409
+    assert len(fake.calls("kt10000")) == 1
+
+
+def test_order_keys_are_kept_per_environment(make_client):
+    fake = FakeKiwoom().reply("kt10000", ORDER_REPLY).reply("ust20000", {"ord_no": "1"})
+    client = make_client(fake)
+    assert client.post(DOMESTIC_URL, json=domestic_order(order_key="same")).status_code == 200
+    assert client.post(US_URL, json=us_order(order_key="same")).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_concurrent_requests_with_the_same_key_send_one_order():
+    fake = FakeKiwoom().reply("kt10000", ORDER_REPLY)
+    gate = threading.Event()
+
+    def slow_order(request: httpx.Request) -> None:
+        if request.headers.get("api-id") == "kt10000":
+            gate.wait(timeout=1)
+
+    fake.on_request = slow_order
+    app = create_app(
+        environ=FAKE_ENV, transport=ThreadedTransport(fake), static_dir=None, log_dir=None
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        order = domestic_order(order_key="key-race")
+        pending = [asyncio.create_task(client.post(DOMESTIC_URL, json=order)) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        gate.set()
+        responses = await asyncio.gather(*pending)
+
+    assert sorted(r.status_code for r in responses) == [200, 409, 409]
+    assert len(fake.calls("kt10000")) == 1
+
+
+def test_connection_failure_is_an_unknown_result_without_resending(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    fake = FakeKiwoom()
+
+    def broken(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    fake.respond("kt10000", broken)
+    response = make_client(fake).post(DOMESTIC_URL, json=domestic_order())
+
+    assert response.status_code == 502
+    assert response.json()["error"]["kind"] == "order_result_unknown"
+    assert len(fake.calls("kt10000")) == 1
+    unknown = [r for r in caplog.records if r.getMessage() == "order_result_unknown"]
+    assert unknown[0].fields["cause"]  # type: ignore[attr-defined]
+
+
+def test_malformed_order_responses_are_unknown_results(make_client):
+    for reply in (
+        {},  # return_code=0인데 주문번호가 없음
+        httpx.Response(200, text="<html>bad gateway</html>"),
+        httpx.Response(502, json={"message": "no return_code"}),
+    ):
+        fake = FakeKiwoom().reply("kt10000", reply)
+        response = make_client(fake).post(DOMESTIC_URL, json=domestic_order())
+        assert response.status_code == 502, reply
+        assert response.json()["error"]["kind"] == "order_result_unknown"
+        assert len(fake.calls("kt10000")) == 1

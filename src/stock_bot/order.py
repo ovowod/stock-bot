@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from stock_bot.config import EnvironmentSpec, Market
+from stock_bot.config import Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
@@ -21,6 +21,11 @@ logger = logging.getLogger("stock_bot.order")
 DOMESTIC_ORDER_PATH = "/api/dostk/ordr"
 US_ORDER_PATH = "/api/us/ordr"
 MAX_ORDER_KEY_LENGTH = 64
+# 키움까지 갔는지 알 수 없는 오류. 접수됐을 수 있으므로 거부가 아니라 확인 불가로 알린다.
+UNKNOWN_RESULT_KINDS = {"connection_error", "response_format_error"}
+UNKNOWN_RESULT_MESSAGE = (
+    "접수 여부를 확인할 수 없습니다. 키움에서 주문 내역을 확인한 뒤 다시 주문하세요."
+)
 # 키움 문서의 ord_qty·ord_uv 길이(12)를 따른다.
 MAX_NUMBER_LENGTH = 12
 _INTEGER = re.compile(r"^\d+$")
@@ -35,6 +40,9 @@ TRADE_TYPES: dict[Market, dict[str, str]] = {
 class OrderService:
     def __init__(self, kiwoom: KiwoomClient) -> None:
         self._kiwoom = kiwoom
+        # 받은 주문 키. 처리 중이거나 이미 처리한 키로 다시 오면 키움에 보내지 않는다.
+        # 서버가 다시 시작될 때까지만 기억한다.
+        self._order_keys: dict[Environment, set[str]] = {}
 
     async def place(self, spec: EnvironmentSpec, request: Any) -> dict[str, Any]:
         """request는 브라우저가 보낸 JSON 본문이다. 해석하지 못했으면 None이다."""
@@ -44,6 +52,16 @@ class OrderService:
             log(logger, logging.WARNING, "order_blocked_real", order_key=order_key)
             raise AppError("order_not_allowed", "실전투자에서는 주문할 수 없습니다.", 403)
         order = _validate(request, spec.market)
+        # 검사와 등록 사이에 await가 없으므로 같은 키로 동시에 와도 하나만 통과한다.
+        seen = self._order_keys.setdefault(spec.environment, set())
+        if order["order_key"] in seen:
+            log(logger, logging.WARNING, "order_duplicate", order_key=order["order_key"])
+            raise AppError(
+                "duplicate_order",
+                "같은 주문 키로 이미 받은 주문입니다. 키움에서 주문 내역을 확인하세요.",
+                409,
+            )
+        seen.add(order["order_key"])
         log(logger, logging.INFO, "order_requested", **order)
         trde_tp = TRADE_TYPES[spec.market][order["order_type"]]
         if spec.market is Market.DOMESTIC:
@@ -67,7 +85,23 @@ class OrderService:
             }
         try:
             data = await self._kiwoom.call_once(spec, api_id, path, body)
+            order_no = Reader(data, api_id).text("ord_no")
         except AppError as error:
+            if error.kind in UNKNOWN_RESULT_KINDS:
+                log(
+                    logger,
+                    logging.ERROR,
+                    "order_result_unknown",
+                    order_key=order["order_key"],
+                    kind=error.kind,
+                    cause=error.message,
+                )
+                raise AppError(
+                    "order_result_unknown",
+                    UNKNOWN_RESULT_MESSAGE,
+                    502,
+                    {"api_id": api_id},
+                ) from error
             log(
                 logger,
                 logging.WARNING,
@@ -78,7 +112,6 @@ class OrderService:
                 return_code=error.detail.get("return_code"),
             )
             raise
-        order_no = Reader(data, api_id).text("ord_no")
         log(logger, logging.INFO, "order_accepted", order_key=order["order_key"], order_no=order_no)
         return {
             "order_key": order["order_key"],

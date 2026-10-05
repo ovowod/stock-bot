@@ -19,7 +19,15 @@ const RANKING_ITEM = {
 const US_ITEM = { ...RANKING_ITEM, code: "SOXL", name: "디렉시온 반도체", exchange: "NYSE", price: 162.6 };
 const QUOTES: Record<string, number> = { "000660": 190_000, SOXL: 170.25 };
 
-type Reply = { status?: number; body?: unknown; delayMs?: number; headers?: Record<string, string> };
+type Reply = {
+  status?: number;
+  body?: unknown;
+  text?: string;
+  delayMs?: number;
+  headers?: Record<string, string>;
+  abort?: boolean;
+  hang?: boolean;
+};
 type OrderRequest = { environment: string; body: Record<string, unknown> };
 
 const accepted = (orderNo: string): ((request: OrderRequest) => Reply) => (request) => ({
@@ -37,10 +45,17 @@ async function mockApi(page: Page, order: (request: OrderRequest) => Reply = acc
       const request = { environment, body: route.request().postDataJSON() };
       orders.push(request);
       const reply = order(request);
+      if (reply.hang) return;
       if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
-      await route
-        .fulfill({ status: reply.status ?? 200, json: reply.body, headers: reply.headers })
-        .catch(() => {});
+      if (reply.abort) {
+        await route.abort("connectionreset");
+      } else if (reply.text !== undefined) {
+        await route.fulfill({ status: reply.status ?? 200, contentType: "text/html", body: reply.text });
+      } else {
+        await route
+          .fulfill({ status: reply.status ?? 200, json: reply.body, headers: reply.headers })
+          .catch(() => {});
+      }
     } else if (resource === "quote") {
       const code = url.searchParams.get("code") ?? "";
       await route.fulfill({ json: { code, price: QUOTES[code], fetched_at: "2026-10-05T01:00:00+00:00" } });
@@ -254,4 +269,67 @@ test("미국 실전에서도 매수 버튼 대신 안내가 보이고 주문 요
   await expect(dialog.getByText("실전투자에서는 주문할 수 없습니다.")).toBeVisible();
   await expect(dialog.getByRole("button", { name: "매수" })).toHaveCount(0);
   expect(orders).toEqual([]);
+});
+
+const unknownAlert = (page: Page) => page.getByRole("alert").filter({ hasText: "접수 여부를 확인할 수 없습니다" });
+
+for (const [title, reply] of [
+  ["서버가 접수 여부 확인 불가로 응답", {
+    status: 502,
+    body: { error: { kind: "order_result_unknown", message: "확인 불가", request_id: "req-u-1" } },
+  }],
+  ["같은 주문 키가 이미 처리됨(409)", {
+    status: 409,
+    body: { error: { kind: "duplicate_order", message: "중복", request_id: "req-u-2" } },
+  }],
+  ["브라우저 연결이 끊김", { abort: true }],
+  ["HTML 오류 페이지가 옴", { status: 502, text: "<html>Bad Gateway</html>" }],
+] as [string, Reply][]) {
+  test(`${title}: 접수 여부 확인 불가 알림을 보여주고 다시 보내지 않는다`, async ({ page }) => {
+    const orders = await mockApi(page, () => reply);
+    const dialog = await openPanel(page);
+    await dialog.getByLabel("수량 (주)").fill("4");
+    await dialog.getByRole("button", { name: "매수" }).click();
+    await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+
+    const alert = unknownAlert(page);
+    await expect(alert).toContainText("키움에서 주문 내역을 확인한 뒤 다시 주문하세요.");
+    await expect(alert).toContainText(`주문 키 ${orders[0].body.order_key}`);
+    await expect(page.getByRole("alert").filter({ hasText: "주문하지 못했습니다" })).toHaveCount(0);
+    await expect(dialog.getByLabel("수량 (주)")).toHaveValue("4");
+    await page.waitForTimeout(500);
+    expect(orders).toHaveLength(1);
+  });
+}
+
+test("30초 안에 응답이 없으면 요청을 끊고 접수 여부 확인 불가로 알린다", async ({ page }) => {
+  await page.clock.install();
+  const orders = await mockApi(page, () => ({ hang: true }));
+  const dialog = await openPanel(page);
+  await dialog.getByRole("button", { name: "매수" }).click();
+  await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+  await expect(confirmation(page).getByRole("button", { name: "주문 중…" })).toBeVisible();
+
+  await page.clock.fastForward(29_000);
+  await expect(unknownAlert(page)).toHaveCount(0);
+  await page.clock.fastForward(2_000);
+  await expect(unknownAlert(page)).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "매수" })).toBeVisible();
+  expect(orders).toHaveLength(1);
+});
+
+test("전송 중에는 닫기 버튼, Esc, 바깥 영역으로 패널을 닫을 수 없다", async ({ page }) => {
+  await mockApi(page, (request) => ({ ...accepted("00040")(request), delayMs: 1500 }));
+  const dialog = await openPanel(page);
+  await dialog.getByRole("button", { name: "매수" }).click();
+  await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+
+  await expect(dialog.getByRole("button", { name: "닫기", exact: true })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "주문 패널 닫기" }).click({ position: { x: 5, y: 5 }, force: true });
+  await expect(dialog).toBeVisible();
+  await expect(confirmation(page).getByRole("button", { name: "취소" })).toBeDisabled();
+
+  await expect(page.getByRole("status").filter({ hasText: "주문번호 00040" })).toBeVisible();
+  await expect(dialog).toHaveCount(0);
 });

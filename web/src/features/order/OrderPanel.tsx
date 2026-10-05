@@ -1,7 +1,7 @@
 import { CircleAlert, Info, ShieldAlert, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ApiError, fetchQuote, placeOrder, type EnvironmentValue } from "../../api";
+import { ApiError, fetchQuote, ORDER_RESULT_UNKNOWN, placeOrder, type EnvironmentValue } from "../../api";
 import { findEnvironment, type EnvironmentOption } from "../../environments";
 import { formatForeign, formatKrw } from "../../format";
 import { useToast } from "../toast/Toasts";
@@ -53,6 +53,15 @@ function OrderPanel({
 }) {
   const env = findEnvironment(environment);
   const closeRef = useRef<HTMLButtonElement>(null);
+  // 주문을 보내는 동안에는 결과를 확인하기 전에 닫지 못하게 한다.
+  const [locked, setLocked] = useState(false);
+  const lockedRef = useRef(false);
+  useEffect(() => {
+    lockedRef.current = locked;
+  }, [locked]);
+  const requestClose = useCallback(() => {
+    if (!lockedRef.current) onClose();
+  }, [onClose]);
   const unavailable = buyUnavailableReason(env.market, env.isReal, target.exchange);
   const meta = [target.code, target.exchange ?? target.category].filter(Boolean).join(" · ");
 
@@ -62,18 +71,18 @@ function OrderPanel({
     const root = document.getElementById("root");
     root?.setAttribute("inert", "");
     closeRef.current?.focus();
-    const close = (event: KeyboardEvent) => event.key === "Escape" && onClose();
+    const close = (event: KeyboardEvent) => event.key === "Escape" && requestClose();
     window.addEventListener("keydown", close);
     return () => {
       window.removeEventListener("keydown", close);
       root?.removeAttribute("inert");
       opener?.focus();
     };
-  }, [onClose]);
+  }, [requestClose]);
 
   return createPortal(
     <div className="fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label={`${target.name} 주문`}>
-      <button type="button" className="absolute inset-0 bg-ink/40" aria-label="주문 패널 닫기" onClick={onClose} />
+      <button type="button" className="absolute inset-0 bg-ink/40" aria-label="주문 패널 닫기" onClick={requestClose} />
       <div className="absolute inset-x-0 bottom-0 flex max-h-[90dvh] flex-col rounded-t-3xl bg-surface shadow-2xl md:inset-y-0 md:left-auto md:max-h-none md:w-[420px] md:rounded-none md:rounded-l-3xl">
         <div className="flex items-start gap-3 px-5 pt-5 pb-3">
           <div className="min-w-0 flex-1">
@@ -92,9 +101,10 @@ function OrderPanel({
           <button
             ref={closeRef}
             type="button"
-            className="-mr-1.5 rounded-xl p-2 text-sub hover:bg-canvas"
+            className="-mr-1.5 rounded-xl p-2 text-sub hover:bg-canvas disabled:opacity-40"
             aria-label="닫기"
-            onClick={onClose}
+            disabled={locked}
+            onClick={requestClose}
           >
             <X className="size-5" />
           </button>
@@ -110,7 +120,7 @@ function OrderPanel({
               {unavailable}
             </Callout>
           ) : (
-            <BuyForm env={env} target={target} onAccepted={onClose} />
+            <BuyForm env={env} target={target} onAccepted={onClose} onSendingChange={setLocked} />
           )}
         </div>
       </div>
@@ -157,10 +167,12 @@ function BuyForm({
   env,
   target,
   onAccepted,
+  onSendingChange,
 }: {
   env: EnvironmentOption;
   target: OrderTarget;
   onAccepted: () => void;
+  onSendingChange: (sending: boolean) => void;
 }) {
   const market = env.market;
   const showToast = useToast();
@@ -189,6 +201,7 @@ function BuyForm({
   const submit = async () => {
     if (step !== "confirm" || quantity.text === null) return;
     setStep("sending");
+    onSendingChange(true);
     const key = orderKey.current;
     try {
       const { result, requestId } = await placeOrder(env.value, {
@@ -205,15 +218,22 @@ function BuyForm({
         body: `${target.name} · 주문번호 ${result.order_no}`,
         meta: [`주문 키 ${key}`, ...(requestId ? [`요청 ID ${requestId}`] : [])],
       });
+      onSendingChange(false);
       onAccepted();
     } catch (error) {
       const apiError = error instanceof ApiError ? error : new ApiError("unknown", "알 수 없는 오류입니다.", null);
-      showToast({
-        tone: "error",
-        title: "주문하지 못했습니다",
-        body: apiError.message,
-        meta: [`주문 키 ${key}`, ...(apiError.requestId ? [`요청 ID ${apiError.requestId}`] : [])],
-      });
+      const meta = [`주문 키 ${key}`, ...(apiError.requestId ? [`요청 ID ${apiError.requestId}`] : [])];
+      showToast(
+        apiError.kind === ORDER_RESULT_UNKNOWN
+          ? {
+              tone: "unknown",
+              title: "접수 여부를 확인할 수 없습니다",
+              body: "키움에서 주문 내역을 확인한 뒤 다시 주문하세요.",
+              meta,
+            }
+          : { tone: "error", title: "주문하지 못했습니다", body: apiError.message, meta },
+      );
+      onSendingChange(false);
       setStep("input");
     }
   };
