@@ -99,7 +99,7 @@ export class ApiError extends Error {
   }
 }
 
-export type RankingKind = "trading_value";
+export type RankingKind = "trading_value" | "gainers" | "volume";
 export type RankingDirection = "up" | "down" | "flat" | "unknown";
 
 export interface RankingItem {
@@ -112,6 +112,7 @@ export interface RankingItem {
   change_rate: number | null;
   trading_value?: number | null;
   previous_rank?: number | null;
+  volume?: number | null;
 }
 
 export interface Ranking {

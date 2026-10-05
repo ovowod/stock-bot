@@ -58,6 +58,10 @@ def _trading_value_extra(row: Reader, market: Market) -> dict[str, Any]:
     }
 
 
+def _volume_extra(key: str) -> Callable[[Reader, Market], dict[str, Any]]:
+    return lambda row, market: {"volume": row.integer(key)}
+
+
 TRS: dict[tuple[str, Market], _Tr] = {
     ("trading_value", Market.DOMESTIC): _Tr(
         "ka10032",
@@ -82,6 +86,77 @@ TRS: dict[tuple[str, Market], _Tr] = {
             "trde_prica_cnd": "0",
         },
         _trading_value_extra,
+    ),
+    ("gainers", Market.DOMESTIC): _Tr(
+        "ka10027",
+        DOMESTIC_RANKING_PATH,
+        "pred_pre_flu_rt_upper",
+        None,
+        lambda exchange: {
+            "mrkt_tp": exchange,
+            "sort_tp": "1",  # 상승률
+            "trde_qty_cnd": "0000",
+            "stk_cnd": "0",
+            "crd_cnd": "0",
+            "updown_incls": "1",
+            "pric_cnd": "0",
+            "trde_prica_cnd": "0",
+            "stex_tp": "3",
+        },
+        _volume_extra("now_trde_qty"),
+    ),
+    ("gainers", Market.US): _Tr(
+        "usa20910",
+        US_RANKING_PATH,
+        "result_list",
+        "rank",
+        lambda exchange: {
+            "stex_tp": exchange,
+            "inds_cd": "000",
+            "inds_cls_tp": "0",
+            "sort_tp": "1",  # 전일대비 상승률
+            "stk_tp": "0",
+            "stk_cnd": "0",
+            "pric_cnd": "0",
+            "trde_prica_cnd": "0",
+            "trde_qty_tp": "0",
+        },
+        _volume_extra("trde_qty"),
+    ),
+    ("volume", Market.DOMESTIC): _Tr(
+        "ka10030",
+        DOMESTIC_RANKING_PATH,
+        "tdy_trde_qty_upper",
+        None,
+        lambda exchange: {
+            "mrkt_tp": exchange,
+            "sort_tp": "1",  # 거래량
+            "mang_stk_incls": "0",
+            "crd_tp": "0",
+            "trde_qty_tp": "0",
+            "pric_tp": "0",
+            "trde_prica_tp": "0",
+            "mrkt_open_tp": "0",
+            "stex_tp": "3",
+        },
+        _volume_extra("trde_qty"),
+    ),
+    ("volume", Market.US): _Tr(
+        "usa20530",
+        US_RANKING_PATH,
+        "result_list",
+        "rank",
+        lambda exchange: {
+            "stex_tp": exchange,
+            "inds_cd": "000",
+            "stk_tp": "0",
+            "trde_qty_tp": "0",
+            "qry_tp": "0",  # 거래량상위
+            "stk_cnd": "0",
+            "pric_cnd": "0",
+            "trde_prica_cnd": "0",
+        },
+        _volume_extra("acc_trde_qty"),
     ),
 }
 KINDS = {kind for kind, _ in TRS}

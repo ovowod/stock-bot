@@ -4,6 +4,7 @@ import type { EnvironmentValue, RankingDirection, RankingItem, RankingKind } fro
 import { findEnvironment } from "../../environments";
 import {
   EMPTY,
+  formatCompactCount,
   formatCompactKrw,
   formatCompactUsd,
   formatForeign,
@@ -51,6 +52,16 @@ const CARDS: Record<RankingKind, CardSpec> = {
         )}
       </>
     ),
+  },
+  gainers: {
+    title: "상승률 상위",
+    metricLabel: "등락률",
+    metric: (item) => <RateChange direction={item.direction} rate={item.change_rate} className="text-[15px] font-bold" />,
+  },
+  volume: {
+    title: "거래량 상위",
+    metricLabel: "거래량",
+    metric: (item) => <p className="text-sm font-semibold">{formatCompactCount(item.volume ?? null)}</p>,
   },
 };
 
@@ -217,9 +228,9 @@ function RankingRow({
       </div>
       <div className="shrink-0 text-right">
         <p className="text-sm font-semibold">{price}</p>
-        <RateChange direction={item.direction} rate={item.change_rate} className="text-xs" />
+        <RateChange direction={item.direction} rate={item.change_rate} className="text-xs font-medium" />
       </div>
-      <div className="w-20 shrink-0 text-right">{metric(item, market)}</div>
+      <div className="w-24 shrink-0 text-right">{metric(item, market)}</div>
     </li>
   );
 }
@@ -244,7 +255,7 @@ export function RateChange({
   if (rate === null) return <p className={`text-muted ${className}`}>{EMPTY}</p>;
   const tone = TONE[direction];
   return (
-    <p className={`whitespace-nowrap font-medium ${tone.text} ${className}`} data-direction={direction}>
+    <p className={`whitespace-nowrap ${tone.text} ${className}`} data-direction={direction}>
       {tone.mark && (
         <span className="mr-0.5 text-[0.75em]" aria-hidden>
           {tone.mark}

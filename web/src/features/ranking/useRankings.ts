@@ -7,7 +7,7 @@ export type CardState =
   | { status: "ready"; data: Ranking; refreshing: boolean; refreshError: ApiError | null };
 
 /** 화면에 위에서부터 놓이는 순서이자 조회 순서. */
-export const KINDS: RankingKind[] = ["trading_value"];
+export const KINDS: RankingKind[] = ["trading_value", "gainers", "volume"];
 
 type Cards = Record<RankingKind, CardState>;
 

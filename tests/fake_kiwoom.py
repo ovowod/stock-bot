@@ -251,6 +251,78 @@ USA20540_ROW = {
 }
 
 
+KA10027_ROW = {
+    "stk_cls": "14",
+    "stk_cd": "069920_AL",
+    "stk_nm": "엑시온그룹",
+    "cur_prc": "+1349",
+    "pred_pre_sig": "1",
+    "pred_pre": "+311",
+    "flu_rt": "+29.96",
+    "sel_req": "0",
+    "buy_req": "95187",
+    "now_trde_qty": "1306705",
+    "cntr_str": "118.83",
+    "cnt": "1",
+}
+
+KA10030_ROW = {
+    "stk_cd": "114800_AL",
+    "stk_nm": "KODEX 인버스",
+    "cur_prc": "-975",
+    "pred_pre_sig": "5",
+    "pred_pre": "-6",
+    "flu_rt": "-0.61",
+    "trde_qty": "505027412",
+    "pred_rt": "+100.00",
+    "trde_tern_rt": "+68.45",
+    "trde_amt": "495085",
+    "opmr_trde_qty": "",
+    "opmr_pred_rt": "",
+    "opmr_trde_rt": "",
+    "opmr_trde_amt": "",
+    "af_mkrt_trde_qty": "",
+    "af_mkrt_pred_rt": "",
+    "af_mkrt_trde_rt": "",
+    "af_mkrt_trde_amt": "",
+    "bf_mkrt_trde_qty": "",
+    "bf_mkrt_pred_rt": "",
+    "bf_mkrt_trde_rt": "",
+    "bf_mkrt_trde_amt": "",
+}
+
+USA20910_ROW = {
+    "rank": "1",
+    "stex_tp": "ND",
+    "stk_cd": "SAIQ",
+    "stk_nm": "와이즈샛.스페이스",
+    "stk_enm": "WISESAT.SPACE HOLDINGS CORPORATION",
+    "cur_prc": "+12.9100",
+    "pred_pre_sig": "2",
+    "pred_pre": "+11.0600",
+    "flu_rt": "+597.84",
+    "sel_req": "1484",
+    "buy_req": "647",
+    "trde_qty": "5005644",
+    "cnt": "1",
+}
+
+USA20530_ROW = {
+    "rank": "1",
+    "stex_tp": "NA",
+    "stk_cd": "SDEV",
+    "stk_nm": "스테이블코인 개발",
+    "stk_enm": "STABLECOIN DEVELOPMENT CORPORATION",
+    "cur_prc": "+9.1864",
+    "pred_pre_sig": "2",
+    "pred_pre": "+1.7064",
+    "flu_rt": "+22.81",
+    "acc_trde_qty": "2603716",
+    "pred_rt": "-98.30",
+    "trde_prica": "23701",
+}
+
+
 def ranking_fake(api_id: str, *pages: Reply) -> FakeKiwoom:
     return FakeKiwoom().reply(api_id, *pages)
 

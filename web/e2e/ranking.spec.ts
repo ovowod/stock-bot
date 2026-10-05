@@ -36,7 +36,13 @@ const ranking = (environment: string, kind: string, items: unknown[], exchange =
 });
 
 type Reply = { status?: number; body: unknown; delayMs?: number };
-type Seen = { environment: string; kind: string; query: URLSearchParams };
+type Seen = {
+  environment: string;
+  kind: string;
+  query: URLSearchParams;
+  startedAt: number;
+  endedAt?: number;
+};
 
 /** 순위 요청을 가로챈다. handler가 응답을 정하고, 요청 순서는 seen에 남는다. */
 async function mockRankings(page: Page, handler: (request: Seen) => Reply) {
@@ -44,11 +50,12 @@ async function mockRankings(page: Page, handler: (request: Seen) => Reply) {
   await page.route("**/api/environments/*/rankings/*", async (route: Route) => {
     const url = new URL(route.request().url());
     const [, , , environment, , kind] = url.pathname.split("/");
-    const request = { environment, kind, query: url.searchParams };
+    const request: Seen = { environment, kind, query: url.searchParams, startedAt: Date.now() };
     seen.push(request);
     const reply = handler(request);
     if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
     await route.fulfill({ status: reply.status ?? 200, json: reply.body }).catch(() => {});
+    request.endedAt = Date.now();
   });
   // 처음 화면(계좌 확인)의 요청은 순위 테스트와 관계없으므로 오류로 둔다.
   await page.route("**/api/environments/*/account", (route) =>
@@ -59,6 +66,11 @@ async function mockRankings(page: Page, handler: (request: Seen) => Reply) {
 
 async function openRanking(page: Page) {
   await page.goto("/");
+  await selectRankingMenu(page);
+}
+
+/** 모바일에서는 메뉴 서랍을 연 뒤 순위를 고른다. */
+async function selectRankingMenu(page: Page) {
   const menu = page.getByRole("button", { name: "메뉴 열기" });
   if (await menu.isVisible()) await menu.click();
   await page.getByRole("button", { name: "순위" }).filter({ visible: true }).click();
@@ -200,15 +212,90 @@ test("투자 환경을 바꾸면 이전 시장의 순위가 바로 사라지고 
   await expect(card(page, "거래대금 상위")).not.toContainText("SK하이닉스");
 });
 
+test("상승률은 등락률을 크게, 거래량은 거래량을 짧게 보여준다", async ({ page }) => {
+  const item = { ...DOMESTIC_ITEM, change_rate: 29.96, volume: 505_027_412 };
+  await mockRankings(page, ({ environment, kind }) => ({ body: ranking(environment, kind, [item]) }));
+  await openRanking(page);
+
+  await expect(card(page, "상승률 상위").locator("[data-direction=up]").last()).toHaveText("▲+29.96%");
+  await expect(card(page, "거래량 상위")).toContainText("5.05억주");
+});
+
+test("카드는 위에서부터 한 번에 하나씩 조회한다", async ({ page }) => {
+  const seen = await mockRankings(page, ({ environment, kind }) => ({
+    body: ranking(environment, kind, [DOMESTIC_ITEM]),
+    delayMs: 300,
+  }));
+  await openRanking(page);
+  await expect(card(page, "거래량 상위")).toContainText("SK하이닉스");
+
+  expect(seen.map((r) => r.kind)).toEqual(["trading_value", "gainers", "volume"]);
+  for (let i = 1; i < seen.length; i++) {
+    expect(seen[i].startedAt).toBeGreaterThanOrEqual(seen[i - 1].endedAt!);
+  }
+});
+
+test("한 카드가 실패해도 나머지는 보이고, 다시 시도는 그 카드만 요청한다", async ({ page }) => {
+  let failing = true;
+  const seen = await mockRankings(page, ({ environment, kind }) =>
+    kind === "gainers" && failing
+      ? {
+          status: 502,
+          body: { error: { kind: "kiwoom_error", message: "키움 오류 [1511] 테스트", request_id: "g1" } },
+        }
+      : { body: ranking(environment, kind, [DOMESTIC_ITEM]) },
+  );
+  await openRanking(page);
+
+  await expect(card(page, "상승률 상위").getByRole("alert")).toContainText("키움 API 오류");
+  await expect(card(page, "거래대금 상위")).toContainText("SK하이닉스");
+  await expect(card(page, "거래량 상위")).toContainText("SK하이닉스");
+
+  failing = false;
+  const before = seen.length;
+  await card(page, "상승률 상위").getByRole("button", { name: "다시 시도" }).click();
+  await expect(card(page, "상승률 상위")).toContainText("SK하이닉스");
+  expect(seen.slice(before).map((r) => r.kind)).toEqual(["gainers"]);
+});
+
+test("거래소를 바꾸면 세 카드를 새 조건으로 다시 조회한다", async ({ page }) => {
+  const seen = await mockRankings(page, ({ environment, kind }) => ({
+    body: ranking(environment, kind, [DOMESTIC_ITEM]),
+  }));
+  await openRanking(page);
+  await expect(card(page, "거래량 상위")).toContainText("SK하이닉스");
+
+  const before = seen.length;
+  await page.getByRole("radio", { name: "코스닥" }).click();
+  await expect(card(page, "거래량 상위")).toContainText("SK하이닉스");
+  const after = seen.slice(before);
+  expect(after.map((r) => r.kind)).toEqual(["trading_value", "gainers", "volume"]);
+  expect(after.every((r) => r.query.get("exchange") === "kosdaq")).toBe(true);
+});
+
+test("조회 중인 카드가 있으면 새로고침 버튼을 비활성화한다", async ({ page }) => {
+  await mockRankings(page, ({ environment, kind }) => ({
+    body: ranking(environment, kind, [DOMESTIC_ITEM]),
+    delayMs: kind === "volume" ? 1500 : 0,
+  }));
+  await openRanking(page);
+
+  await expect(card(page, "거래대금 상위")).toContainText("SK하이닉스");
+  await expect(page.getByRole("button", { name: "새로고침" })).toBeDisabled();
+  await expect(card(page, "거래량 상위")).toContainText("SK하이닉스");
+  await expect(page.getByRole("button", { name: "새로고침" })).toBeEnabled();
+});
+
 // 실제 서버 확인용. 백엔드를 띄운 상태에서 `pnpm test:live`로만 실행한다. 모의 환경만 호출한다.
 for (const label of ["국내 모의", "미국 모의"] as const) {
   test(`@live ${label} 순위 실제 모의 서버 조회`, async ({ page }, info) => {
     await page.goto("/");
     await page.getByRole("radio", { name: label }).click();
-    await page.getByRole("button", { name: "순위" }).filter({ visible: true }).click();
-    const trading = card(page, "거래대금 상위");
-    await expect(trading.getByRole("listitem").first()).toBeVisible({ timeout: 15_000 });
-    await expect(trading.getByRole("alert")).toHaveCount(0);
+    await selectRankingMenu(page);
+    for (const title of ["거래대금 상위", "상승률 상위", "거래량 상위"]) {
+      await expect(card(page, title).getByRole("listitem").first()).toBeVisible({ timeout: 15_000 });
+      await expect(card(page, title).getByRole("alert")).toHaveCount(0);
+    }
     await page.screenshot({ path: `screenshots/live-${info.project.name}-ranking-${label}.png`, fullPage: true });
   });
 }

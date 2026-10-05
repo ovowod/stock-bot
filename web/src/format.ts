@@ -49,6 +49,14 @@ export function formatCompactUsd(value: number | null): string {
   return `${minus(value)}$${body}`;
 }
 
+/** 큰 수량을 짧게: 5.05억주, 1,307만주 */
+export function formatCompactCount(value: number | null, unit = "주"): string {
+  if (value === null) return EMPTY;
+  if (value >= 1e8) return `${(value / 1e8).toFixed(2)}억${unit}`;
+  if (value >= 1e4) return `${count.format(Math.round(value / 1e4))}만${unit}`;
+  return `${count.format(value)}${unit}`;
+}
+
 export function formatRate(value: number | null): string {
   return value === null ? EMPTY : `${minus(value)}${Math.abs(value).toFixed(2)}%`;
 }
