@@ -224,3 +224,12 @@ def test_invalid_token_inside_message_is_retried(make_client):
 
     assert response.status_code == 200
     assert len(fake.token_requests()) == 2
+
+
+def test_non_numeric_value_is_shown_in_the_format_error(make_client):
+    """숫자가 아닌 값을 받으면 원인을 찾을 수 있게 받은 값을 오류에 담는다."""
+    reply = page_response({**KT00018_REPLY, "tot_evlt_amt": "--1,234"})
+    response = make_client(domestic_fake().reply("kt00018", reply)).get(URL)
+
+    assert response.status_code == 502
+    assert "tot_evlt_amt 값이 숫자가 아닙니다: '--1,234'" in response.json()["error"]["message"]

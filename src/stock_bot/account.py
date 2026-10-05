@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from stock_bot.config import EnvironmentSpec, Market
@@ -21,6 +22,22 @@ US_EXCHANGE_NAMES = {"뉴욕": "NYSE", "나스닥": "NASDAQ", "아멕스": "AMEX
 
 DOMESTIC_ACCOUNT_PATH = "/api/dostk/acnt"
 US_ACCOUNT_PATH = "/api/us/acnt"
+
+
+class _HoldingReader(Reader):
+    """보유종목 숫자 칸 하나가 깨져도 계좌 화면 전체를 실패시키지 않고 그 칸만 비운다.
+
+    모의 서버가 장중에 pl_amt를 '. 950'처럼 깨진 값으로 보낸 적이 있다.
+    뜻을 알 수 없는 값은 추측하지 않는다. 필드가 아예 없으면 지금처럼 응답 형식 오류다.
+    """
+
+    def number(self, key: str) -> Decimal | None:
+        raw = self.text(key)
+        try:
+            return super().number(key)
+        except AppError:
+            log(logger, logging.WARNING, "holding_value_unreadable", key=key, raw=raw[:40])
+            return None
 
 
 StockListings = Callable[[EnvironmentSpec], Awaitable[dict[str, dict[str, Any]]]]
@@ -180,7 +197,7 @@ class AccountService:
                     "evaluation_amount_krw": h.integer("evlt_amt_krw"),
                     "profit_loss_krw": h.integer("pl_amt_krw"),
                 }
-                for h in b.rows("result_list")
+                for h in b.rows("result_list", _HoldingReader)
             ],
         }
 
