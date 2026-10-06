@@ -186,3 +186,44 @@ def test_password_and_session_id_are_not_logged(anonymous, caplog):
     events = [r.getMessage() for r in caplog.records]
     assert "login_failed" in events
     assert "login_succeeded" in events
+
+
+LOGOUT = "/api/auth/logout"
+
+
+def test_logout_ends_the_session_and_clears_the_cookie(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    client = make_client(domestic_fake())
+    old_cookie = client.cookies["stock_bot_session"]
+
+    response = client.post(LOGOUT)
+
+    assert response.status_code == 204
+    assert 'stock_bot_session=""' in response.headers["set-cookie"]
+    stale = TestClient(client.app)
+    stale.cookies.set("stock_bot_session", old_cookie)
+    assert stale.get(ACCOUNT).status_code == 401
+    assert "logout" in [r.getMessage() for r in caplog.records]
+
+
+def test_logout_without_cookie_keeps_the_current_session(make_client):
+    owner = make_client(domestic_fake())
+    stranger = TestClient(owner.app)
+
+    assert stranger.post(LOGOUT).status_code == 204
+
+    assert owner.get(ACCOUNT).status_code == 200
+
+
+def test_logout_with_an_old_cookie_keeps_the_current_session(make_client):
+    old = make_client(domestic_fake())
+    old_cookie = old.cookies["stock_bot_session"]
+    current = TestClient(old.app)
+    current.post(LOGIN, json={"password": PASSWORD})
+    stale = TestClient(old.app)
+    stale.cookies.set("stock_bot_session", old_cookie)
+
+    response = stale.post(LOGOUT)
+
+    assert response.status_code == 204
+    assert current.get(ACCOUNT).status_code == 200

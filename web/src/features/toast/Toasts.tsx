@@ -19,10 +19,16 @@ interface Toast extends ToastInput {
 const SUCCESS_DURATION_MS = 5000;
 
 const ShowToast = createContext<(toast: ToastInput) => void>(() => {});
+const ClearToasts = createContext<() => void>(() => {});
 
-/** 어느 화면에서든 화면 알림을 띄운다. */
+/** 어느 화면에서든 토스트를 띄운다. */
 export function useToast() {
   return useContext(ShowToast);
+}
+
+/** 떠 있는 토스트를 모두 지운다. 지우기 전에 받아 둔 useToast 함수로는 더 띄우지 못한다. */
+export function useClearToasts() {
+  return useContext(ClearToasts);
 }
 
 /**
@@ -32,16 +38,29 @@ export function useToast() {
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
+  // 지울 때마다 세대를 올린다. 이전 세대의 show는 무시되어, 로그인 세션이 끝난 뒤 늦게 온
+  // 주문 응답이 로그인 화면 위에 토스트를 띄우지 않는다.
+  const [generation, setGeneration] = useState(0);
+  const currentGeneration = useRef(0);
 
   const dismiss = useCallback((id: number) => setToasts((list) => list.filter((toast) => toast.id !== id)), []);
-  const show = useCallback((toast: ToastInput) => {
-    const id = nextId.current++;
-    setToasts((list) => [{ ...toast, id }, ...list]);
+  const show = useCallback(
+    (toast: ToastInput) => {
+      if (generation !== currentGeneration.current) return;
+      const id = nextId.current++;
+      setToasts((list) => [{ ...toast, id }, ...list]);
+    },
+    [generation],
+  );
+  const clear = useCallback(() => {
+    currentGeneration.current += 1;
+    setGeneration(currentGeneration.current);
+    setToasts([]);
   }, []);
 
   return (
     <ShowToast.Provider value={show}>
-      {children}
+      <ClearToasts.Provider value={clear}>{children}</ClearToasts.Provider>
       {createPortal(
         <div className="pointer-events-none fixed inset-x-0 top-0 z-50 flex flex-col items-center gap-2 p-4 md:items-end md:p-6">
           {toasts.map((toast) => (

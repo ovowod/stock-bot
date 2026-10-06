@@ -31,7 +31,7 @@ logger = logging.getLogger("stock_bot.api")
 
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
 # 로그인하지 않아도 부를 수 있는 API. 그 밖의 /api는 로그인 세션이 있어야 한다.
-PUBLIC_API_PATHS = {"/api/auth/login", "/api/auth/session"}
+PUBLIC_API_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/auth/session"}
 
 
 def create_app(
@@ -146,15 +146,14 @@ def create_app(
             raise AppError("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
         response = Response(status_code=204)
         # Max-Age·Expires를 두지 않아 브라우저를 닫으면 사라진다.
-        # HTTP에서 Secure를 붙이면 쿠키가 저장되지 않으므로 HTTPS 요청일 때만 붙인다.
-        response.set_cookie(
-            SESSION_COOKIE,
-            session_id,
-            path="/",
-            httponly=True,
-            samesite="strict",
-            secure=request.url.scheme == "https",
-        )
+        response.set_cookie(SESSION_COOKIE, session_id, **_cookie_options(request))
+        return response
+
+    @app.post("/api/auth/logout")
+    async def logout(request: Request) -> Response:
+        auth.logout(request.cookies.get(SESSION_COOKIE))
+        response = Response(status_code=204)
+        response.delete_cookie(SESSION_COOKIE, **_cookie_options(request))
         return response
 
     @app.get("/api/auth/session")
@@ -224,6 +223,16 @@ def create_app(
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")
 
     return app
+
+
+def _cookie_options(request: Request) -> dict[str, Any]:
+    """HTTP에서 Secure를 붙이면 쿠키가 저장되지 않으므로 HTTPS 요청일 때만 붙인다."""
+    return {
+        "path": "/",
+        "httponly": True,
+        "samesite": "strict",
+        "secure": request.url.scheme == "https",
+    }
 
 
 def _same_origin(request: Request) -> bool:

@@ -1,34 +1,78 @@
 import { LockKeyhole, Sparkles } from "lucide-react";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { ApiError, checkSession, login, onUnauthorized } from "../../api";
+import { createContext, useCallback, useContext, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { ApiError, checkSession, login, logout, onUnauthorized } from "../../api";
+import { useClearToasts } from "../toast/Toasts";
 
 type AuthState = { status: "checking" } | { status: "anonymous"; notice: string | null } | { status: "authenticated" };
 
 const EXPIRED = "로그인이 만료되었습니다. 다시 로그인하세요.";
+const ORDER_EXPIRED = "로그인이 만료되어 주문하지 않았습니다. 다시 로그인하세요.";
 
-/** 로그인 세션이 있을 때만 children을 그린다. 없으면 비밀번호 입력 화면을 보여준다. */
+const Logout = createContext<() => void>(() => {});
+
+/** 이 브라우저의 로그인 세션을 끝내고 로그인 화면으로 간다. */
+export function useLogout() {
+  return useContext(Logout);
+}
+
+/** 페이지가 새로고침으로 열렸는지. 그 밖(새 탭, 주소 입력, 링크, 뒤로가기)은 새 접속으로 본다. */
+function openedByReload(): boolean {
+  const [entry] = performance.getEntriesByType("navigation") as PerformanceNavigationTiming[];
+  return entry?.type === "reload";
+}
+
+/**
+ * 로그인 세션이 있을 때만 children을 그린다. 없으면 비밀번호 입력 화면을 보여준다.
+ * 새로고침이 아닌 방법으로 열리면 로그인 세션을 끝내고 비밀번호를 다시 묻는다.
+ */
 export function AuthGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({ status: "checking" });
+  const clearToasts = useClearToasts();
+
+  // 서버 로그아웃 응답이 쿠키를 지우므로, 그 응답을 받은 뒤에 로그인 화면을 보여준다.
+  // 먼저 보여주면 그사이 새로 받은 로그인 쿠키를 늦게 온 로그아웃 응답이 지울 수 있다.
+  const endSession = useCallback(
+    async (notice: string | null, callServer: boolean) => {
+      clearToasts();
+      setState({ status: "checking" });
+      if (callServer) await logout();
+      setState({ status: "anonymous", notice });
+    },
+    [clearToasts],
+  );
 
   useEffect(() => {
     let active = true;
-    checkSession().then(
-      (ok) => active && setState(ok ? { status: "authenticated" } : { status: "anonymous", notice: null }),
-      (error) =>
-        active && setState({ status: "anonymous", notice: error instanceof ApiError ? error.message : null }),
-    );
-    const stop = onUnauthorized(() => setState({ status: "anonymous", notice: EXPIRED }));
+    if (openedByReload()) {
+      checkSession().then(
+        (ok) => active && setState(ok ? { status: "authenticated" } : { status: "anonymous", notice: null }),
+        (error) =>
+          active && setState({ status: "anonymous", notice: error instanceof ApiError ? error.message : null }),
+      );
+    } else {
+      void endSession(null, true);
+    }
+    // 서버가 이미 세션이 없다고 했으므로 로그아웃 요청은 보내지 않는다.
+    const stop = onUnauthorized((source) => void endSession(source === "order" ? ORDER_EXPIRED : EXPIRED, false));
+    // 브라우저가 저장해 둔 페이지를 뒤로가기로 그대로 보여준 경우도 새 접속이다.
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) void endSession(null, true);
+    };
+    window.addEventListener("pageshow", onPageShow);
     return () => {
       active = false;
       stop();
+      window.removeEventListener("pageshow", onPageShow);
     };
-  }, []);
+  }, [endSession]);
+
+  const signOut = useCallback(() => void endSession(null, true), [endSession]);
 
   if (state.status === "checking") return null;
   if (state.status === "anonymous") {
     return <LoginPage notice={state.notice} onLoggedIn={() => setState({ status: "authenticated" })} />;
   }
-  return children;
+  return <Logout.Provider value={signOut}>{children}</Logout.Provider>;
 }
 
 function LoginPage({ notice, onLoggedIn }: { notice: string | null; onLoggedIn: () => void }) {

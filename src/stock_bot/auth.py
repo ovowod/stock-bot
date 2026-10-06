@@ -64,6 +64,13 @@ class AuthService:
         log(logger, logging.INFO, "login_succeeded", **client.log_fields())
         return session_id
 
+    def logout(self, session_id: str | None) -> None:
+        """요청한 쪽의 세션일 때만 끝낸다. 쿠키가 없거나 예전 쿠키면 현재 세션은 그대로 둔다."""
+        if self._session is None or not self.is_valid(session_id):
+            return
+        log(logger, logging.INFO, "logout", ip=self._session.client.ip)
+        self._session = None
+
     def is_valid(self, session_id: str | None) -> bool:
         if session_id is None or self._session is None:
             return False

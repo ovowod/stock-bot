@@ -101,3 +101,101 @@ test("로그인 후 요청이 401이면 로그인 화면으로 돌아가고 만�
   await expect(passwordInput(page)).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("로그인이 만료되었습니다");
 });
+
+async function clickLogout(page: Page) {
+  const menu = page.getByRole("button", { name: "메뉴 열기" });
+  if (await menu.isVisible()) await menu.click();
+  await page.getByRole("button", { name: "로그아웃" }).filter({ visible: true }).click();
+}
+
+test("로그인 후 새로고침하면 로그아웃하지 않고 대시보드를 유지한다", async ({ page }) => {
+  await mockAccount(page);
+  const { logoutRequests } = await openDashboard(page);
+  const before = logoutRequests();
+
+  await page.reload();
+
+  await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
+  expect(logoutRequests()).toBe(before);
+});
+
+test("새로고침이 아니라 다시 열면 로그인 세션을 끝내고 비밀번호를 다시 묻는다", async ({ page }) => {
+  await mockAccount(page);
+  const { logoutRequests } = await openDashboard(page);
+  const before = logoutRequests();
+
+  await page.goto("/");
+
+  await expect(passwordInput(page)).toBeVisible();
+  await expect.poll(logoutRequests).toBe(before + 1);
+  await expect(page.getByRole("heading", { name: "계좌 확인" })).toHaveCount(0);
+});
+
+test("뒤로가기로 저장된 페이지가 다시 보이면 로그인 세션을 끝낸다", async ({ page }) => {
+  await mockAccount(page);
+  const { logoutRequests } = await openDashboard(page);
+  const before = logoutRequests();
+
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+
+  await expect(passwordInput(page)).toBeVisible();
+  await expect.poll(logoutRequests).toBe(before + 1);
+});
+
+test("로그아웃 버튼을 누르면 로그인 화면으로 가고 투자 환경 선택은 남는다", async ({ page }) => {
+  await mockAccount(page, () => ({ status: 200, json: { ...ACCOUNT, environment: "us_paper" } }));
+  const { logoutRequests } = await openDashboard(page);
+  await page.getByRole("radio", { name: "미국 모의" }).filter({ visible: true }).click();
+  const before = logoutRequests();
+
+  await clickLogout(page);
+
+  await expect(passwordInput(page)).toBeVisible();
+  await expect.poll(logoutRequests).toBe(before + 1);
+  expect(await page.evaluate(() => localStorage.getItem("stock-bot:environment"))).toBe("us_paper");
+});
+
+test("같은 브라우저에서 새 탭을 열면 로그인 세션이 끝나고, 다시 로그인하면 탭들이 함께 쓴다", async ({ context }) => {
+  // 서버처럼 브라우저(컨텍스트) 하나에 로그인 세션 하나를 둔다.
+  let loggedIn = false;
+  const logouts: string[] = [];
+  await context.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/login") {
+      loggedIn = true;
+      return route.fulfill({ status: 204 });
+    }
+    if (path === "/api/auth/logout") {
+      logouts.push(path);
+      loggedIn = false;
+      return route.fulfill({ status: 204 });
+    }
+    if (!loggedIn) {
+      return route.fulfill({ status: 401, json: { error: { kind: "unauthorized", message: "로그인이 필요합니다." } } });
+    }
+    if (path === "/api/auth/session") return route.fulfill({ json: { authenticated: true } });
+    return route.fulfill({ json: ACCOUNT });
+  });
+  const login = async (page: Page) => {
+    await passwordInput(page).fill(PASSWORD);
+    await loginButton(page).click();
+    await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
+  };
+
+  const first = await context.newPage();
+  await first.goto("/");
+  await login(first);
+
+  const second = await context.newPage();
+  await second.goto("/");
+  await expect(passwordInput(second)).toBeVisible();
+  expect(logouts).toHaveLength(2);
+
+  await first.getByRole("button", { name: "새로고침" }).click();
+  await expect(passwordInput(first)).toBeVisible();
+  await expect(first.getByRole("alert")).toContainText("로그인이 만료되었습니다");
+
+  await login(second);
+  await first.reload();
+  await expect(first.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
+});

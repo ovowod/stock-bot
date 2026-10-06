@@ -102,16 +102,19 @@ export class ApiError extends Error {
 /** 서버가 로그인 세션이 없다고 거부한 요청의 오류 종류. */
 export const UNAUTHORIZED = "unauthorized";
 
-const unauthorizedListeners = new Set<() => void>();
+/** 로그인 세션이 없어 거부된 요청이 주문이었는지. 주문이면 보내지 않았다고 알려야 한다. */
+export type UnauthorizedSource = "order" | "request";
+
+const unauthorizedListeners = new Set<(source: UnauthorizedSource) => void>();
 
 /** 어떤 요청이든 로그인 세션이 없다고 거부되면 listener를 부른다. 해제 함수를 돌려준다. */
-export function onUnauthorized(listener: () => void): () => void {
+export function onUnauthorized(listener: (source: UnauthorizedSource) => void): () => void {
   unauthorizedListeners.add(listener);
   return () => unauthorizedListeners.delete(listener);
 }
 
-function reportIfUnauthorized(kind: string | undefined) {
-  if (kind === UNAUTHORIZED) unauthorizedListeners.forEach((listener) => listener());
+function reportIfUnauthorized(kind: string | undefined, source: UnauthorizedSource) {
+  if (kind === UNAUTHORIZED) unauthorizedListeners.forEach((listener) => listener(source));
 }
 
 /** 로그인 세션이 있으면 true. 서버에 연결하지 못하면 ApiError를 던진다. */
@@ -140,6 +143,18 @@ export async function login(password: string): Promise<void> {
     throw networkError();
   }
   if (!response.ok) throw await responseError(response);
+}
+
+/**
+ * 이 브라우저의 로그인 세션을 끝낸다. 서버는 이 브라우저의 쿠키가 현재 세션일 때만 지운다.
+ * 응답을 받지 못해도 화면은 로그아웃된 것으로 다루므로 오류를 던지지 않는다.
+ */
+export async function logout(): Promise<void> {
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } catch {
+    // 서버에 닿지 못했다. 서버 세션은 만료나 다음 로그인 때 끝난다.
+  }
 }
 
 export type RankingKind = "trading_value" | "gainers" | "volume" | "popular";
@@ -287,7 +302,7 @@ export async function placeOrder(
   }
   const kind = body?.error?.kind;
   // 로그인 세션이 없으면 서버가 주문을 키움에 보내기 전에 거부한다. 확인 불가가 아니라 실패다.
-  reportIfUnauthorized(kind);
+  reportIfUnauthorized(kind, "order");
   if (!kind || UNKNOWN_KINDS.has(kind)) throw unknown(requestId);
   throw new ApiError(kind, body.error?.message ?? `요청이 실패했습니다. (HTTP ${response.status})`, requestId);
 }
@@ -333,7 +348,7 @@ function networkError(): ApiError {
 async function responseError(response: Response): Promise<ApiError> {
   const body = await response.json().catch(() => null);
   const error = body?.error;
-  reportIfUnauthorized(error?.kind);
+  reportIfUnauthorized(error?.kind, "request");
   return new ApiError(
     error?.kind ?? "unknown",
     error?.message ?? `요청이 실패했습니다. (HTTP ${response.status})`,
