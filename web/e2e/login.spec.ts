@@ -199,3 +199,31 @@ test("같은 브라우저에서 새 탭을 열면 로그인 세션이 끝나고,
   await first.reload();
   await expect(first.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
 });
+
+test("30분 동안 입력이 없으면 로그인 화면으로 바뀌고 만료 안내가 보인다", async ({ page }) => {
+  await page.clock.install();
+  await mockAccount(page);
+  const { logoutRequests } = await openDashboard(page);
+  const before = logoutRequests();
+
+  await page.clock.fastForward("29:50");
+  await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
+  await page.clock.fastForward("00:20");
+
+  await expect(passwordInput(page)).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("로그인이 만료되었습니다");
+  await expect.poll(logoutRequests).toBe(before + 1);
+});
+
+test("입력이 있으면 30분을 다시 센다", async ({ page }) => {
+  await page.clock.install();
+  await mockAccount(page);
+  await openDashboard(page);
+
+  await page.clock.fastForward("20:00");
+  await page.keyboard.press("Shift");
+  await page.clock.fastForward("20:00");
+
+  await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
+  await expect(passwordInput(page)).toHaveCount(0);
+});

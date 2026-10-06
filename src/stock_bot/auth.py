@@ -6,7 +6,8 @@
 
 import hmac
 import logging
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from secrets import token_urlsafe
 
@@ -16,6 +17,8 @@ from stock_bot.masking import secrets
 logger = logging.getLogger("stock_bot.auth")
 
 SESSION_COOKIE = "stock_bot_session"
+IDLE_TIMEOUT_SECONDS = 30 * 60
+ABSOLUTE_TIMEOUT_SECONDS = 12 * 60 * 60
 _USER_AGENT_LIMIT = 200
 
 
@@ -30,10 +33,12 @@ class ClientInfo:
         return {"ip": self.ip, "user_agent": self.user_agent[:_USER_AGENT_LIMIT]}
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Session:
     id: str
     client: ClientInfo
+    logged_in_at: float
+    last_seen: float
 
 
 def load_password(environ: Mapping[str, str]) -> str:
@@ -47,8 +52,9 @@ def load_password(environ: Mapping[str, str]) -> str:
 
 
 class AuthService:
-    def __init__(self, password: str) -> None:
+    def __init__(self, password: str, clock: Callable[[], float] = time.monotonic) -> None:
         self._password = password.encode()
+        self._clock = clock
         self._session: _Session | None = None
 
     def login(self, password: str, client: ClientInfo) -> str | None:
@@ -60,9 +66,26 @@ class AuthService:
         if self._session is not None:
             log(logger, logging.INFO, "session_replaced", previous_ip=self._session.client.ip)
         session_id = token_urlsafe(32)
-        self._session = _Session(session_id, client)
+        now = self._clock()
+        self._session = _Session(session_id, client, now, now)
         log(logger, logging.INFO, "login_succeeded", **client.log_fields())
         return session_id
+
+    def authenticate(self, session_id: str | None) -> bool:
+        """현재 세션이고 만료되지 않았으면 마지막 요청 시각을 갱신하고 True다. 만료됐으면 지운다."""
+        if self._session is None or not self.is_valid(session_id):
+            return False
+        now = self._clock()
+        if now - self._session.logged_in_at >= ABSOLUTE_TIMEOUT_SECONDS:
+            reason = "absolute"
+        elif now - self._session.last_seen >= IDLE_TIMEOUT_SECONDS:
+            reason = "idle"
+        else:
+            self._session.last_seen = now
+            return True
+        log(logger, logging.INFO, "session_expired", reason=reason, ip=self._session.client.ip)
+        self._session = None
+        return False
 
     def logout(self, session_id: str | None) -> None:
         """요청한 쪽의 세션일 때만 끝낸다. 쿠키가 없거나 예전 쿠키면 현재 세션은 그대로 둔다."""

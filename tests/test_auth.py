@@ -1,6 +1,7 @@
 import json
 import logging
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -227,3 +228,60 @@ def test_logout_with_an_old_cookie_keeps_the_current_session(make_client):
 
     assert response.status_code == 204
     assert current.get(ACCOUNT).status_code == 200
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, *, minutes: float = 0, hours: float = 0) -> None:
+        self.now += minutes * 60 + hours * 3600
+
+
+def _logged_in_with_clock(clock: FakeClock) -> TestClient:
+    app = create_app(
+        environ=FAKE_ENV,
+        transport=httpx.MockTransport(domestic_fake()),
+        static_dir=None,
+        log_dir=None,
+        clock=clock,
+    )
+    client = TestClient(app)
+    client.post(LOGIN, json={"password": PASSWORD})
+    return client
+
+
+def test_session_expires_after_30_idle_minutes(caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    clock = FakeClock()
+    client = _logged_in_with_clock(clock)
+
+    clock.advance(minutes=29)
+    assert client.get(SESSION).status_code == 200
+    clock.advance(minutes=29)
+    assert client.get(ACCOUNT).status_code == 200
+    clock.advance(minutes=30)
+    assert client.get(ACCOUNT).status_code == 401
+    clock.advance(minutes=1)
+    assert client.get(SESSION).status_code == 401
+
+    expired = [r for r in caplog.records if r.getMessage() == "session_expired"]
+    assert [r.fields["reason"] for r in expired] == ["idle"]
+
+
+def test_session_expires_12_hours_after_login_even_when_active(caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    clock = FakeClock()
+    client = _logged_in_with_clock(clock)
+
+    for _ in range(24 * 2 - 1):
+        clock.advance(minutes=15)
+        assert client.get(SESSION).status_code == 200
+    clock.advance(minutes=15)
+
+    assert client.get(SESSION).status_code == 401
+    expired = [r for r in caplog.records if r.getMessage() == "session_expired"]
+    assert [r.fields["reason"] for r in expired] == ["absolute"]

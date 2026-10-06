@@ -8,6 +8,10 @@ type AuthState = { status: "checking" } | { status: "anonymous"; notice: string 
 const EXPIRED = "로그인이 만료되었습니다. 다시 로그인하세요.";
 const ORDER_EXPIRED = "로그인이 만료되어 주문하지 않았습니다. 다시 로그인하세요.";
 
+/** 이 시간 동안 입력이 없으면 서버 요청을 기다리지 않고 화면을 잠근다. 서버의 미사용 만료와 같다. */
+const IDLE_MS = 30 * 60 * 1000;
+const INPUT_EVENTS = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"] as const;
+
 const Logout = createContext<() => void>(() => {});
 
 /** 이 브라우저의 로그인 세션을 끝내고 로그인 화면으로 간다. */
@@ -65,6 +69,23 @@ export function AuthGate({ children }: { children: ReactNode }) {
       window.removeEventListener("pageshow", onPageShow);
     };
   }, [endSession]);
+
+  // 자리를 비운 사이 계좌 정보가 화면에 남지 않게, 입력이 없으면 로그인 화면으로 바꾼다.
+  const authenticated = state.status === "authenticated";
+  useEffect(() => {
+    if (!authenticated) return;
+    const expire = () => void endSession(EXPIRED, true);
+    let timer = setTimeout(expire, IDLE_MS);
+    const restart = () => {
+      clearTimeout(timer);
+      timer = setTimeout(expire, IDLE_MS);
+    };
+    INPUT_EVENTS.forEach((name) => window.addEventListener(name, restart, { passive: true }));
+    return () => {
+      clearTimeout(timer);
+      INPUT_EVENTS.forEach((name) => window.removeEventListener(name, restart));
+    };
+  }, [authenticated, endSession]);
 
   const signOut = useCallback(() => void endSession(null, true), [endSession]);
 

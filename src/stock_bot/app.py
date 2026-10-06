@@ -40,13 +40,14 @@ def create_app(
     static_dir: Path | None = WEB_DIST,
     log_dir: Path | None = LOG_DIR,
     today: Callable[[], date] | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> FastAPI:
     setup_logging(log_dir)
     if environ is None:
         load_env_file()
         environ = os.environ
 
-    auth = AuthService(load_password(environ))
+    auth = AuthService(load_password(environ), clock or time.monotonic)
     kiwoom = KiwoomClient(environ, transport=transport)
     rankings = RankingService(kiwoom)
     stocks = StockSearchService(kiwoom, today or today_kst)
@@ -76,7 +77,7 @@ def create_app(
         if (
             path.startswith("/api")
             and path not in PUBLIC_API_PATHS
-            and not auth.is_valid(request.cookies.get(SESSION_COOKIE))
+            and not auth.authenticate(request.cookies.get(SESSION_COOKIE))
         ):
             log(logger, logging.WARNING, "unauthorized_request", path=path)
             return _error_response(401, "unauthorized", "로그인이 필요합니다.", {})
@@ -158,7 +159,7 @@ def create_app(
 
     @app.get("/api/auth/session")
     async def get_session(request: Request) -> dict[str, Any]:
-        if not auth.is_valid(request.cookies.get(SESSION_COOKIE)):
+        if not auth.authenticate(request.cookies.get(SESSION_COOKIE)):
             raise AppError("unauthorized", "로그인이 필요합니다.", 401)
         return {"authenticated": True}
 
