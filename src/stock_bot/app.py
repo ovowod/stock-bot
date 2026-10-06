@@ -1,12 +1,13 @@
 """FastAPI 앱. 브라우저는 이 서버의 /api만 호출하고, 키움 호출은 서버 안에서만 일어난다."""
 
+import asyncio
 import logging
 import math
 import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,12 +18,19 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from stock_bot.account import AccountService
-from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
+from stock_bot.auth import (
+    LOCK_SECONDS,
+    SESSION_COOKIE,
+    AuthService,
+    ClientInfo,
+    load_password,
+)
 from stock_bot.config import ENVIRONMENTS, LOG_DIR, PROJECT_ROOT, load_env_file, parse_environment
 from stock_bot.errors import AppError
-from stock_bot.kiwoom import KiwoomClient
+from stock_bot.kiwoom import KST, KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
+from stock_bot.notification import DiscordNotifier, Embed, EmbedField
 from stock_bot.order import OrderService
 from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
@@ -42,6 +50,7 @@ def create_app(
     log_dir: Path | None = LOG_DIR,
     today: Callable[[], date] | None = None,
     clock: Callable[[], float] | None = None,
+    notifier: DiscordNotifier | None = None,
 ) -> FastAPI:
     setup_logging(log_dir)
     if environ is None:
@@ -49,6 +58,19 @@ def create_app(
         environ = os.environ
 
     auth = AuthService(load_password(environ), clock or time.monotonic)
+    notifier = notifier or DiscordNotifier(environ)
+    # 보내는 중인 알림. 참조를 잡아 두지 않으면 작업이 끝나기 전에 정리될 수 있다.
+    # 서버가 꺼질 때 남은 알림은 버린다.
+    notifications: set[asyncio.Task[bool]] = set()
+
+    def notify(embed: Embed) -> None:
+        """로그인 응답이 알림을 기다리지 않게 따로 보낸다. 실패는 notifier가 로그로 남긴다."""
+        if not notifier.enabled:
+            return
+        task = asyncio.create_task(notifier.send(embed=embed))
+        notifications.add(task)
+        task.add_done_callback(notifications.discard)
+
     kiwoom = KiwoomClient(environ, transport=transport)
     rankings = RankingService(kiwoom)
     stocks = StockSearchService(kiwoom, today or today_kst)
@@ -151,12 +173,27 @@ def create_app(
                 429,
                 {"retry_after_seconds": retry_after},
             )
-        session_id = auth.login(password, client)
-        if session_id is None:
+        result = auth.login(password, client)
+        now = datetime.now(KST)
+        if result.session_id is None:
+            if result.locked:
+                until = now + timedelta(seconds=LOCK_SECONDS)
+                notify(
+                    _access_embed(
+                        "로그인 시도 제한",
+                        _LOCK_COLOR,
+                        client,
+                        [
+                            EmbedField("연속 실패", f"{result.failures}회", inline=True),
+                            EmbedField("풀리는 시각", _kst(until), inline=True),
+                        ],
+                    )
+                )
             raise AppError("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
+        notify(_access_embed("로그인", _LOGIN_COLOR, client, [EmbedField("시각", _kst(now))]))
         response = Response(status_code=204)
         # Max-Age·Expires를 두지 않아 브라우저를 닫으면 사라진다.
-        response.set_cookie(SESSION_COOKIE, session_id, **_cookie_options(request))
+        response.set_cookie(SESSION_COOKIE, result.session_id, **_cookie_options(request))
         return response
 
     @app.post("/api/auth/logout")
@@ -233,6 +270,27 @@ def create_app(
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")
 
     return app
+
+
+_LOGIN_COLOR = 0x6C62A8
+_LOCK_COLOR = 0xE42939
+
+
+def _access_embed(title: str, color: int, client: ClientInfo, extra: list[EmbedField]) -> Embed:
+    """접속 정보를 담은 Discord 알림. 입력한 비밀번호는 넣지 않는다."""
+    return Embed(
+        title=title,
+        color=color,
+        fields=(
+            *extra,
+            EmbedField("IP", client.ip, inline=True),
+            EmbedField("브라우저·OS", client.device, inline=True),
+        ),
+    )
+
+
+def _kst(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%d %H:%M:%S KST")
 
 
 def _cookie_options(request: Request) -> dict[str, Any]:

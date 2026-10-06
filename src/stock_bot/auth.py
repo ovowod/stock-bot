@@ -25,6 +25,34 @@ LOCK_SECONDS = 15 * 60
 _USER_AGENT_LIMIT = 200
 
 
+# 앞의 표시가 우선한다. User-Agent에 Edge는 Chrome을, Chrome은 Safari를,
+# iOS는 Mac OS X를 함께 적는다.
+_BROWSERS = (
+    ("Edg", "Edge"),
+    ("Firefox/", "Firefox"),
+    ("FxiOS", "Firefox"),
+    ("Chrome/", "Chrome"),
+    ("CriOS", "Chrome"),
+    ("Safari/", "Safari"),
+)
+_SYSTEMS = (
+    ("Windows", "Windows"),
+    ("Android", "Android"),
+    ("iPhone", "iOS"),
+    ("iPad", "iOS"),
+    ("Mac OS X", "macOS"),
+    ("Linux", "Linux"),
+)
+_UNKNOWN = "알 수 없음"
+
+
+def describe_device(user_agent: str) -> str:
+    """User-Agent에서 브라우저와 OS를 "Chrome / Windows"처럼 간단히 고른다."""
+    browser = next((name for mark, name in _BROWSERS if mark in user_agent), _UNKNOWN)
+    system = next((name for mark, name in _SYSTEMS if mark in user_agent), _UNKNOWN)
+    return f"{browser} / {system}"
+
+
 @dataclass(frozen=True)
 class ClientInfo:
     """접속 정보. 로그인 요청이 온 IP 주소와 User-Agent."""
@@ -32,8 +60,25 @@ class ClientInfo:
     ip: str
     user_agent: str
 
+    @property
+    def device(self) -> str:
+        return describe_device(self.user_agent)
+
     def log_fields(self) -> dict[str, str]:
-        return {"ip": self.ip, "user_agent": self.user_agent[:_USER_AGENT_LIMIT]}
+        return {
+            "ip": self.ip,
+            "device": self.device,
+            "user_agent": self.user_agent[:_USER_AGENT_LIMIT],
+        }
+
+
+@dataclass(frozen=True)
+class LoginResult:
+    """session_id가 있으면 성공이다. 실패했다면 이번 실패로 IP가 잠겼는지 locked가 알려 준다."""
+
+    session_id: str | None
+    failures: int = 0
+    locked: bool = False
 
 
 @dataclass
@@ -91,8 +136,8 @@ class AuthService:
         )
         return math.ceil(remaining)
 
-    def login(self, password: str, client: ClientInfo) -> str | None:
-        """맞으면 새 세션 ID를 돌려주고 이전 세션은 버린다. 틀리면 None이다.
+    def login(self, password: str, client: ClientInfo) -> LoginResult:
+        """맞으면 새 세션 ID를 돌려주고 이전 세션은 버린다.
 
         잠긴 IP는 locked_seconds로 먼저 걸러야 한다. 잠긴 동안의 시도는 실패 수에 넣지 않는다.
         """
@@ -117,7 +162,7 @@ class AuthService:
                     lock_seconds=LOCK_SECONDS,
                     **client.log_fields(),
                 )
-            return None
+            return LoginResult(None, record.count, locked=record.count >= MAX_FAILURES)
         self._failures.pop(client.ip, None)
         if self._session is not None:
             log(logger, logging.INFO, "session_replaced", previous_ip=self._session.client.ip)
@@ -125,7 +170,7 @@ class AuthService:
         now = self._clock()
         self._session = _Session(session_id, client, now, now)
         log(logger, logging.INFO, "login_succeeded", **client.log_fields())
-        return session_id
+        return LoginResult(session_id)
 
     def authenticate(self, session_id: str | None) -> bool:
         """현재 세션이고 만료되지 않았으면 마지막 요청 시각을 갱신하고 True다. 만료됐으면 지운다."""
