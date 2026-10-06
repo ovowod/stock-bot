@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { openDashboard } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 키움 서버나 실전 서버는 호출되지 않는다.
 
@@ -128,7 +129,7 @@ async function expectNoHorizontalScroll(page: Page) {
 
 test("처음에는 국내 모의로 열리고 계좌 요약·예수금·보유종목을 보여준다", async ({ page }, info) => {
   await mockAccount(page, { domestic_paper: { body: domestic() } });
-  await page.goto("/");
+  await openDashboard(page);
 
   await expect(envButton(page, "국내 모의")).toHaveAttribute("aria-checked", "true");
   await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
@@ -178,7 +179,7 @@ test("처음에는 국내 모의로 열리고 계좌 요약·예수금·보유�
 
 test("수익은 빨강 +, 손실은 파랑 − 로 표시하고 수익률은 괄호로 붙인다", async ({ page }) => {
   await mockAccount(page, { domestic_paper: { body: domestic() } });
-  await page.goto("/");
+  await openDashboard(page);
 
   const gain = visibleText(page, "+1,450,000원");
   const loss = visibleText(page, "−104,000원");
@@ -201,7 +202,7 @@ test("부호 없이 표시하는 금액도 음수면 − 를 유지한다", asyn
   const body = domestic();
   body.deposit.d2_estimated = -50_000;
   await mockAccount(page, { domestic_paper: { body } });
-  await page.goto("/");
+  await openDashboard(page);
 
   await expect(visibleText(page, "−50,000원")).toBeVisible();
   await expect(visibleText(page, "−50,000원")).not.toContainText("▼");
@@ -213,7 +214,7 @@ test("실전 환경을 고르면 경고와 실전 배지를 보여준다", async
     domestic_real: { body: domestic("domestic_real") },
     us_real: { body: us("us_real") },
   });
-  await page.goto("/");
+  await openDashboard(page);
   await envButton(page, "국내 실전").click();
 
   await expect(page.getByText("실전", { exact: true })).toBeVisible();
@@ -227,7 +228,7 @@ test("실전 환경을 고르면 경고와 실전 배지를 보여준다", async
 
 test("미국 계좌는 USD와 원화 환산, 통화별 예수금, 거래소명을 보여준다", async ({ page }, info) => {
   await mockAccount(page, { domestic_paper: { body: domestic() }, us_paper: { body: us() } });
-  await page.goto("/");
+  await openDashboard(page);
   await envButton(page, "미국 모의").click();
 
   await expect(page.getByText("$156,464.67")).toBeVisible();
@@ -281,7 +282,7 @@ test("매도가능 수량이 보유 수량보다 적으면 함께 보여준다",
   const body = us();
   body.holdings[0].sellable_quantity = 390;
   await mockAccount(page, { domestic_paper: { body: domestic() }, us_paper: { body } });
-  await page.goto("/");
+  await openDashboard(page);
   await envButton(page, "미국 모의").click();
 
   if (info.project.name.includes("mobile")) {
@@ -299,7 +300,7 @@ test("좁은 화면에서도 요약 카드의 큰 금액을 말줄임으로 자�
   body.summary.total_evaluation = 123_456_789;
   body.summary.total_purchase = 110_000_000;
   await mockAccount(page, { domestic_paper: { body } });
-  await page.goto("/");
+  await openDashboard(page);
 
   for (const text of ["123,456,789원", "110,000,000원"]) {
     const value = visibleText(page, text);
@@ -311,7 +312,7 @@ test("좁은 화면에서도 요약 카드의 큰 금액을 말줄임으로 자�
 
 test("마지막으로 고른 투자 환경으로 다시 열린다", async ({ page }) => {
   await mockAccount(page, { domestic_paper: { body: domestic() }, us_paper: { body: us() } });
-  await page.goto("/");
+  await openDashboard(page);
   await envButton(page, "미국 모의").click();
   await page.reload();
 
@@ -321,14 +322,14 @@ test("마지막으로 고른 투자 환경으로 다시 열린다", async ({ pag
 test("저장된 값이 잘못되면 국내 모의로 연다", async ({ page }) => {
   await mockAccount(page, { domestic_paper: { body: domestic() } });
   await page.addInitScript(() => localStorage.setItem("stock-bot:environment", "real"));
-  await page.goto("/");
+  await openDashboard(page);
 
   await expect(envButton(page, "국내 모의")).toHaveAttribute("aria-checked", "true");
 });
 
 test("불러오는 동안 skeleton을 보여준다", async ({ page }, info) => {
   await mockAccount(page, { domestic_paper: { body: domestic(), delayMs: 1500 } });
-  await page.goto("/");
+  await openDashboard(page);
 
   await expect(page.getByRole("status", { name: "계좌 정보를 불러오는 중" })).toBeVisible();
   await expect(page.getByRole("button", { name: "새로고침" })).toBeDisabled();
@@ -341,7 +342,7 @@ test("새로고침 중에는 기존 데이터를 유지하고 버튼을 비활�
   await mockAccount(page, {
     domestic_paper: () => ({ body: domestic(), delayMs: slow ? 1500 : 0 }),
   });
-  await page.goto("/");
+  await openDashboard(page);
   await expect(page.getByText("512,345,678원")).toBeVisible();
 
   slow = true;
@@ -354,7 +355,7 @@ test("새로고침 중에는 기존 데이터를 유지하고 버튼을 비활�
 
 test("보유종목이 없으면 빈 상태를 안내하고 요약은 그대로 보여준다", async ({ page }, info) => {
   await mockAccount(page, { domestic_paper: { body: domestic("domestic_paper", []) } });
-  await page.goto("/");
+  await openDashboard(page);
 
   await expect(page.getByText("보유종목이 없습니다")).toBeVisible();
   await expect(page.getByText("512,345,678원")).toBeVisible();
@@ -379,7 +380,7 @@ test("설정 오류는 빠진 환경변수 이름과 다시 시도 버튼을 보
           }
         : { body: domestic() },
   });
-  await page.goto("/");
+  await openDashboard(page);
 
   await expect(page.getByRole("alert")).toContainText("설정을 확인해야 합니다");
   await expect(page.getByRole("alert")).toContainText("PAPER_KR_APP_SECRET");
@@ -404,7 +405,7 @@ test("호출 한도 초과는 잠시 후 다시 시도하라고 안내한다", a
       },
     },
   });
-  await page.goto("/");
+  await openDashboard(page);
 
   await expect(page.getByRole("alert")).toContainText("호출 한도를 넘었습니다");
   await expect(page.getByRole("alert")).toContainText("잠시 후 다시 시도하세요");
@@ -416,7 +417,7 @@ test("환경을 바꾸면 이전 환경 데이터를 즉시 지우고, 늦게 �
     domestic_paper: () => ({ body: domestic(), delayMs: domesticSlow ? 1500 : 0 }),
     us_paper: { body: us(), delayMs: 800 },
   });
-  await page.goto("/");
+  await openDashboard(page);
   await expect(page.getByText("512,345,678원")).toBeVisible();
 
   // 국내 → 미국: 미국 응답이 오기 전에도 국내 데이터가 남아 있으면 안 된다.
@@ -438,7 +439,7 @@ test("환경을 바꾸면 이전 환경 데이터를 즉시 지우고, 늦게 �
 test("모바일에서는 메뉴 서랍을 열고 닫을 수 있다", async ({ page, isMobile }, info) => {
   test.skip(!isMobile, "모바일 전용");
   await mockAccount(page, { domestic_paper: { body: domestic() } });
-  await page.goto("/");
+  await openDashboard(page);
 
   await page.getByRole("button", { name: "메뉴 열기" }).click();
   const drawer = page.getByRole("dialog", { name: "메뉴" });
@@ -454,7 +455,7 @@ for (const [label, amountPattern] of [
   ["미국 모의", /^\$/],
 ] as const) {
   test(`@live ${label} 실제 모의 서버 조회`, async ({ page }, info) => {
-    await page.goto("/");
+    await openDashboard(page);
     await envButton(page, label).click();
     await expect(page.getByRole("heading", { name: "예수금" })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole("alert")).toHaveCount(0);

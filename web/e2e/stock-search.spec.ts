@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { openDashboard } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 키움 서버나 실전 서버는 호출되지 않는다.
 
@@ -57,7 +58,7 @@ async function mockSearch(page: Page, handler: (request: Seen) => Reply) {
 }
 
 async function openSearch(page: Page) {
-  await page.goto("/");
+  await openDashboard(page);
   await selectSearchMenu(page);
 }
 
@@ -85,7 +86,7 @@ test("처음 화면은 계좌 확인이고, 시세 → 종목 검색에서 국�
       domesticItem("069500", "KODEX 200", { category: "ETF", industry: null }),
     ]),
   }));
-  await page.goto("/");
+  await openDashboard(page);
   await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
 
   await selectSearchMenu(page);
@@ -252,7 +253,7 @@ for (const [label, query, expected] of [
   ["미국 모의", "apple", "AAPL"],
 ] as const) {
   test(`@live ${label} 종목 검색 실제 모의 서버 조회`, async ({ page }, info) => {
-    await page.goto("/");
+    await openDashboard(page);
     await page.getByRole("radio", { name: label }).click();
     await selectSearchMenu(page);
     await input(page).fill(query);

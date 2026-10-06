@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openDashboard } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 이 파일의 테스트는 주문을 보내지 않으며 키움 서버도 호출되지 않는다.
 
@@ -102,7 +103,7 @@ const tradingValueCard = (page: Page) => page.getByRole("region", { name: "거�
 
 test("순위의 종목을 누르면 현재가 조회 결과와 수량 1이 채워진 매수 패널이 열린다", async ({ page }) => {
   const { unexpected, quotes } = await mockApi(page, { domestic: [rankingItem("000660", "SK하이닉스", null, 184_100)], us: [] });
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "순위");
 
@@ -137,7 +138,7 @@ test("순위의 종목을 누르면 현재가 조회 결과와 수량 1이 채�
 
 test("인기 종목에서 열어도 집계 시점 가격이 아니라 조회한 현재가를 채운다", async ({ page }) => {
   await mockApi(page, { domestic: [rankingItem("000660", "SK하이닉스", null, 184_100)], us: [] });
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "순위");
 
@@ -150,7 +151,7 @@ test("현재가를 불러오는 동안 표시가 보이고, 먼저 입력한 가
     body: { code, price: 190_000, fetched_at: "2026-10-05T06:30:00+00:00" },
     delayMs: 800,
   }));
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "순위");
   await tradingValueCard(page).getByRole("button", { name: /SK하이닉스/ }).click();
@@ -168,7 +169,7 @@ test("현재가를 불러오지 못하면 안내를 보여주고, 입력 여부�
     body: { error: { kind: "kiwoom_error", message: "test" } },
     delayMs: 800,
   }));
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "순위");
   const row = tradingValueCard(page).getByRole("button", { name: /SK하이닉스/ });
@@ -189,7 +190,7 @@ test("현재가를 불러오지 못하면 안내를 보여주고, 입력 여부�
 
 test("패널이 열린 동안 뒤쪽 화면은 막히고, 닫으면 눌렀던 종목으로 초점이 돌아간다", async ({ page }) => {
   await mockApi(page, { domestic: [rankingItem("000660", "SK하이닉스", null, 184_100)], us: [] });
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "순위");
 
@@ -206,7 +207,7 @@ test("패널이 열린 동안 뒤쪽 화면은 막히고, 닫으면 눌렀던 �
 
 test("잘못된 수량과 가격은 이유를 보여준다", async ({ page }) => {
   await mockApi(page, { domestic: [rankingItem("000660", "SK하이닉스", null, 184_100)], us: [] });
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "순위");
   await tradingValueCard(page).getByRole("button", { name: /SK하이닉스/ }).click();
@@ -226,7 +227,7 @@ test("미국 모의에서 NYSE·NASDAQ·AMEX가 아닌 종목은 현재가를 �
     domestic: [],
     us: [rankingItem("SOXL", "디렉시온 반도체", "NYSE", 162.6), rankingItem("ABCD", "장외 종목", "OTC", 1.2)],
   });
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "미국 모의");
   await selectMenu(page, "순위");
 
@@ -262,7 +263,7 @@ test("미국 모의에서 NYSE·NASDAQ·AMEX가 아닌 종목은 현재가를 �
 
 test("검색 결과에서도 패널이 열리고, 종목 상태 경고와 실전 표시를 보여준다", async ({ page }) => {
   await mockApi(page, { domestic: [], us: [] }, [searchItem({ status: "관리종목" })]);
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 실전");
   await selectMenu(page, "종목 검색");
   await page.getByRole("searchbox", { name: "종목 검색어" }).fill("삼성");
@@ -282,7 +283,7 @@ test("바깥 영역을 누르면 패널이 닫히고, 패널이 열려도 가로
     domestic: [rankingItem("000660", "SK하이닉스", null, 184_100)],
     us: [rankingItem("SOXL", "디렉시온 반도체", "NYSE", 162.6)],
   });
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "순위");
   await tradingValueCard(page).getByRole("button", { name: /SK하이닉스/ }).click();
@@ -309,7 +310,7 @@ test("미국 현재가가 소수 넷째 자리로 오면 $1 이상은 둘째 자
     [],
     ({ code }) => ({ body: { code, price: prices[code], fetched_at: "2026-10-05T06:30:00+00:00" } }),
   );
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "미국 모의");
   await selectMenu(page, "순위");
 
@@ -337,7 +338,7 @@ test("국내 주식은 -1호가·+1호가 버튼으로 KRX 호가 단위만큼 �
     [],
     ({ code }) => ({ body: { code, price: prices[code], fetched_at: "2026-10-05T06:30:00+00:00" } }),
   );
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "순위");
 
@@ -380,7 +381,7 @@ test("ETF는 ETF 호가 단위를 쓰고, 가격이 비었거나 최저 호가�
     [searchItem({ code: "069500", name: "KODEX 200", category: "ETF" })],
     ({ code }) => ({ body: { code, price: 10_000, fetched_at: "2026-10-05T06:30:00+00:00" } }),
   );
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "종목 검색");
   await page.getByRole("searchbox", { name: "종목 검색어" }).fill("KODEX");
@@ -403,7 +404,7 @@ test("ETF는 ETF 호가 단위를 쓰고, 가격이 비었거나 최저 호가�
 
 test("미국은 $1 이상 0.01달러, $1 미만 0.0001달러씩 움직인다", async ({ page }) => {
   await mockApi(page, { domestic: [], us: [rankingItem("SOXL", "디렉시온 반도체", "NYSE", 1)] });
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "미국 모의");
   await selectMenu(page, "순위");
   await tradingValueCard(page).getByRole("button", { name: /디렉시온 반도체/ }).click();
@@ -425,7 +426,7 @@ test("현재가를 불러오지 못하면 현재가 버튼이 막힌다", async 
     status: 502,
     body: { error: { kind: "kiwoom_error", message: "test" } },
   }));
-  await page.goto("/");
+  await openDashboard(page);
   await selectEnvironment(page, "국내 모의");
   await selectMenu(page, "순위");
   await tradingValueCard(page).getByRole("button", { name: /SK하이닉스/ }).click();

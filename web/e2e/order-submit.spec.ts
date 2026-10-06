@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openDashboard } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 주문 요청도 가짜 서버가 받으며 키움 서버는 호출되지 않는다.
 
@@ -78,7 +79,7 @@ async function mockApi(page: Page, order: (request: OrderRequest) => Reply = acc
 }
 
 async function openPanel(page: Page, environment = "국내 모의", name = "SK하이닉스", price = "190,000") {
-  await page.goto("/");
+  await openDashboard(page);
   await page.getByRole("radio", { name: environment }).filter({ visible: true }).click();
   const menu = page.getByRole("button", { name: "메뉴 열기" });
   if (await menu.isVisible()) await menu.click();
