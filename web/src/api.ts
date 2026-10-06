@@ -99,6 +99,49 @@ export class ApiError extends Error {
   }
 }
 
+/** 서버가 로그인 세션이 없다고 거부한 요청의 오류 종류. */
+export const UNAUTHORIZED = "unauthorized";
+
+const unauthorizedListeners = new Set<() => void>();
+
+/** 어떤 요청이든 로그인 세션이 없다고 거부되면 listener를 부른다. 해제 함수를 돌려준다. */
+export function onUnauthorized(listener: () => void): () => void {
+  unauthorizedListeners.add(listener);
+  return () => unauthorizedListeners.delete(listener);
+}
+
+function reportIfUnauthorized(kind: string | undefined) {
+  if (kind === UNAUTHORIZED) unauthorizedListeners.forEach((listener) => listener());
+}
+
+/** 로그인 세션이 있으면 true. 서버에 연결하지 못하면 ApiError를 던진다. */
+export async function checkSession(): Promise<boolean> {
+  let response: Response;
+  try {
+    response = await fetch("/api/auth/session");
+  } catch {
+    throw networkError();
+  }
+  if (response.status === 401) return false;
+  if (!response.ok) throw await responseError(response);
+  return true;
+}
+
+/** 비밀번호로 로그인한다. 실패하면 서버가 준 오류 종류로 ApiError를 던진다. */
+export async function login(password: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+  } catch {
+    throw networkError();
+  }
+  if (!response.ok) throw await responseError(response);
+}
+
 export type RankingKind = "trading_value" | "gainers" | "volume" | "popular";
 export type RankingDirection = "up" | "down" | "flat" | "unknown";
 
@@ -243,6 +286,8 @@ export async function placeOrder(
     return { result: body as OrderAccepted, requestId };
   }
   const kind = body?.error?.kind;
+  // 로그인 세션이 없으면 서버가 주문을 키움에 보내기 전에 거부한다. 확인 불가가 아니라 실패다.
+  reportIfUnauthorized(kind);
   if (!kind || UNKNOWN_KINDS.has(kind)) throw unknown(requestId);
   throw new ApiError(kind, body.error?.message ?? `요청이 실패했습니다. (HTTP ${response.status})`, requestId);
 }
@@ -275,17 +320,24 @@ async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
     response = await fetch(url, { signal });
   } catch (error) {
     if (signal.aborted) throw error;
-    throw new ApiError("network", "서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.", null);
+    throw networkError();
   }
+  if (!response.ok) throw await responseError(response);
+  return (await response.json().catch(() => null)) as T;
+}
+
+function networkError(): ApiError {
+  return new ApiError("network", "서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.", null);
+}
+
+async function responseError(response: Response): Promise<ApiError> {
   const body = await response.json().catch(() => null);
-  if (!response.ok) {
-    const error = body?.error;
-    throw new ApiError(
-      error?.kind ?? "unknown",
-      error?.message ?? `요청이 실패했습니다. (HTTP ${response.status})`,
-      error?.request_id ?? response.headers.get("X-Request-ID"),
-      error?.missing ?? [],
-    );
-  }
-  return body as T;
+  const error = body?.error;
+  reportIfUnauthorized(error?.kind);
+  return new ApiError(
+    error?.kind ?? "unknown",
+    error?.message ?? `요청이 실패했습니다. (HTTP ${response.status})`,
+    error?.request_id ?? response.headers.get("X-Request-ID"),
+    error?.missing ?? [],
+  );
 }

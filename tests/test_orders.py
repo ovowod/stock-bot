@@ -270,6 +270,7 @@ async def test_concurrent_requests_with_the_same_key_send_one_order():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
+        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
         order = domestic_order(order_key="key-race")
         pending = [asyncio.create_task(client.post(DOMESTIC_URL, json=order)) for _ in range(3)]
         await asyncio.sleep(0.05)

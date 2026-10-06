@@ -252,6 +252,7 @@ async def test_concurrent_ranking_requests_reach_kiwoom_one_at_a_time():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
+        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
         pending = [asyncio.create_task(client.get(DOMESTIC_URL)) for _ in range(2)]
         await asyncio.sleep(0.05)
         release.set()

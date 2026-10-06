@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { openDashboard } from "./support";
+import { openDashboard, openLiveDashboard } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 키움 서버나 실전 서버는 호출되지 않는다.
 
@@ -455,7 +455,7 @@ for (const [label, amountPattern] of [
   ["미국 모의", /^\$/],
 ] as const) {
   test(`@live ${label} 실제 모의 서버 조회`, async ({ page }, info) => {
-    await openDashboard(page);
+    await openLiveDashboard(page);
     await envButton(page, label).click();
     await expect(page.getByRole("heading", { name: "예수금" })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole("alert")).toHaveCount(0);

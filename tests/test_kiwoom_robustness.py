@@ -155,6 +155,7 @@ async def test_concurrent_first_requests_issue_a_single_token():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
+        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
         pending = [asyncio.create_task(client.get(URL)) for _ in range(3)]
         await asyncio.sleep(0.05)
         gate.set()
@@ -187,6 +188,7 @@ async def test_late_invalid_token_does_not_discard_a_newer_token():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
+        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
         slow = asyncio.create_task(client.get(URL))
         await asyncio.to_thread(first_kt00018.wait, 1)
         # 느린 요청이 걸려 있는 동안 토큰이 무효가 되어 다른 요청이 재발급했다고 가정한다.

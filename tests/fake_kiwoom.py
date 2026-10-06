@@ -20,6 +20,7 @@ FAKE_ENV = {
     "PAPER_US_APP_KEY": "paperus-key-EEEE5555",
     "PAPER_US_APP_SECRET": "paperus-secret-FFFF6666",
     "PAPER_US_ACCOUNT_NO": "8200000222",
+    "PASSWORD": "fake-password-GGGG7777",
 }
 
 

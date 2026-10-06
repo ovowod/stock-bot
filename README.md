@@ -7,6 +7,12 @@
 - Python 3.14, [uv](https://docs.astral.sh/uv/), Node.js, pnpm
 - 프로젝트 최상위 `.env`에 인증정보를 채운다. 변수 이름은 `.env.example`을 따른다.
   - `*_ACCOUNT_NO`는 8자리 또는 10자리로 적는다.
+  - `PASSWORD`는 대시보드 로그인 비밀번호다. 비어 있으면 서버가 시작되지 않는다.
+
+## 접속과 보안
+
+- 대시보드는 `PASSWORD`로 로그인해야 쓸 수 있다.
+- HTTPS가 없으므로 비밀번호와 로그인 쿠키가 암호화되지 않은 채 네트워크를 지나간다. 같은 PC, 집 안 네트워크, VPN에서만 접속하고 인터넷에 직접 열지 않는다.
 
 ```bash
 uv sync
@@ -44,6 +50,10 @@ pnpm --dir web test:e2e
 ```
 
 - `test:e2e`는 브라우저의 `/api` 요청을 가짜 응답으로 바꿔 키움 서버를 호출하지 않는다.
-- `pnpm --dir web test:live`는 서버를 띄운 상태에서 국내·미국 모의 서버만 실제로 조회한다.
+- `pnpm --dir web test:live`는 서버를 띄운 상태에서 국내·미국 모의 서버만 실제로 조회한다. 로그인 비밀번호를 `PASSWORD` 환경변수로 넘긴다.
+
+```bash
+PASSWORD='로그인 비밀번호' pnpm --dir web test:live
+```
 
 로그는 stdout과 `logs/stock-bot.log`(날짜별 분리, 14일 보관)에 남는다.

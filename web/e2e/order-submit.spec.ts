@@ -347,3 +347,19 @@ test("전송 중에는 닫기 버튼, Esc, 바깥 영역으로 패널을 닫을 
   await expect(page.getByRole("status").filter({ hasText: "주문번호 00040" })).toBeVisible();
   await expect(dialog).toHaveCount(0);
 });
+
+test("로그인이 만료되어 주문이 401이면 확인 불가가 아니라 실패이고 로그인 화면으로 돌아간다", async ({ page }) => {
+  await mockApi(page, () => ({
+    status: 401,
+    body: { error: { kind: "unauthorized", message: "로그인이 필요합니다.", request_id: "req-auth-1" } },
+  }));
+  const dialog = await openPanel(page);
+  await dialog.getByLabel("수량 (주)").fill("7");
+  await dialog.getByRole("button", { name: "매수" }).click();
+  await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+
+  await expect(page.getByRole("alert").filter({ hasText: "주문하지 못했습니다" })).toBeVisible();
+  await expect(unknownAlert(page)).toHaveCount(0);
+  await expect(page.getByLabel("비밀번호")).toBeVisible();
+  await expect(page.getByText("로그인이 만료되었습니다")).toBeVisible();
+});
