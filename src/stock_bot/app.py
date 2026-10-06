@@ -1,6 +1,7 @@
 """FastAPI 앱. 브라우저는 이 서버의 /api만 호출하고, 키움 호출은 서버 안에서만 일어난다."""
 
 import logging
+import math
 import os
 import time
 import uuid
@@ -142,6 +143,14 @@ def create_app(
             request.client.host if request.client else "-",
             request.headers.get("user-agent", ""),
         )
+        retry_after = auth.locked_seconds(client)
+        if retry_after:
+            raise AppError(
+                "login_locked",
+                f"로그인 시도가 너무 많습니다. {math.ceil(retry_after / 60)}분 후 다시 시도하세요.",
+                429,
+                {"retry_after_seconds": retry_after},
+            )
         session_id = auth.login(password, client)
         if session_id is None:
             raise AppError("invalid_password", "비밀번호가 올바르지 않습니다.", 401)

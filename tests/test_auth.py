@@ -241,15 +241,18 @@ class FakeClock:
         self.now += minutes * 60 + hours * 3600
 
 
-def _logged_in_with_clock(clock: FakeClock) -> TestClient:
-    app = create_app(
+def _app_with_clock(clock: FakeClock):
+    return create_app(
         environ=FAKE_ENV,
         transport=httpx.MockTransport(domestic_fake()),
         static_dir=None,
         log_dir=None,
         clock=clock,
     )
-    client = TestClient(app)
+
+
+def _logged_in_with_clock(clock: FakeClock) -> TestClient:
+    client = TestClient(_app_with_clock(clock))
     client.post(LOGIN, json={"password": PASSWORD})
     return client
 
@@ -285,3 +288,89 @@ def test_session_expires_12_hours_after_login_even_when_active(caplog):
     assert client.get(SESSION).status_code == 401
     expired = [r for r in caplog.records if r.getMessage() == "session_expired"]
     assert [r.fields["reason"] for r in expired] == ["absolute"]
+
+
+def _fail(client: TestClient, times: int) -> None:
+    for _ in range(times):
+        assert client.post(LOGIN, json={"password": "wrong"}).status_code == 401
+
+
+def test_five_failures_lock_the_ip_for_15_minutes(caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    clock = FakeClock()
+    client = TestClient(_app_with_clock(clock))
+    _fail(client, 5)
+
+    locked = client.post(LOGIN, json={"password": PASSWORD})
+
+    assert locked.status_code == 429
+    error = locked.json()["error"]
+    assert error["kind"] == "login_locked"
+    assert error["retry_after_seconds"] == 15 * 60
+    assert "15분 후" in error["message"]
+    events = [r.getMessage() for r in caplog.records]
+    assert events.count("login_locked") == 1
+    assert "login_rejected_locked" in events
+
+    clock.advance(minutes=14)
+    assert (
+        client.post(LOGIN, json={"password": PASSWORD}).json()["error"]["retry_after_seconds"] == 60
+    )
+    clock.advance(minutes=1)
+    assert client.post(LOGIN, json={"password": PASSWORD}).status_code == 204
+
+
+def test_attempts_while_locked_are_not_counted_and_count_restarts_after_unlock():
+    clock = FakeClock()
+    client = TestClient(_app_with_clock(clock))
+    _fail(client, 5)
+    for _ in range(3):
+        assert client.post(LOGIN, json={"password": "wrong"}).status_code == 429
+
+    clock.advance(minutes=15)
+    _fail(client, 4)
+
+    assert client.post(LOGIN, json={"password": PASSWORD}).status_code == 204
+
+
+def test_success_resets_the_failure_count():
+    client = TestClient(_app_with_clock(FakeClock()))
+    _fail(client, 4)
+    assert client.post(LOGIN, json={"password": PASSWORD}).status_code == 204
+
+    _fail(client, 4)
+
+    assert client.post(LOGIN, json={"password": PASSWORD}).status_code == 204
+
+
+def test_lock_is_per_ip():
+    app = _app_with_clock(FakeClock())
+    attacker = TestClient(app, client=("10.0.0.9", 50000))
+    owner = TestClient(app, client=("10.0.0.2", 50000))
+    _fail(attacker, 5)
+
+    assert attacker.post(LOGIN, json={"password": PASSWORD}).status_code == 429
+    assert owner.post(LOGIN, json={"password": PASSWORD}).status_code == 204
+
+
+def test_malformed_body_does_not_count_as_a_failure():
+    client = TestClient(_app_with_clock(FakeClock()))
+    for _ in range(6):
+        assert (
+            client.post(
+                LOGIN, content=b"{bad", headers={"Content-Type": "application/json"}
+            ).status_code
+            == 400
+        )
+
+    assert client.post(LOGIN, json={"password": PASSWORD}).status_code == 204
+
+
+def test_forwarded_for_header_is_ignored():
+    client = TestClient(_app_with_clock(FakeClock()))
+    for index in range(5):
+        client.post(
+            LOGIN, json={"password": "wrong"}, headers={"X-Forwarded-For": f"10.1.1.{index}"}
+        )
+
+    assert client.post(LOGIN, json={"password": PASSWORD}).status_code == 429

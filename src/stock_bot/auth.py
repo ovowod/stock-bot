@@ -6,6 +6,7 @@
 
 import hmac
 import logging
+import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ logger = logging.getLogger("stock_bot.auth")
 SESSION_COOKIE = "stock_bot_session"
 IDLE_TIMEOUT_SECONDS = 30 * 60
 ABSOLUTE_TIMEOUT_SECONDS = 12 * 60 * 60
+MAX_FAILURES = 5
+LOCK_SECONDS = 15 * 60
 _USER_AGENT_LIMIT = 200
 
 
@@ -41,6 +44,14 @@ class _Session:
     last_seen: float
 
 
+@dataclass
+class _Failures:
+    """IP 하나의 연속 실패 수와 잠금이 풀리는 시각."""
+
+    count: int = 0
+    locked_until: float | None = None
+
+
 def load_password(environ: Mapping[str, str]) -> str:
     """앞뒤 공백도 비밀번호의 일부로 그대로 쓴다. 비었거나 공백뿐이면 시작하지 않는다."""
     password = environ.get("PASSWORD", "")
@@ -56,13 +67,58 @@ class AuthService:
         self._password = password.encode()
         self._clock = clock
         self._session: _Session | None = None
+        # 프록시 뒤에 두지 않으므로 X-Forwarded-For가 아니라 연결한 쪽의 IP로 센다.
+        self._failures: dict[str, _Failures] = {}
+
+    def locked_seconds(self, client: ClientInfo) -> int:
+        """이 IP가 잠겨 있으면 풀릴 때까지 남은 초(올림), 아니면 0이다.
+
+        풀린 잠금은 기록째 지워 실패 수를 0부터 다시 센다.
+        """
+        record = self._failures.get(client.ip)
+        if record is None or record.locked_until is None:
+            return 0
+        remaining = record.locked_until - self._clock()
+        if remaining <= 0:
+            del self._failures[client.ip]
+            return 0
+        log(
+            logger,
+            logging.WARNING,
+            "login_rejected_locked",
+            retry_after_seconds=math.ceil(remaining),
+            **client.log_fields(),
+        )
+        return math.ceil(remaining)
 
     def login(self, password: str, client: ClientInfo) -> str | None:
-        """맞으면 새 세션 ID를 돌려주고 이전 세션은 버린다. 틀리면 None이다."""
+        """맞으면 새 세션 ID를 돌려주고 이전 세션은 버린다. 틀리면 None이다.
+
+        잠긴 IP는 locked_seconds로 먼저 걸러야 한다. 잠긴 동안의 시도는 실패 수에 넣지 않는다.
+        """
         # 문자열을 그대로 compare_digest에 넣으면 ASCII 밖의 글자에서 TypeError가 난다.
         if not hmac.compare_digest(password.encode(), self._password):
-            log(logger, logging.WARNING, "login_failed", **client.log_fields())
+            record = self._failures.setdefault(client.ip, _Failures())
+            record.count += 1
+            log(
+                logger,
+                logging.WARNING,
+                "login_failed",
+                failures=record.count,
+                **client.log_fields(),
+            )
+            if record.count >= MAX_FAILURES:
+                record.locked_until = self._clock() + LOCK_SECONDS
+                log(
+                    logger,
+                    logging.WARNING,
+                    "login_locked",
+                    failures=record.count,
+                    lock_seconds=LOCK_SECONDS,
+                    **client.log_fields(),
+                )
             return None
+        self._failures.pop(client.ip, None)
         if self._session is not None:
             log(logger, logging.INFO, "session_replaced", previous_ip=self._session.client.ip)
         session_id = token_urlsafe(32)

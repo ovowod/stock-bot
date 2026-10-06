@@ -227,3 +227,26 @@ test("입력이 있으면 30분을 다시 센다", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
   await expect(passwordInput(page)).toHaveCount(0);
 });
+
+test("시도 제한에 걸리면 남은 시간을 보여준다", async ({ page }) => {
+  await mockAccount(page);
+  await mockAuth(page);
+  await page.route("**/api/auth/login", (route) =>
+    route.fulfill({
+      status: 429,
+      json: {
+        error: {
+          kind: "login_locked",
+          message: "로그인 시도가 너무 많습니다. 15분 후 다시 시도하세요.",
+          retry_after_seconds: 900,
+        },
+      },
+    }),
+  );
+  await page.goto("/");
+  await passwordInput(page).fill(PASSWORD);
+  await loginButton(page).click();
+
+  await expect(page.getByRole("alert")).toHaveText("로그인 시도가 너무 많습니다. 15분 후 다시 시도하세요.");
+  await expect(page.getByRole("heading", { name: "계좌 확인" })).toHaveCount(0);
+});
