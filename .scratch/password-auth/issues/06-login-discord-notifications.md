@@ -16,5 +16,5 @@ Spec: `.scratch/password-auth/spec.md` (User Stories 16~18, Discord 알림)
 - [x] Discord가 꺼져 있거나 실패해도 로그인은 204다.
 - [x] 입력한 비밀번호는 틀린 것이라도 알림·로그에 없다.
 - [x] 백엔드 테스트: 성공·잠김에서 가짜 Discord에 embed가 나가고 IP·브라우저·OS가 있으며 비밀번호가 없다. Discord 실패에도 로그인 204.
-- [ ] 실제 Discord 확인: 사용자가 로그인해 채널에 알림이 오는지 본다.
+- [x] 실제 Discord 확인: 사용자가 로그인해 채널에 알림이 오는지 본다.
 - [x] 전체 검증 명령 통과.
