@@ -80,6 +80,10 @@ class KiwoomClient:
         secrets.add(*credentials.secrets())
         return credentials
 
+    async def access_token(self, spec: EnvironmentSpec) -> str:
+        """REST 호출과 같은 캐시의 접근 토큰. 실시간 연결의 LOGIN에 쓴다."""
+        return (await self._token(spec)).value
+
     async def call(
         self, spec: EnvironmentSpec, api_id: str, path: str, body: dict[str, Any]
     ) -> dict[str, Any]:
