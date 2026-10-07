@@ -74,11 +74,15 @@ class ClientInfo:
 
 @dataclass(frozen=True)
 class LoginResult:
-    """session_id가 있으면 성공이다. 실패했다면 이번 실패로 IP가 잠겼는지 locked가 알려 준다."""
+    """session_id가 있으면 성공이다.
+
+    retry_after_seconds가 0보다 크면 IP가 잠겨 있다. locked_now는 이번 실패로 막 잠겼다는 뜻이다.
+    """
 
     session_id: str | None
     failures: int = 0
-    locked: bool = False
+    retry_after_seconds: int = 0
+    locked_now: bool = False
 
 
 @dataclass
@@ -115,32 +119,26 @@ class AuthService:
         # 프록시 뒤에 두지 않으므로 X-Forwarded-For가 아니라 연결한 쪽의 IP로 센다.
         self._failures: dict[str, _Failures] = {}
 
-    def locked_seconds(self, client: ClientInfo) -> int:
-        """이 IP가 잠겨 있으면 풀릴 때까지 남은 초(올림), 아니면 0이다.
-
-        풀린 잠금은 기록째 지워 실패 수를 0부터 다시 센다.
-        """
-        record = self._failures.get(client.ip)
-        if record is None or record.locked_until is None:
-            return 0
-        remaining = record.locked_until - self._clock()
-        if remaining <= 0:
-            del self._failures[client.ip]
-            return 0
-        log(
-            logger,
-            logging.WARNING,
-            "login_rejected_locked",
-            retry_after_seconds=math.ceil(remaining),
-            **client.log_fields(),
-        )
-        return math.ceil(remaining)
-
     def login(self, password: str, client: ClientInfo) -> LoginResult:
         """맞으면 새 세션 ID를 돌려주고 이전 세션은 버린다.
 
-        잠긴 IP는 locked_seconds로 먼저 걸러야 한다. 잠긴 동안의 시도는 실패 수에 넣지 않는다.
+        잠긴 IP는 비밀번호를 확인하지 않고, 잠긴 동안의 시도는 실패 수에 넣지 않는다.
         """
+        record = self._failures.get(client.ip)
+        if record is not None and record.locked_until is not None:
+            remaining = math.ceil(record.locked_until - self._clock())
+            if remaining > 0:
+                log(
+                    logger,
+                    logging.WARNING,
+                    "login_rejected_locked",
+                    retry_after_seconds=remaining,
+                    **client.log_fields(),
+                )
+                return LoginResult(None, record.count, retry_after_seconds=remaining)
+            # 풀린 잠금은 기록째 지워 실패 수를 0부터 다시 센다.
+            del self._failures[client.ip]
+
         # 문자열을 그대로 compare_digest에 넣으면 ASCII 밖의 글자에서 TypeError가 난다.
         if not hmac.compare_digest(password.encode(), self._password):
             record = self._failures.setdefault(client.ip, _Failures())
@@ -152,20 +150,23 @@ class AuthService:
                 failures=record.count,
                 **client.log_fields(),
             )
-            if record.count >= MAX_FAILURES:
-                record.locked_until = self._clock() + LOCK_SECONDS
-                log(
-                    logger,
-                    logging.WARNING,
-                    "login_locked",
-                    failures=record.count,
-                    lock_seconds=LOCK_SECONDS,
-                    **client.log_fields(),
-                )
-            return LoginResult(None, record.count, locked=record.count >= MAX_FAILURES)
+            if record.count < MAX_FAILURES:
+                return LoginResult(None, record.count)
+            record.locked_until = self._clock() + LOCK_SECONDS
+            log(
+                logger,
+                logging.WARNING,
+                "login_locked",
+                failures=record.count,
+                lock_seconds=LOCK_SECONDS,
+                **client.log_fields(),
+            )
+            return LoginResult(None, record.count, LOCK_SECONDS, locked_now=True)
+
         self._failures.pop(client.ip, None)
         if self._session is not None:
-            log(logger, logging.INFO, "session_replaced", previous_ip=self._session.client.ip)
+            # 교체되는 이전 세션의 접속 정보를 남긴다.
+            log(logger, logging.INFO, "session_replaced", **self._session.client.log_fields())
         session_id = token_urlsafe(32)
         now = self._clock()
         self._session = _Session(session_id, client, now, now)
@@ -174,28 +175,33 @@ class AuthService:
 
     def authenticate(self, session_id: str | None) -> bool:
         """현재 세션이고 만료되지 않았으면 마지막 요청 시각을 갱신하고 True다. 만료됐으면 지운다."""
-        if self._session is None or not self.is_valid(session_id):
+        session = self._current(session_id)
+        if session is None:
             return False
         now = self._clock()
-        if now - self._session.logged_in_at >= ABSOLUTE_TIMEOUT_SECONDS:
+        if now - session.logged_in_at >= ABSOLUTE_TIMEOUT_SECONDS:
             reason = "absolute"
-        elif now - self._session.last_seen >= IDLE_TIMEOUT_SECONDS:
+        elif now - session.last_seen >= IDLE_TIMEOUT_SECONDS:
             reason = "idle"
         else:
-            self._session.last_seen = now
+            session.last_seen = now
             return True
-        log(logger, logging.INFO, "session_expired", reason=reason, ip=self._session.client.ip)
+        log(logger, logging.INFO, "session_expired", reason=reason, **session.client.log_fields())
         self._session = None
         return False
 
     def logout(self, session_id: str | None) -> None:
         """요청한 쪽의 세션일 때만 끝낸다. 쿠키가 없거나 예전 쿠키면 현재 세션은 그대로 둔다."""
-        if self._session is None or not self.is_valid(session_id):
+        session = self._current(session_id)
+        if session is None:
             return
-        log(logger, logging.INFO, "logout", ip=self._session.client.ip)
+        log(logger, logging.INFO, "logout", **session.client.log_fields())
         self._session = None
 
-    def is_valid(self, session_id: str | None) -> bool:
+    def _current(self, session_id: str | None) -> _Session | None:
+        """session_id가 현재 세션의 것이면 그 세션, 아니면 None이다."""
         if session_id is None or self._session is None:
-            return False
-        return hmac.compare_digest(session_id.encode(), self._session.id.encode())
+            return None
+        if not hmac.compare_digest(session_id.encode(), self._session.id.encode()):
+            return None
+        return self._session

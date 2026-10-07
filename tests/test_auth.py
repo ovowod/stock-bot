@@ -295,19 +295,26 @@ def _fail(client: TestClient, times: int) -> None:
         assert client.post(LOGIN, json={"password": "wrong"}).status_code == 401
 
 
-def test_five_failures_lock_the_ip_for_15_minutes(caplog):
+def _lock(client: TestClient) -> httpx.Response:
+    _fail(client, 4)
+    return client.post(LOGIN, json={"password": "wrong"})
+
+
+def test_fifth_failure_locks_the_ip_for_15_minutes(caplog):
     caplog.set_level(logging.INFO, logger="stock_bot")
     clock = FakeClock()
     client = TestClient(_app_with_clock(clock))
-    _fail(client, 5)
 
-    locked = client.post(LOGIN, json={"password": PASSWORD})
+    fifth = _lock(client)
 
-    assert locked.status_code == 429
-    error = locked.json()["error"]
+    assert fifth.status_code == 429
+    error = fifth.json()["error"]
     assert error["kind"] == "login_locked"
     assert error["retry_after_seconds"] == 15 * 60
     assert "15분 후" in error["message"]
+
+    locked = client.post(LOGIN, json={"password": PASSWORD})
+    assert locked.status_code == 429
     events = [r.getMessage() for r in caplog.records]
     assert events.count("login_locked") == 1
     assert "login_rejected_locked" in events
@@ -323,7 +330,7 @@ def test_five_failures_lock_the_ip_for_15_minutes(caplog):
 def test_attempts_while_locked_are_not_counted_and_count_restarts_after_unlock():
     clock = FakeClock()
     client = TestClient(_app_with_clock(clock))
-    _fail(client, 5)
+    _lock(client)
     for _ in range(3):
         assert client.post(LOGIN, json={"password": "wrong"}).status_code == 429
 
@@ -347,7 +354,7 @@ def test_lock_is_per_ip():
     app = _app_with_clock(FakeClock())
     attacker = TestClient(app, client=("10.0.0.9", 50000))
     owner = TestClient(app, client=("10.0.0.2", 50000))
-    _fail(attacker, 5)
+    _lock(attacker)
 
     assert attacker.post(LOGIN, json={"password": PASSWORD}).status_code == 429
     assert owner.post(LOGIN, json={"password": PASSWORD}).status_code == 204
@@ -374,3 +381,21 @@ def test_forwarded_for_header_is_ignored():
         )
 
     assert client.post(LOGIN, json={"password": PASSWORD}).status_code == 429
+
+
+def test_session_and_rejection_logs_carry_access_info(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    agent = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"}
+    client = make_client(domestic_fake())
+    TestClient(client.app).get(ACCOUNT, headers=agent)
+    client.post(LOGIN, json={"password": PASSWORD}, headers=agent)
+    client.post(LOGOUT, headers=agent)
+    client.post(LOGIN, json={"password": PASSWORD}, headers={**agent, "Origin": "http://evil.test"})
+
+    for event in ("unauthorized_request", "session_replaced", "logout", "origin_rejected"):
+        record = next(r for r in caplog.records if r.getMessage() == event)
+        assert record.fields["ip"] == "testclient", event
+        assert "device" in record.fields, event
+        assert "user_agent" in record.fields, event
+    logout = next(r for r in caplog.records if r.getMessage() == "logout")
+    assert logout.fields["device"] == "Firefox / Linux"

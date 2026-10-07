@@ -18,13 +18,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from stock_bot.account import AccountService
-from stock_bot.auth import (
-    LOCK_SECONDS,
-    SESSION_COOKIE,
-    AuthService,
-    ClientInfo,
-    load_password,
-)
+from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
 from stock_bot.config import ENVIRONMENTS, LOG_DIR, PROJECT_ROOT, load_env_file, parse_environment
 from stock_bot.errors import AppError
 from stock_bot.kiwoom import KST, KiwoomClient
@@ -93,6 +87,7 @@ def create_app(
                 "origin_rejected",
                 path=path,
                 origin=request.headers.get("origin"),
+                **_client_info(request).log_fields(),
             )
             return _error_response(
                 403, "forbidden_origin", "다른 사이트에서 온 요청은 받지 않습니다.", {}
@@ -102,7 +97,13 @@ def create_app(
             and path not in PUBLIC_API_PATHS
             and not auth.authenticate(request.cookies.get(SESSION_COOKIE))
         ):
-            log(logger, logging.WARNING, "unauthorized_request", path=path)
+            log(
+                logger,
+                logging.WARNING,
+                "unauthorized_request",
+                path=path,
+                **_client_info(request).log_fields(),
+            )
             return _error_response(401, "unauthorized", "로그인이 필요합니다.", {})
         return await call_next(request)
 
@@ -161,34 +162,31 @@ def create_app(
         if not isinstance(password, str):
             # 보낸 값은 응답과 로그에 담지 않는다. 비밀번호가 들어 있을 수 있다.
             raise AppError("invalid_request", "요청 형식이 올바르지 않습니다.", 400)
-        client = ClientInfo(
-            request.client.host if request.client else "-",
-            request.headers.get("user-agent", ""),
-        )
-        retry_after = auth.locked_seconds(client)
-        if retry_after:
-            raise AppError(
-                "login_locked",
-                f"로그인 시도가 너무 많습니다. {math.ceil(retry_after / 60)}분 후 다시 시도하세요.",
-                429,
-                {"retry_after_seconds": retry_after},
-            )
+        client = _client_info(request)
         result = auth.login(password, client)
         now = datetime.now(KST)
-        if result.session_id is None:
-            if result.locked:
-                until = now + timedelta(seconds=LOCK_SECONDS)
-                notify(
-                    _access_embed(
-                        "로그인 시도 제한",
-                        _LOCK_COLOR,
-                        client,
-                        [
-                            EmbedField("연속 실패", f"{result.failures}회", inline=True),
-                            EmbedField("풀리는 시각", _kst(until), inline=True),
-                        ],
-                    )
+        if result.locked_now:
+            until = now + timedelta(seconds=result.retry_after_seconds)
+            notify(
+                _access_embed(
+                    "로그인 시도 제한",
+                    _LOCK_COLOR,
+                    client,
+                    [
+                        EmbedField("연속 실패", f"{result.failures}회", inline=True),
+                        EmbedField("풀리는 시각", _kst(until), inline=True),
+                    ],
                 )
+            )
+        if result.retry_after_seconds:
+            minutes = math.ceil(result.retry_after_seconds / 60)
+            raise AppError(
+                "login_locked",
+                f"로그인 시도가 너무 많습니다. {minutes}분 후 다시 시도하세요.",
+                429,
+                {"retry_after_seconds": result.retry_after_seconds},
+            )
+        if result.session_id is None:
             raise AppError("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
         notify(_access_embed("로그인", _LOGIN_COLOR, client, [EmbedField("시각", _kst(now))]))
         response = Response(status_code=204)
@@ -291,6 +289,13 @@ def _access_embed(title: str, color: int, client: ClientInfo, extra: list[EmbedF
 
 def _kst(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%d %H:%M:%S KST")
+
+
+def _client_info(request: Request) -> ClientInfo:
+    return ClientInfo(
+        request.client.host if request.client else "-",
+        request.headers.get("user-agent", ""),
+    )
 
 
 def _cookie_options(request: Request) -> dict[str, Any]:

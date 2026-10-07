@@ -382,7 +382,8 @@ test("실패 토스트가 떠 있을 때 로그아웃하면 토스트가 사라�
   const failure = page.getByRole("alert").filter({ hasText: "주문하지 못했습니다" });
   await expect(failure).toBeVisible();
 
-  // 토스트가 패널의 닫기 버튼을 가리므로 Escape로 닫는다.
+  // 토스트가 패널의 닫기 버튼을 가리므로 Escape로 닫는다. 전송이 끝나야 닫을 수 있다.
+  await expect(dialog.getByRole("button", { name: "닫기", exact: true })).toBeEnabled();
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await clickLogout(page);

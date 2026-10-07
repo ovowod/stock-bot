@@ -41,11 +41,7 @@ export async function mockAuth(page: Page): Promise<{ loginRequests: string[]; l
 /** 대시보드를 열고 로그인 화면에서 로그인한다. 가짜 /api 응답은 이 함수를 부르기 전에 등록한다. */
 export async function openDashboard(page: Page): ReturnType<typeof mockAuth> {
   const auth = await mockAuth(page);
-  await page.goto("/");
-  await page.getByLabel("비밀번호").fill(PASSWORD);
-  await page.getByRole("button", { name: "로그인" }).click();
-  // 로그인 직후에는 대시보드가 아직 그려지지 않았다. 다음 단계가 화면을 찾기 전에 기다린다.
-  await expect(page.getByRole("radiogroup", { name: "투자 환경" }).first()).toBeVisible();
+  await loginThroughScreen(page, PASSWORD);
   return auth;
 }
 
@@ -53,8 +49,13 @@ export async function openDashboard(page: Page): ReturnType<typeof mockAuth> {
 export async function openLiveDashboard(page: Page): Promise<void> {
   const password = process.env.PASSWORD;
   if (!password) throw new Error("PASSWORD 환경변수를 설정한 뒤 실행하세요.");
+  await loginThroughScreen(page, password);
+}
+
+async function loginThroughScreen(page: Page, password: string): Promise<void> {
   await page.goto("/");
   await page.getByLabel("비밀번호").fill(password);
   await page.getByRole("button", { name: "로그인" }).click();
+  // 로그인 직후에는 대시보드가 아직 그려지지 않았다. 다음 단계가 화면을 찾기 전에 기다린다.
   await expect(page.getByRole("radiogroup", { name: "투자 환경" }).first()).toBeVisible();
 }
