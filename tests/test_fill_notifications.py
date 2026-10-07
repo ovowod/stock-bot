@@ -336,14 +336,17 @@ async def test_failed_login_gets_a_new_token_before_reconnecting(fast_reconnect)
     assert second.sent[0]["token"] == kiwoom.issued_tokens[1]
 
 
-async def test_no_login_reply_reconnects(fast_reconnect, monkeypatch):
+async def test_no_login_reply_reconnects_with_a_new_token(fast_reconnect, monkeypatch):
     monkeypatch.setattr(fill_watch, "RESPONSE_TIMEOUT_SECONDS", 0.05)
     realtime = FakeRealtime(login_reply=[None, OK_LOGIN])
     async with running(realtime):
         await realtime.wait_registered()
 
-    assert realtime.connections[0].closed
-    assert realtime.connections[1].sent_trnm() == ["LOGIN", "REG"]
+    first, second = realtime.connections
+    assert first.closed
+    assert second.sent_trnm() == ["LOGIN", "REG"]
+    # 응답 없이 무시된 토큰일 수 있으므로 다음 연결은 새 토큰으로 한다.
+    assert first.sent[0]["token"] != second.sent[0]["token"]
 
 
 async def test_wait_grows_while_registration_fails_and_resets_after_success(fast_reconnect, caplog):
@@ -380,3 +383,43 @@ async def test_web_api_keeps_working_while_realtime_fails(fast_reconnect):
 
     assert login.status_code == 204
     assert environments.status_code == 200
+
+
+async def test_error_while_closing_still_reconnects(fast_reconnect, caplog):
+    realtime = FakeRealtime()
+    async with running(realtime):
+        [first] = await realtime.wait_registered()
+        first.close_error = OSError("close failed")
+        first.drop()
+        await realtime.wait_registered(2)
+
+    assert "realtime_close_failed" in [r.getMessage() for r in caplog.records]
+
+
+async def test_undecodable_frame_is_skipped_without_reconnecting(caplog):
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    async with running(realtime, discord):
+        [connection] = await realtime.wait_registered()
+        connection.push_raw(b"\xff\xfe")
+        connection.push(fill_event())
+        await discord.wait_for(1)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert "realtime_message_malformed" in messages
+    assert "realtime_disconnected" not in messages
+
+
+async def test_malformed_fill_time_is_logged(caplog):
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    async with running(realtime, discord):
+        [connection] = await realtime.wait_registered()
+        connection.push(fill_event(**{"908": "9410"}))
+        await discord.wait_for(1)
+
+    assert fields(discord.payloads[0])["체결 시각"] == "확인 불가"
+    unreadable = [
+        r.fields["key"] for r in caplog.records if r.getMessage() == "fill_value_unreadable"
+    ]
+    assert unreadable == ["908"]

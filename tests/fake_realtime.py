@@ -13,7 +13,8 @@ class FakeConnection:
         self.url = url
         self.sent: list[dict[str, Any]] = []
         self.closed = False
-        self._inbox: asyncio.Queue[str | None] = asyncio.Queue()
+        self.close_error: Exception | None = None
+        self._inbox: asyncio.Queue[str | bytes | None] = asyncio.Queue()
         # None이면 응답하지 않는다.
         self._replies = {"LOGIN": login_reply, "REG": reg_reply}
 
@@ -24,7 +25,7 @@ class FakeConnection:
         if reply is not None:
             self.push(reply)
 
-    async def recv(self) -> str:
+    async def recv(self) -> str | bytes:
         message = await self._inbox.get()
         if message is None:
             raise ConnectionResetError("fake connection dropped")
@@ -32,11 +33,13 @@ class FakeConnection:
 
     async def close(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
     def push(self, message: dict[str, Any]) -> None:
         self._inbox.put_nowait(json.dumps(message, ensure_ascii=False))
 
-    def push_raw(self, text: str) -> None:
+    def push_raw(self, text: str | bytes) -> None:
         self._inbox.put_nowait(text)
 
     def drop(self) -> None:

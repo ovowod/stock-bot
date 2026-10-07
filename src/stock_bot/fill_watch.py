@@ -150,8 +150,9 @@ class FillWatcher:
                     queue.put_nowait(message)
         except _RealtimeFailure as failure:
             log(logger, logging.ERROR, failure.event, target=target, **failure.fields)
-            if failure.event == "realtime_login_failed":
-                # 만료되거나 무효가 된 토큰일 수 있다. 다음 연결은 새 토큰으로 한다.
+            if failure.fields.get("trnm") == "LOGIN":
+                # LOGIN이 거부되거나 응답이 없으면 만료·무효 토큰일 수 있다.
+                # 다음 연결은 새 토큰으로 한다.
                 await self._kiwoom.discard_access_token(spec, token)
                 log(logger, logging.WARNING, "realtime_token_discarded", target=target)
         except Exception as exc:
@@ -164,7 +165,18 @@ class FillWatcher:
                 cause=str(exc),
             )
         finally:
-            await connection.close()
+            try:
+                await connection.close()
+            except Exception as exc:
+                # 여기서 오류가 새면 재연결 반복이 끝나 체결 감시가 조용히 멈춘다.
+                log(
+                    logger,
+                    logging.WARNING,
+                    "realtime_close_failed",
+                    target=target,
+                    error_type=type(exc).__name__,
+                    cause=str(exc),
+                )
         return registered
 
     async def _work(self, spec: EnvironmentSpec, queue: asyncio.Queue[dict[str, Any]]) -> None:
@@ -234,6 +246,7 @@ async def _expect(connection: RealtimeConnection, trnm: str) -> dict[str, Any]:
     if str(message.get("return_code")) != "0":
         raise _RealtimeFailure(
             "realtime_login_failed" if trnm == "LOGIN" else "realtime_register_failed",
+            trnm=trnm,
             return_code=message.get("return_code"),
             return_msg=message.get("return_msg"),
         )
@@ -244,7 +257,7 @@ async def _receive(connection: RealtimeConnection) -> dict[str, Any]:
     """PING이 아닌 다음 메시지를 받는다. PING은 받은 그대로 돌려보낸다."""
     while True:
         raw = await connection.recv()
-        text = raw.decode() if isinstance(raw, bytes) else raw
+        text = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
         try:
             message = json.loads(text)
         except ValueError:
@@ -326,7 +339,10 @@ def _side(values: dict[str, Any]) -> str | None:
 
 def _time(values: dict[str, Any], key: str) -> str | None:
     text = _text(values, key)
-    if text is None or len(text) != 6 or not text.isdigit():
+    if text is None:
+        return None
+    if len(text) != 6 or not text.isdigit():
+        log(logger, logging.WARNING, "fill_value_unreadable", key=key, raw=text[:40])
         return None
     return f"{text[:2]}:{text[2:4]}:{text[4:]}"
 
