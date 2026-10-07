@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openDashboard } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 주문 요청도 가짜 서버가 받으며 키움 서버는 호출되지 않는다.
 
@@ -78,7 +79,7 @@ async function mockApi(page: Page, order: (request: OrderRequest) => Reply = acc
 }
 
 async function openPanel(page: Page, environment = "국내 모의", name = "SK하이닉스", price = "190,000") {
-  await page.goto("/");
+  await openDashboard(page);
   await page.getByRole("radio", { name: environment }).filter({ visible: true }).click();
   const menu = page.getByRole("button", { name: "메뉴 열기" });
   if (await menu.isVisible()) await menu.click();
@@ -345,4 +346,64 @@ test("전송 중에는 닫기 버튼, Esc, 바깥 영역으로 패널을 닫을 
 
   await expect(page.getByRole("status").filter({ hasText: "주문번호 00040" })).toBeVisible();
   await expect(dialog).toHaveCount(0);
+});
+
+test("로그인이 만료되어 주문이 401이면 확인 불가가 아니라 주문하지 않았다고 로그인 화면에 알린다", async ({ page }) => {
+  await mockApi(page, () => ({
+    status: 401,
+    body: { error: { kind: "unauthorized", message: "로그인이 필요합니다.", request_id: "req-auth-1" } },
+  }));
+  const dialog = await openPanel(page);
+  await dialog.getByLabel("수량 (주)").fill("7");
+  await dialog.getByRole("button", { name: "매수" }).click();
+  await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+
+  await expect(page.getByLabel("비밀번호")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveText("로그인이 만료되어 주문하지 않았습니다. 다시 로그인하세요.");
+  await expect(unknownAlert(page)).toHaveCount(0);
+});
+
+async function clickLogout(page: Page) {
+  const menu = page.getByRole("button", { name: "메뉴 열기" });
+  // 모바일에서는 토스트가 머리글의 메뉴 버튼을 덮으므로 클릭 이벤트를 직접 보낸다.
+  if (await menu.isVisible()) await menu.dispatchEvent("click");
+  await page.getByRole("button", { name: "로그아웃" }).filter({ visible: true }).click();
+}
+
+test("실패 토스트가 떠 있을 때 로그아웃하면 토스트가 사라진다", async ({ page }) => {
+  await mockApi(page, () => ({
+    status: 502,
+    body: { error: { kind: "kiwoom_error", message: "키움 오류 [20] 주문가능금액이 부족합니다", request_id: "req-err-1" } },
+  }));
+  const dialog = await openPanel(page);
+  await dialog.getByLabel("수량 (주)").fill("7");
+  await dialog.getByRole("button", { name: "매수" }).click();
+  await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+  const failure = page.getByRole("alert").filter({ hasText: "주문하지 못했습니다" });
+  await expect(failure).toBeVisible();
+
+  // 토스트가 패널의 닫기 버튼을 가리므로 Escape로 닫는다. 전송이 끝나야 닫을 수 있다.
+  await expect(dialog.getByRole("button", { name: "닫기", exact: true })).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await clickLogout(page);
+
+  await expect(page.getByLabel("비밀번호")).toBeVisible();
+  await expect(failure).toHaveCount(0);
+});
+
+test("로그인 세션이 끝난 뒤 도착한 주문 응답은 토스트로 띄우지 않는다", async ({ page }) => {
+  await mockApi(page, (request) => ({ ...accepted("00077")(request), delayMs: 1500 }));
+  const dialog = await openPanel(page);
+  await dialog.getByLabel("수량 (주)").fill("7");
+  await dialog.getByRole("button", { name: "매수" }).click();
+  await confirmation(page).getByRole("button", { name: "주문하기" }).click();
+
+  // 브라우저가 저장해 둔 페이지를 뒤로가기로 다시 보여준 상황을 흉내 낸다.
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+  await expect(page.getByLabel("비밀번호")).toBeVisible();
+  await page.waitForTimeout(1800);
+
+  await expect(page.getByText("주문이 접수되었습니다")).toHaveCount(0);
+  await expect(page.getByText("주문번호 00077")).toHaveCount(0);
 });

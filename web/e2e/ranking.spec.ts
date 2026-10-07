@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { openDashboard } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 키움 서버나 실전 서버는 호출되지 않는다.
 
@@ -65,7 +66,7 @@ async function mockRankings(page: Page, handler: (request: Seen) => Reply) {
 }
 
 async function openRanking(page: Page) {
-  await page.goto("/");
+  await openDashboard(page);
   await selectRankingMenu(page);
 }
 
@@ -86,7 +87,7 @@ async function expectNoHorizontalScroll(page: Page) {
 
 test("처음 화면은 계좌 확인이고, 시세 → 순위 메뉴로 거래대금 상위를 본다", async ({ page }, info) => {
   await mockRankings(page, ({ environment, kind }) => ({ body: ranking(environment, kind, [DOMESTIC_ITEM]) }));
-  await page.goto("/");
+  await openDashboard(page);
   await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
 
   await openRanking(page);
@@ -362,7 +363,7 @@ test("집계 구간을 바꾸면 인기 종목만 다시 조회하고, 거래소
 // 실제 서버 확인용. 백엔드를 띄운 상태에서 `pnpm test:live`로만 실행한다. 모의 환경만 호출한다.
 for (const label of ["국내 모의", "미국 모의"] as const) {
   test(`@live ${label} 순위 실제 모의 서버 조회`, async ({ page }, info) => {
-    await page.goto("/");
+    await openDashboard(page);
     await page.getByRole("radio", { name: label }).click();
     await selectRankingMenu(page);
     for (const title of ["거래대금 상위", "상승률 상위", "거래량 상위", "인기 종목"]) {

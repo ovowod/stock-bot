@@ -284,6 +284,7 @@ async def _concurrent_searches(handler, count: int = 3) -> list[httpx.Response]:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
+        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
         pending = [asyncio.create_task(client.get(US, params={"q": "AAPL"})) for _ in range(count)]
         return await asyncio.gather(*pending)
 

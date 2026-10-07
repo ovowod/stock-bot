@@ -33,6 +33,8 @@ def make_client() -> Iterator[Callable[..., TestClient]]:
             today=today,
         )
         client = TestClient(app)
+        password = (FAKE_ENV if environ is None else environ).get("PASSWORD", "")
+        client.post("/api/auth/login", json={"password": password})
         clients.append(client)
         return client
 

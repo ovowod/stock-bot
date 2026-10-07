@@ -370,6 +370,7 @@ async def test_concurrent_sells_of_one_stock_check_the_balance_one_at_a_time():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
+        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
         orders = [sell_order(order_key=f"race-{n}") for n in range(2)]
         pending = [asyncio.create_task(client.post(DOMESTIC_URL, json=o)) for o in orders]
         await asyncio.sleep(0.05)

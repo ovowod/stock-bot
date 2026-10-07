@@ -1,8 +1,20 @@
-import { ChevronRight, Menu, Search, ShieldAlert, Sparkles, Trophy, Wallet, X, type LucideIcon } from "lucide-react";
+import {
+  ChevronRight,
+  LogOut,
+  Menu,
+  Search,
+  ShieldAlert,
+  Sparkles,
+  Trophy,
+  Wallet,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { EnvironmentValue } from "./api";
 import { ENVIRONMENTS, findEnvironment, loadEnvironment, saveEnvironment } from "./environments";
 import { AccountPage } from "./features/account/AccountPage";
+import { useLogout } from "./features/auth/AuthGate";
 import { OrderPanelProvider } from "./features/order/OrderPanel";
 import { RankingPage } from "./features/ranking/RankingPage";
 import { StockSearchPage } from "./features/search/StockSearchPage";
@@ -108,8 +120,9 @@ export default function App() {
       </header>
 
       <div className="flex flex-1">
-        <aside className="hidden w-60 shrink-0 bg-surface md:block">
+        <aside className="hidden w-60 shrink-0 flex-col bg-surface md:flex">
           <Navigation activeId={feature.id} onSelect={setFeatureId} />
+          <LogoutButton />
         </aside>
 
         {drawerOpen && (
@@ -139,6 +152,7 @@ export default function App() {
                   setDrawerOpen(false);
                 }}
               />
+              <LogoutButton />
             </div>
           </div>
         )}
@@ -215,5 +229,21 @@ function Navigation({ activeId, onSelect }: { activeId: string; onSelect: (id: s
         </div>
       ))}
     </nav>
+  );
+}
+
+function LogoutButton() {
+  const logout = useLogout();
+  return (
+    <div className="px-3 pb-4">
+      <button
+        type="button"
+        onClick={logout}
+        className="flex w-full items-center gap-3 rounded-2xl px-3.5 py-3 text-[15px] font-semibold text-sub transition hover:bg-canvas"
+      >
+        <LogOut className="size-5" aria-hidden />
+        로그아웃
+      </button>
+    </div>
   );
 }

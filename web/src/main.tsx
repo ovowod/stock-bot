@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { AuthGate } from "./features/auth/AuthGate";
 import { ToastProvider } from "./features/toast/Toasts";
 import "./index.css";
 
@@ -7,6 +8,8 @@ import "./index.css";
 // 짧은 간격으로 두 번 부르면 호출 한도 오류(1700, 유량=1)를 돌려주므로 쓰지 않는다.
 createRoot(document.getElementById("root")!).render(
   <ToastProvider>
-    <App />
+    <AuthGate>
+      <App />
+    </AuthGate>
   </ToastProvider>,
 );

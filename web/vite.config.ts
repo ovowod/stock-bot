@@ -7,7 +7,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://127.0.0.1:8000",
+      // 문자열로만 적으면 Vite가 Host를 대상 주소로 바꿔, 서버의 출처 검사가 로그인을 거부한다.
+      "/api": { target: "http://127.0.0.1:8000", changeOrigin: false },
     },
   },
 });
