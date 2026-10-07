@@ -11,7 +11,7 @@ from stock_bot import fill_watch
 from stock_bot.app import create_app
 from stock_bot.notification import DiscordNotifier
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom
-from tests.fake_realtime import FakeRealtime, fill_event
+from tests.fake_realtime import OK_LOGIN, OK_REG, FakeRealtime, fill_event
 
 pytestmark = pytest.mark.anyio
 
@@ -281,3 +281,102 @@ async def test_malformed_message_is_logged_and_watching_continues(caplog):
 
     assert "realtime_message_malformed" in [r.getMessage() for r in caplog.records]
     assert "realtime_disconnected" not in [r.getMessage() for r in caplog.records]
+
+
+FAILED_LOGIN = {"trnm": "LOGIN", "return_code": 1, "return_msg": "token invalid"}
+FAILED_REG = {"trnm": "REG", "return_code": 1, "return_msg": "x"}
+
+
+@pytest.fixture
+def fast_reconnect(monkeypatch):
+    monkeypatch.setattr(fill_watch, "RECONNECT_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(fill_watch, "RECONNECT_MAX_SECONDS", 0.04)
+
+
+def waits(caplog) -> list[float]:
+    return [
+        r.fields["wait_seconds"]
+        for r in caplog.records
+        if r.getMessage() == "realtime_reconnect_wait"
+    ]
+
+
+async def test_reconnects_and_registers_again_after_drop(fast_reconnect):
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    async with running(realtime, discord):
+        [first] = await realtime.wait_registered()
+        first.drop()
+        second = (await realtime.wait_registered(2))[1]
+        second.push(fill_event())
+        await discord.wait_for(1)
+
+    assert first.closed
+    assert second.sent_trnm() == ["LOGIN", "REG"]
+    assert fields(discord.payloads[0])["이번 체결"] == "3주 @ 60,000원 (180,000원)"
+
+
+async def test_retries_when_connection_is_refused(fast_reconnect, caplog):
+    realtime = FakeRealtime(refuse=2)
+    async with running(realtime):
+        await realtime.wait_registered()
+
+    assert realtime.attempts == 3
+    assert [r.getMessage() for r in caplog.records].count("realtime_connect_failed") == 2
+
+
+async def test_failed_login_gets_a_new_token_before_reconnecting(fast_reconnect):
+    realtime = FakeRealtime(login_reply=[FAILED_LOGIN, OK_LOGIN])
+    kiwoom = FakeKiwoom()
+    async with running(realtime, kiwoom=kiwoom):
+        await realtime.wait_registered()
+
+    first, second = realtime.connections
+    assert first.sent[0]["token"] == kiwoom.issued_tokens[0]
+    assert second.sent[0]["token"] == kiwoom.issued_tokens[1]
+
+
+async def test_no_login_reply_reconnects(fast_reconnect, monkeypatch):
+    monkeypatch.setattr(fill_watch, "RESPONSE_TIMEOUT_SECONDS", 0.05)
+    realtime = FakeRealtime(login_reply=[None, OK_LOGIN])
+    async with running(realtime):
+        await realtime.wait_registered()
+
+    assert realtime.connections[0].closed
+    assert realtime.connections[1].sent_trnm() == ["LOGIN", "REG"]
+
+
+async def test_wait_grows_while_registration_fails_and_resets_after_success(fast_reconnect, caplog):
+    realtime = FakeRealtime(reg_reply=[FAILED_REG, FAILED_REG, FAILED_REG, FAILED_REG, OK_REG])
+    async with running(realtime):
+        registered = (await realtime.wait_registered(5))[4]
+        registered.drop()
+        await wait_until(lambda: len(waits(caplog)) >= 5)
+
+    # 연결은 되지만 REG가 실패하면 간격이 늘어나고, 등록에 성공한 뒤 끊기면 처음으로 돌아간다.
+    assert waits(caplog)[:5] == [0.01, 0.02, 0.04, 0.04, 0.01]
+
+
+async def test_shutdown_stops_waiting_to_reconnect(monkeypatch):
+    monkeypatch.setattr(fill_watch, "RECONNECT_INITIAL_SECONDS", 30)
+    realtime = FakeRealtime(reg_reply=FAILED_REG)
+    started = asyncio.get_running_loop().time()
+    async with running(realtime):
+        await wait_until(lambda: bool(realtime.connections) and realtime.connections[0].closed)
+
+    assert asyncio.get_running_loop().time() - started < 5
+    assert len(realtime.connections) == 1
+
+
+async def test_web_api_keeps_working_while_realtime_fails(fast_reconnect):
+    realtime = FakeRealtime(reg_reply=FAILED_REG)
+    async with running(realtime) as app:
+        await wait_until(lambda: len(realtime.connections) >= 2)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            login = await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
+            environments = await client.get("/api/environments")
+
+    assert login.status_code == 204
+    assert environments.status_code == 200

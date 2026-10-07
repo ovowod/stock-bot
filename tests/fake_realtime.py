@@ -48,13 +48,24 @@ class FakeConnection:
 
 
 class FakeRealtime:
-    def __init__(self, login_reply: Any = OK_LOGIN, reg_reply: Any = OK_REG) -> None:
+    """login_reply·reg_reply에 목록을 주면 연결 순서대로 하나씩 쓰고, 마지막 값을 계속 쓴다.
+    refuse는 앞에서부터 거부할 연결 수다."""
+
+    def __init__(
+        self, login_reply: Any = OK_LOGIN, reg_reply: Any = OK_REG, refuse: int = 0
+    ) -> None:
         self.login_reply = login_reply
         self.reg_reply = reg_reply
+        self.refuse = refuse
+        self.attempts = 0
         self.connections: list[FakeConnection] = []
 
     async def __call__(self, url: str) -> FakeConnection:
-        connection = FakeConnection(url, self.login_reply, self.reg_reply)
+        self.attempts += 1
+        if self.attempts <= self.refuse:
+            raise ConnectionRefusedError("fake refused")
+        index = len(self.connections)
+        connection = FakeConnection(url, _nth(self.login_reply, index), _nth(self.reg_reply, index))
         self.connections.append(connection)
         return connection
 
@@ -66,6 +77,12 @@ class FakeRealtime:
                 return registered
             await asyncio.sleep(0.01)
         raise AssertionError(f"REG를 보낸 연결 {count}개를 기다렸지만 {len(registered)}개")
+
+
+def _nth(reply: Any, index: int) -> Any:
+    if isinstance(reply, list):
+        return reply[min(index, len(reply) - 1)]
+    return reply
 
 
 def fill_event(**overrides: str) -> dict[str, Any]:

@@ -32,8 +32,11 @@ class RealtimeConnection(Protocol):
 
 RealtimeConnect = Callable[[str], Awaitable[RealtimeConnection]]
 
-# LOGIN·REG 응답을 기다리는 시간. 넘으면 연결을 닫는다.
+# LOGIN·REG 응답을 기다리는 시간. 넘으면 연결을 닫고 다시 연결한다.
 RESPONSE_TIMEOUT_SECONDS = 10.0
+# 다시 연결하기 전 기다리는 시간. 실패가 이어지면 두 배씩 늘리고, 등록에 성공하면 처음으로 되돌린다.
+RECONNECT_INITIAL_SECONDS = 1.0
+RECONNECT_MAX_SECONDS = 60.0
 
 # 지켜볼 투자 환경과 실시간 항목. 00은 국내 주문체결이다.
 WATCHED = ((ENVIRONMENTS[Environment.DOMESTIC_PAPER], "00"),)
@@ -93,14 +96,23 @@ class FillWatcher:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         worker = asyncio.create_task(self._work(spec, queue))
         try:
-            await self._session(spec, realtime_type, queue)
+            # 끊긴 동안의 체결은 보충하지 않는다. 다시 연결해 등록만 한다.
+            delay = RECONNECT_INITIAL_SECONDS
+            while True:
+                if await self._session(spec, realtime_type, queue):
+                    delay = RECONNECT_INITIAL_SECONDS
+                log(logger, logging.WARNING, "realtime_reconnect_wait", wait_seconds=delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, RECONNECT_MAX_SECONDS)
         finally:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
 
     async def _session(
         self, spec: EnvironmentSpec, realtime_type: str, queue: asyncio.Queue[dict[str, Any]]
-    ) -> None:
+    ) -> bool:
+        """연결 하나가 끝날 때까지 받는다. LOGIN과 REG까지 성공했으면 True다."""
+        registered = False
         target = spec.realtime_url
         try:
             token = await self._kiwoom.access_token(spec)
@@ -114,7 +126,7 @@ class FillWatcher:
                 error_type=type(exc).__name__,
                 cause=str(exc),
             )
-            return
+            return registered
         log(logger, logging.INFO, "realtime_connected", target=target)
         try:
             await _send(connection, {"trnm": "LOGIN", "token": token})
@@ -131,12 +143,17 @@ class FillWatcher:
             )
             await _expect(connection, "REG")
             log(logger, logging.INFO, "realtime_registered", target=target, type=realtime_type)
+            registered = True
             while True:
                 message = await _receive(connection)
                 if message.get("trnm") == "REAL":
                     queue.put_nowait(message)
         except _RealtimeFailure as failure:
             log(logger, logging.ERROR, failure.event, target=target, **failure.fields)
+            if failure.event == "realtime_login_failed":
+                # 만료되거나 무효가 된 토큰일 수 있다. 다음 연결은 새 토큰으로 한다.
+                await self._kiwoom.discard_access_token(spec, token)
+                log(logger, logging.WARNING, "realtime_token_discarded", target=target)
         except Exception as exc:
             log(
                 logger,
@@ -148,6 +165,7 @@ class FillWatcher:
             )
         finally:
             await connection.close()
+        return registered
 
     async def _work(self, spec: EnvironmentSpec, queue: asyncio.Queue[dict[str, Any]]) -> None:
         while True:
