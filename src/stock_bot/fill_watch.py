@@ -7,10 +7,11 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from websockets.asyncio.client import connect as websocket_connect
@@ -40,6 +41,11 @@ RESPONSE_TIMEOUT_SECONDS = 10.0
 RECONNECT_INITIAL_SECONDS = 1.0
 RECONNECT_MAX_SECONDS = 60.0
 
+# 매도 손익 계산용으로 주문번호별로 더해 둔 체결을 마지막 체결 뒤 이만큼 지나면 지운다.
+# 일부만 체결된 채 끝난 주문이 쌓이지 않게 하기 위해서다.
+# 날짜로 지우지 않는 건 미국 장이 한국 자정을 넘기 때문이다.
+FILL_MEMORY_SECONDS = 24 * 3600
+
 # 같은 앱 키로 다른 연결이 들어왔을 때 키움이 기존 연결에 보내는 SYSTEM 코드(모의 서버에서 확인).
 SESSION_REPLACED_CODE = "R10001"
 
@@ -59,6 +65,8 @@ class FillWatcher:
         self._notifier = notifier
         self._connect = connect
         self._tasks: list[asyncio.Task[None]] = []
+        # (투자 환경, 주문번호)별로 지금까지 받은 매도 체결. 서버를 재시작하면 사라진다.
+        self._sell_fills: dict[tuple[str, str], _OrderFills] = {}
 
     def start(self) -> None:
         """알림이 꺼져 있으면 지켜보지 않는다. 인증정보가 없는 투자 환경은 건너뛴다."""
@@ -245,9 +253,93 @@ class FillWatcher:
             quantity=_plain(fill.quantity),
             remaining=_plain(fill.remaining),
         )
+        profit = await self._sell_profit(spec, fill) if fill.side == "sell" else None
         open_orders = await self._open_orders(spec)
-        sent = await self._notifier.send(embed=_fill_embed(fill, open_orders), spec=spec)
+        sent = await self._notifier.send(embed=_fill_embed(fill, profit, open_orders), spec=spec)
         log(logger, logging.INFO, "fill_notified", order_no=fill.order_no, sent=sent)
+
+    async def _sell_profit(self, spec: EnvironmentSpec, fill: Fill) -> SellProfit:
+        """지금까지 체결된 수량 전체의 매도 손익. 수수료·세금은 빼지 않는다."""
+        now = time.monotonic()
+        for key, entry in list(self._sell_fills.items()):
+            if now - entry.updated > FILL_MEMORY_SECONDS:
+                del self._sell_fills[key]
+        if (
+            fill.code is None
+            or fill.order_no is None
+            or fill.price is None
+            or fill.quantity is None
+            or fill.ordered is None
+            or fill.remaining is None
+        ):
+            return SellProfit(failure=UNKNOWN)
+
+        key = (spec.environment.value, fill.order_no)
+        entry = self._sell_fills.setdefault(key, _OrderFills())
+        entry.amount += fill.price * fill.quantity
+        entry.quantity += fill.quantity
+        entry.updated = now
+        if fill.remaining == 0:
+            del self._sell_fills[key]
+        filled = fill.ordered - fill.remaining
+        if entry.quantity != filled:
+            # 재시작 등으로 이 주문의 앞선 체결을 받지 못했다. 이번 체결만으로 늘려 추정하지 않는다.
+            log(
+                logger,
+                logging.WARNING,
+                "sell_profit_failed",
+                order_no=fill.order_no,
+                cause="missed_fills",
+                received=_plain(entry.quantity),
+                filled=_plain(filled),
+            )
+            return SellProfit(failure=LOOKUP_FAILED)
+
+        purchase = await self._purchase_price(spec, fill.code)
+        if purchase is None:
+            return SellProfit(failure=LOOKUP_FAILED)
+        cost = purchase * filled
+        return SellProfit(
+            amount=(entry.amount - cost).quantize(Decimal(1), ROUND_HALF_UP),
+            rate=((entry.amount - cost) / cost * 100).quantize(Decimal("0.01"), ROUND_HALF_UP),
+            purchase=purchase,
+        )
+
+    async def _purchase_price(self, spec: EnvironmentSpec, code: str) -> Decimal | None:
+        """당일 실현손익 상세(ka10077)에서 그 종목의 매입가를 찾는다. 못 찾으면 None이다."""
+        try:
+            data = await self._kiwoom.call(spec, "ka10077", DOMESTIC_ACCOUNT_PATH, {"stk_cd": code})
+            prices = {
+                row.number("buy_uv")
+                # 응답 종목코드에는 A가 붙어 온다(A005930).
+                for row in Reader(data, "ka10077").rows("tdy_rlzt_pl_dtl")
+                if row.text("stk_cd").removeprefix("A") == code
+            }
+        except AppError as exc:
+            log(
+                logger,
+                logging.WARNING,
+                "sell_profit_failed",
+                api_id="ka10077",
+                kind=exc.kind,
+                cause=exc.message,
+            )
+            return None
+        # 매도 체결마다 줄이 하나씩 온다.
+        # 줄마다 매입가가 다르면 어느 값이 이번 매도의 것인지 모른다.
+        price = next(iter(prices)) if len(prices) == 1 else None
+        if price is None or price <= 0:
+            log(
+                logger,
+                logging.WARNING,
+                "sell_profit_failed",
+                api_id="ka10077",
+                cause="purchase_price_ambiguous" if len(prices) > 1 else "purchase_price_not_found",
+                prices=[_plain(p) for p in prices],
+            )
+            return None
+        log(logger, logging.INFO, "purchase_price_fetched", api_id="ka10077", price=_plain(price))
+        return price
 
     async def _open_orders(self, spec: EnvironmentSpec) -> list[OpenOrder] | None:
         """그 투자 환경의 미체결 주문. 조회하지 못하면 None이다."""
@@ -336,9 +428,30 @@ async def _receive(connection: RealtimeConnection) -> dict[str, Any]:
         return message
 
 
+# 한국 증권 앱 관례: 빨강은 매수·이익, 파랑은 손실.
 BUY_COLOR = 0xE42939
+PROFIT_COLOR = 0xE42939
+LOSS_COLOR = 0x2F6FEB
 NEUTRAL_COLOR = 0x8B8F98
 UNKNOWN = "확인 불가"
+LOOKUP_FAILED = "조회 실패"
+
+
+@dataclass
+class _OrderFills:
+    amount: Decimal = Decimal(0)
+    quantity: Decimal = Decimal(0)
+    updated: float = 0.0
+
+
+@dataclass(frozen=True)
+class SellProfit:
+    """매도 손익. 계산하지 못했으면 failure에 이유를 담는다."""
+
+    amount: Decimal | None = None  # 원 단위로 반올림
+    rate: Decimal | None = None  # %, 소수 둘째 자리
+    purchase: Decimal | None = None
+    failure: str | None = None
 
 
 @dataclass(frozen=True)
@@ -439,10 +552,19 @@ def _time(values: dict[str, Any], key: str) -> str | None:
     return f"{text[:2]}:{text[2:4]}:{text[4:]}"
 
 
-def _fill_embed(fill: Fill, open_orders: list[OpenOrder] | None) -> Embed:
+def _fill_embed(
+    fill: Fill, profit: SellProfit | None, open_orders: list[OpenOrder] | None
+) -> Embed:
     side = {"buy": "매수", "sell": "매도"}.get(fill.side or "")
     title = f"체결 · {side}" if side else "체결"
     color = BUY_COLOR if fill.side == "buy" else NEUTRAL_COLOR
+    if profit is not None and profit.amount is not None:
+        if profit.amount > 0:
+            title, color = f"{title} · 익절", PROFIT_COLOR
+        elif profit.amount < 0:
+            title, color = f"{title} · 손절", LOSS_COLOR
+        else:
+            title = f"{title} · 본절"
     stock = f"{fill.name} ({fill.code})" if fill.name and fill.code else fill.name or fill.code
     amount = (
         _won(fill.price * fill.quantity)
@@ -457,8 +579,19 @@ def _fill_embed(fill: Fill, open_orders: list[OpenOrder] | None) -> Embed:
             EmbedField("이번 체결", f"{_shares(fill.quantity)} @ {_won(fill.price)} ({amount})"),
             EmbedField("누적", _progress(fill)),
             EmbedField("체결 시각", fill.time or UNKNOWN),
+            *([] if profit is None else [EmbedField("매도 손익", _profit_text(profit))]),
             _open_orders_field(open_orders),
         ),
+    )
+
+
+def _profit_text(profit: SellProfit) -> str:
+    if profit.amount is None or profit.rate is None or profit.purchase is None:
+        return profit.failure or LOOKUP_FAILED
+    sign = "+" if profit.amount > 0 else "-" if profit.amount < 0 else ""
+    return (
+        f"{sign}{abs(profit.amount):,}원 ({sign}{abs(profit.rate):.2f}%)"
+        f" · 매입가 {_won(profit.purchase)} · 수수료·세금 제외"
     )
 
 

@@ -11,13 +11,21 @@ from stock_bot import fill_watch
 from stock_bot.app import create_app
 from stock_bot.notification import DiscordNotifier
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, body_of, page_response
-from tests.fake_realtime import OK_LOGIN, OK_REG, FakeRealtime, fill_event, open_order
+from tests.fake_realtime import (
+    OK_LOGIN,
+    OK_REG,
+    FakeRealtime,
+    fill_event,
+    open_order,
+    realized_row,
+)
 
 pytestmark = pytest.mark.anyio
 
 DISCORD_ENV = {"DISCORD_BOT_TOKEN": "discord-token-ZZZZ9999", "DISCORD_CHANNEL_ID": "123456789"}
 PAPER_REALTIME = "wss://mockapi.kiwoom.com:10000/api/websocket"
 RED = 0xE42939
+BLUE = 0x2F6FEB
 GRAY = 0x8B8F98
 
 
@@ -53,8 +61,12 @@ async def wait_until(condition: Callable[[], bool]) -> None:
 
 
 def fill_kiwoom(*open_order_pages: dict | httpx.Response) -> FakeKiwoom:
-    """체결 알림이 부르는 조회 TR의 응답. 기본은 미체결 주문이 없다."""
-    return FakeKiwoom().reply("ka10075", *(open_order_pages or ({"oso": []},)))
+    """체결 알림이 부르는 조회 TR의 응답. 기본은 미체결 주문과 당일 실현손익이 없다."""
+    return (
+        FakeKiwoom()
+        .reply("ka10075", *(open_order_pages or ({"oso": []},)))
+        .reply("ka10077", {"tdy_rlzt_pl": "0", "tdy_rlzt_pl_dtl": []})
+    )
 
 
 @asynccontextmanager
@@ -579,3 +591,123 @@ async def test_open_order_lookup_failure_still_sends_the_fill(reply, caplog):
     assert fields(payload)["이번 체결"] == "3주 @ 60,000원 (180,000원)"
     assert fields(payload)["미체결 주문"] == "조회 실패"
     assert "open_orders_failed" in [r.getMessage() for r in caplog.records]
+
+
+def sell(**overrides: str) -> dict:
+    """삼성전자 10주 매도 주문의 체결. 기본은 61,000원에 10주 전량 체결이다."""
+    values = {"905": "-매도", "907": "1", "910": "-61000", "911": "10", "902": "0"}
+    return fill_event(**{**values, **overrides})
+
+
+def with_realized(*rows: dict) -> FakeKiwoom:
+    return fill_kiwoom().reply("ka10077", {"tdy_rlzt_pl": "0", "tdy_rlzt_pl_dtl": list(rows)})
+
+
+async def notify_fills(kiwoom: FakeKiwoom, *events: dict) -> list[dict]:
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    async with running(realtime, discord, kiwoom):
+        [connection] = await realtime.wait_registered()
+        for event in events:
+            connection.push(event)
+        await discord.wait_for(len(events))
+    return discord.payloads
+
+
+@pytest.mark.parametrize(
+    ("price", "title", "color", "profit"),
+    [
+        ("-61000", "체결 · 매도 · 익절", RED, "+10,000원 (+1.67%)"),
+        ("+59000", "체결 · 매도 · 손절", BLUE, "-10,000원 (-1.67%)"),
+        ("60000", "체결 · 매도 · 본절", GRAY, "0원 (0.00%)"),
+    ],
+)
+async def test_sell_fill_shows_profit_against_the_purchase_price(price, title, color, profit):
+    kiwoom = with_realized(realized_row(), realized_row())
+    [payload] = await notify_fills(kiwoom, sell(**{"910": price}))
+
+    assert body_of(kiwoom.calls("ka10077")[0]) == {"stk_cd": "005930"}
+    assert kiwoom.calls("ka10077")[0].url.host == "mockapi.kiwoom.com"
+    assert payload["embeds"][0]["title"] == title
+    assert payload["embeds"][0]["color"] == color
+    assert fields(payload)["매도 손익"] == f"{profit} · 매입가 60,000원 · 수수료·세금 제외"
+    names = list(fields(payload))
+    assert names.index("매도 손익") == names.index("체결 시각") + 1
+
+
+async def test_buy_fill_does_not_look_up_profit():
+    kiwoom = with_realized(realized_row())
+    [payload] = await notify_fills(kiwoom, fill_event())
+
+    assert kiwoom.calls("ka10077") == []
+    assert "매도 손익" not in fields(payload)
+
+
+async def test_split_sell_shows_profit_for_everything_filled_so_far():
+    kiwoom = with_realized(realized_row(buy_uv="97602.9573459"))
+    first, second = await notify_fills(
+        kiwoom,
+        sell(**{"910": "100000", "911": "3", "902": "7"}),
+        sell(**{"910": "101000", "911": "7", "902": "0"}),
+    )
+
+    # 3주 x 100,000 = 300,000 - 매입 292,808.87 = 7,191.13 → 7,191원
+    assert fields(first)["매도 손익"].startswith("+7,191원 (+2.46%) · 매입가 97,603원")
+    # 300,000 + 707,000 = 1,007,000 - 매입 976,029.57 = 30,970.43 → 30,970원
+    assert fields(second)["매도 손익"].startswith("+30,970원 (+3.17%)")
+    assert fields(second)["누적"] == "10 / 10주 · 전량 체결"
+
+
+async def test_profit_is_unknown_when_earlier_fills_of_the_order_were_missed():
+    # 서버가 앞선 3주 체결을 받지 못한 채(재시작 등) 나머지 7주 체결만 받은 경우.
+    kiwoom = with_realized(realized_row())
+    [payload] = await notify_fills(kiwoom, sell(**{"911": "7", "902": "0"}))
+
+    assert payload["embeds"][0]["title"] == "체결 · 매도"
+    assert payload["embeds"][0]["color"] == GRAY
+    assert fields(payload)["매도 손익"] == "조회 실패"
+
+
+async def test_stale_partial_fills_are_forgotten(monkeypatch):
+    monkeypatch.setattr(fill_watch, "FILL_MEMORY_SECONDS", 0)
+    kiwoom = with_realized(realized_row())
+    _, second = await notify_fills(
+        kiwoom,
+        sell(**{"911": "3", "902": "7"}),
+        sell(**{"911": "7", "902": "0"}),
+    )
+
+    assert fields(second)["매도 손익"] == "조회 실패"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"return_code": 1, "return_msg": "조회 오류"},
+        {"tdy_rlzt_pl": "0", "tdy_rlzt_pl_dtl": []},
+        {"tdy_rlzt_pl": "0", "tdy_rlzt_pl_dtl": [realized_row(stk_cd="A000660")]},
+        {
+            "tdy_rlzt_pl": "0",
+            "tdy_rlzt_pl_dtl": [realized_row(buy_uv="60000"), realized_row(buy_uv="59000")],
+        },
+    ],
+    ids=["kiwoom-error", "no-rows", "other-stock", "different-purchase-prices"],
+)
+async def test_profit_lookup_failure_still_sends_the_fill(reply, caplog):
+    kiwoom = fill_kiwoom().reply("ka10077", reply)
+    [payload] = await notify_fills(kiwoom, sell())
+
+    assert payload["embeds"][0]["title"] == "체결 · 매도"
+    assert payload["embeds"][0]["color"] == GRAY
+    assert fields(payload)["매도 손익"] == "조회 실패"
+    assert fields(payload)["이번 체결"] == "10주 @ 61,000원 (610,000원)"
+    assert "sell_profit_failed" in [r.getMessage() for r in caplog.records]
+
+
+async def test_unreadable_sell_values_make_profit_unknown():
+    kiwoom = with_realized(realized_row())
+    [payload] = await notify_fills(kiwoom, sell(**{"910": "abc"}))
+
+    assert payload["embeds"][0]["title"] == "체결 · 매도"
+    assert payload["embeds"][0]["color"] == GRAY
+    assert fields(payload)["매도 손익"] == "확인 불가"

@@ -168,3 +168,20 @@ def open_order(**overrides: str) -> dict[str, str]:
     }
     row.update(overrides)
     return row
+
+
+def realized_row(**overrides: str) -> dict[str, str]:
+    """ka10077 당일실현손익상세(tdy_rlzt_pl_dtl)의 한 줄. 종목코드에 A가 붙어 온다."""
+    row = {
+        "stk_nm": "삼성전자",
+        "cntr_qty": "1",
+        "buy_uv": "60000",
+        "cntr_pric": "61000",
+        "tdy_sel_pl": "1000",
+        "pl_rt": "+1.67",
+        "tdy_trde_cmsn": "0",
+        "tdy_trde_tax": "0",
+        "stk_cd": "A005930",
+    }
+    row.update(overrides)
+    return row
