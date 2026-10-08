@@ -27,6 +27,9 @@ pytestmark = pytest.mark.anyio
 # 기본은 국내 모의 인증정보만 둔다. 다른 투자 환경 연결은 그 환경을 다루는 테스트에서 연다.
 DOMESTIC_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_US_", "REAL_"))}
 US_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_KR_", "REAL_"))}
+PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith("REAL_")}
+REAL_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith("PAPER_")}
+REAL_REALTIME = "wss://api.kiwoom.com:10000/api/websocket"
 DISCORD_ENV = {"DISCORD_BOT_TOKEN": "discord-token-ZZZZ9999", "DISCORD_CHANNEL_ID": "123456789"}
 PAPER_REALTIME = "wss://mockapi.kiwoom.com:10000/api/websocket"
 RED = 0xE42939
@@ -282,6 +285,7 @@ async def test_connection_and_fill_steps_are_logged_without_secrets(caplog):
     events = [r.getMessage() for r in caplog.records if r.name == "stock_bot.fill_watch"]
     assert events == [
         "fill_watch_started",
+        "fill_watch_skipped",
         "fill_watch_skipped",
         "realtime_connected",
         "realtime_logged_in",
@@ -725,7 +729,7 @@ US_BUY_COLOR = RED
 async def test_paper_environments_each_get_their_own_connection():
     realtime = FakeRealtime()
     kiwoom = fill_kiwoom()
-    async with running(realtime, kiwoom=kiwoom, environ=FAKE_ENV):
+    async with running(realtime, kiwoom=kiwoom, environ=PAPER_ENV):
         domestic, us = await realtime.wait_registered(2)
 
     registered = {c.sent[1]["data"][0]["type"][0]: c for c in (domestic, us)}
@@ -870,7 +874,7 @@ async def test_us_profit_fails_when_earlier_fills_were_missed():
 async def test_same_order_number_in_two_environments_is_kept_apart():
     realtime = FakeRealtime()
     discord = FakeDiscord()
-    async with running(realtime, discord, fill_kiwoom(), environ=FAKE_ENV):
+    async with running(realtime, discord, fill_kiwoom(), environ=PAPER_ENV):
         connections = await realtime.wait_registered(2)
         by_type = {c.sent[1]["data"][0]["type"][0]: c for c in connections}
         # 국내 모의 매도 주문과 미국 모의 매도 주문의 주문번호가 같다.
@@ -955,3 +959,99 @@ async def test_kiwoom_rejection_is_not_retried(no_retry_wait):
 
     assert len(kiwoom.calls("ka10075")) == 1
     assert fields(payload)["미체결 주문"] == "조회 실패"
+
+
+def registered_types(connection) -> list[str]:
+    return connection.sent[1]["data"][0]["type"]
+
+
+def token_hosts(kiwoom: FakeKiwoom) -> dict[str, str]:
+    """발급한 토큰 → 토큰을 발급한 도메인."""
+    return {
+        token: request.url.host
+        for token, request in zip(kiwoom.issued_tokens, kiwoom.token_requests(), strict=True)
+    }
+
+
+async def test_real_account_uses_one_real_connection_for_both_markets():
+    realtime = FakeRealtime()
+    kiwoom = fill_kiwoom()
+    async with running(realtime, kiwoom=kiwoom, environ=FAKE_ENV):
+        connections = await realtime.wait_registered(3)
+
+    real = [c for c in connections if c.url == REAL_REALTIME]
+    paper = [c for c in connections if c.url == PAPER_REALTIME]
+    assert len(real) == 1 and len(paper) == 2
+    assert registered_types(real[0]) == ["00", "F5"]
+    hosts = token_hosts(kiwoom)
+    # 실전 연결은 실전 토큰만, 모의 연결은 각자의 모의 토큰만 쓴다.
+    assert hosts[real[0].sent[0]["token"]] == "api.kiwoom.com"
+    assert {hosts[c.sent[0]["token"]] for c in paper} == {"mockapi.kiwoom.com"}
+    assert len({c.sent[0]["token"] for c in connections}) == 3
+
+
+async def real_fills(kiwoom: FakeKiwoom, *events: dict) -> list[dict]:
+    return await notify_fills(kiwoom, *events, environ=REAL_ENV)
+
+
+async def test_real_events_are_labeled_by_market_and_use_real_lookups():
+    kiwoom = fill_kiwoom()
+    domestic, us = await real_fills(kiwoom, sell(), us_sell())
+
+    assert domestic["content"] == "[국내 실전]"
+    assert us["content"] == "[미국 실전]"
+    looked_up = [(r.headers.get("api-id"), r.url.host) for r in kiwoom.requests[1:]]
+    # 국내 체결에는 국내 조회만, 미국 체결에는 미국 조회만 실전 도메인으로 나간다.
+    assert looked_up == [
+        ("ka10077", "api.kiwoom.com"),
+        ("ka10075", "api.kiwoom.com"),
+        ("ust21050", "api.kiwoom.com"),
+    ]
+
+
+ORDER_API_IDS = {
+    "kt10000",
+    "kt10001",
+    "kt10002",
+    "kt10003",
+    "ust20000",
+    "ust20001",
+    "ust20002",
+    "ust20003",
+}
+
+
+async def test_fill_watch_never_calls_order_trs():
+    kiwoom = fill_kiwoom()
+    await notify_fills(kiwoom, fill_event(), sell(), us_fill_event(), us_sell(), environ=REAL_ENV)
+
+    called = {r.headers.get("api-id") for r in kiwoom.requests} - {None}
+    assert called <= {"ka10075", "ka10077", "ust21050"}
+    assert not called & ORDER_API_IDS
+
+
+async def test_same_order_number_in_real_and_paper_us_is_kept_apart():
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    environ = {k: v for k, v in FAKE_ENV.items() if not k.startswith("PAPER_KR_")}
+    async with running(realtime, discord, fill_kiwoom(), environ=environ):
+        connections = await realtime.wait_registered(2)
+        real = next(c for c in connections if c.url == REAL_REALTIME)
+        paper = next(c for c in connections if c.url == PAPER_REALTIME)
+        real.push(us_sell(**{"911": "10", "902": "21", "50724": "0000120.7500"}))
+        await discord.wait_for(1)
+        paper.push(us_sell())
+        await discord.wait_for(2)
+
+    assert discord.payloads[1]["content"] == "[미국 모의]"
+    assert fields(discord.payloads[1])["매도 손익"].startswith("+$13.18")
+
+
+async def test_real_watch_is_skipped_without_real_credentials(caplog):
+    realtime = FakeRealtime()
+    async with running(realtime, environ=PAPER_ENV):
+        await realtime.wait_registered(2)
+
+    assert all(c.url == PAPER_REALTIME for c in realtime.connections)
+    skipped = [r.fields for r in caplog.records if r.getMessage() == "fill_watch_skipped"]
+    assert skipped and skipped[0]["environment"] == "domestic_real,us_real"

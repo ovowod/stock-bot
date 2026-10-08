@@ -53,14 +53,27 @@ FILL_MEMORY_SECONDS = 24 * 3600
 # 같은 앱 키로 다른 연결이 들어왔을 때 키움이 기존 연결에 보내는 SYSTEM 코드(모의 서버에서 확인).
 SESSION_REPLACED_CODE = "R10001"
 
-# 지켜볼 투자 환경과 실시간 항목. 00은 국내 주문체결, F5는 미국 실시간 체결이다.
-WATCHED = (
-    (ENVIRONMENTS[Environment.DOMESTIC_PAPER], "00"),
-    (ENVIRONMENTS[Environment.US_PAPER], "F5"),
+# 실시간 연결 하나가 등록할 실시간 항목과 그 이벤트의 투자 환경.
+# 00은 국내 주문체결, F5는 미국 실시간 체결이다.
+# 국내 실전과 미국 실전은 인증정보와 계좌가 같아 연결 하나로 받는다.
+Watch = dict[str, EnvironmentSpec]
+WATCHES: tuple[Watch, ...] = (
+    {"00": ENVIRONMENTS[Environment.DOMESTIC_PAPER]},
+    {"F5": ENVIRONMENTS[Environment.US_PAPER]},
+    {"00": ENVIRONMENTS[Environment.DOMESTIC_REAL], "F5": ENVIRONMENTS[Environment.US_REAL]},
 )
 # 실시간 항목별로 체결을 뜻하는 주문상태(913). 접수·확인·취소·거부 등은 알리지 않는다.
 # F5의 체결완료는 2026-10-08 모의 서버에서 확인했고, 부분체결은 키움 가이드 설명을 따른다.
 FILL_STATUSES = {"00": {"체결"}, "F5": {"부분체결", "체결완료"}}
+
+
+def _connection_spec(watch: Watch) -> EnvironmentSpec:
+    """연결에 쓸 투자 환경. 한 연결의 투자 환경들은 인증정보·도메인이 같다."""
+    return next(iter(watch.values()))
+
+
+def _environments(watch: Watch) -> str:
+    return ",".join(spec.environment.value for spec in watch.values())
 
 
 async def connect_websocket(url: str) -> RealtimeConnection:
@@ -83,7 +96,8 @@ class FillWatcher:
         if not self._notifier.enabled:
             log(logger, logging.INFO, "fill_watch_disabled", cause="discord_disabled")
             return
-        for spec, realtime_type in WATCHED:
+        for watch in WATCHES:
+            spec = _connection_spec(watch)
             try:
                 self._kiwoom.credentials(spec)
             except AppError as exc:
@@ -91,7 +105,7 @@ class FillWatcher:
                     logger,
                     logging.INFO,
                     "fill_watch_skipped",
-                    environment=spec.environment.value,
+                    environment=_environments(watch),
                     cause=exc.message,
                 )
                 continue
@@ -99,11 +113,11 @@ class FillWatcher:
                 logger,
                 logging.INFO,
                 "fill_watch_started",
-                environment=spec.environment.value,
+                environment=_environments(watch),
                 target=spec.realtime_url,
-                type=realtime_type,
+                type=list(watch),
             )
-            self._tasks.append(asyncio.create_task(self._watch(spec, realtime_type)))
+            self._tasks.append(asyncio.create_task(self._watch(watch)))
 
     async def stop(self) -> None:
         for task in self._tasks:
@@ -111,18 +125,18 @@ class FillWatcher:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
 
-    async def _watch(self, spec: EnvironmentSpec, realtime_type: str) -> None:
+    async def _watch(self, watch: Watch) -> None:
         # 작업마다 context가 따로라 여기서 정하면 이 감시의 모든 로그에 투자 환경이 남는다.
-        environment_var.set(spec.environment.value)
+        environment_var.set(_environments(watch))
         # 받는 쪽은 큐에 넣기만 하고 작업자가 순서대로 처리한다.
         # 알림 처리가 늦어도 PING 응답이 막히지 않고, 같은 주문의 체결 순서가 지켜진다.
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        worker = asyncio.create_task(self._work(spec, queue))
+        worker = asyncio.create_task(self._work(watch, queue))
         try:
             # 끊긴 동안의 체결은 보충하지 않는다. 다시 연결해 등록만 한다.
             delay = RECONNECT_INITIAL_SECONDS
             while True:
-                if await self._session(spec, realtime_type, queue):
+                if await self._session(watch, queue):
                     delay = RECONNECT_INITIAL_SECONDS
                 log(logger, logging.WARNING, "realtime_reconnect_wait", wait_seconds=delay)
                 await asyncio.sleep(delay)
@@ -137,7 +151,9 @@ class FillWatcher:
                 code=replaced.code,
                 message=replaced.message,
             )
+            labels = "·".join(spec.label for spec in watch.values())
             await self._notifier.send(
+                f"[{labels}]",
                 embed=Embed(
                     title="체결 감시 중단",
                     description=(
@@ -146,17 +162,15 @@ class FillWatcher:
                     ),
                     color=NEUTRAL_COLOR,
                 ),
-                spec=spec,
             )
         finally:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
 
-    async def _session(
-        self, spec: EnvironmentSpec, realtime_type: str, queue: asyncio.Queue[dict[str, Any]]
-    ) -> bool:
+    async def _session(self, watch: Watch, queue: asyncio.Queue[dict[str, Any]]) -> bool:
         """연결 하나가 끝날 때까지 받는다. LOGIN과 REG까지 성공했으면 True다."""
         registered = False
+        spec = _connection_spec(watch)
         target = spec.realtime_url
         try:
             token = await self._kiwoom.access_token(spec)
@@ -182,11 +196,11 @@ class FillWatcher:
                     "trnm": "REG",
                     "grp_no": "1",
                     "refresh": "1",
-                    "data": [{"item": [""], "type": [realtime_type]}],
+                    "data": [{"item": [""], "type": list(watch)}],
                 },
             )
             await _expect(connection, "REG")
-            log(logger, logging.INFO, "realtime_registered", target=target, type=realtime_type)
+            log(logger, logging.INFO, "realtime_registered", target=target, type=list(watch))
             registered = True
             while True:
                 message = await _receive(connection)
@@ -225,13 +239,13 @@ class FillWatcher:
                 )
         return registered
 
-    async def _work(self, spec: EnvironmentSpec, queue: asyncio.Queue[dict[str, Any]]) -> None:
+    async def _work(self, watch: Watch, queue: asyncio.Queue[dict[str, Any]]) -> None:
         while True:
             message = await queue.get()
             data = message.get("data")
             for item in data if isinstance(data, list) else []:
                 try:
-                    await self._handle(spec, item)
+                    await self._handle(watch, item)
                 except Exception as exc:
                     # 한 체결의 처리 오류로 작업자가 멈추면 그 뒤 체결 알림이 모두 끊긴다.
                     logger.error(
@@ -240,14 +254,17 @@ class FillWatcher:
                         extra={"fields": {"error_type": type(exc).__name__}},
                     )
 
-    async def _handle(self, spec: EnvironmentSpec, item: Any) -> None:
+    async def _handle(self, watch: Watch, item: Any) -> None:
         # 체결 하나의 수신·처리·알림 로그를 같은 ID로 묶는다.
         request_id_var.set(uuid.uuid4().hex[:12])
         values = item.get("values") if isinstance(item, dict) else None
         realtime_type = item.get("type") if isinstance(item, dict) else None
-        if not isinstance(values, dict) or realtime_type not in FILL_STATUSES:
+        spec = watch.get(realtime_type) if isinstance(realtime_type, str) else None
+        if not isinstance(values, dict) or spec is None or realtime_type not in FILL_STATUSES:
             log(logger, logging.DEBUG, "realtime_item_skipped", type=realtime_type)
             return
+        # 실전 연결은 국내·미국 이벤트가 섞여 오므로 이벤트마다 투자 환경을 정한다.
+        environment_var.set(spec.environment.value)
         status = values.get("913")
         if status not in FILL_STATUSES[realtime_type]:
             log(logger, logging.DEBUG, "fill_skipped", type=realtime_type, status=status)
