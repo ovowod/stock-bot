@@ -272,21 +272,32 @@ const UNKNOWN_KINDS = new Set([ORDER_RESULT_UNKNOWN, "duplicate_order"]);
  * 응답을 받지 못했거나(연결 끊김, 시간 초과) 해석하지 못하면 접수 여부 확인 불가로 던진다.
  * 같은 주문 키의 중복 거부(409)도 이전 요청이 접수됐을 수 있으므로 확인 불가로 본다.
  */
-export async function placeOrder(
+export function placeOrder(
   environment: EnvironmentValue,
   order: OrderRequest,
 ): Promise<{ result: OrderAccepted; requestId: string | null }> {
+  return sendOrderRequest<OrderAccepted>(`/api/environments/${environment}/orders`, order);
+}
+
+/**
+ * 키움에 주문으로 접수되는 요청(매수·매도·주문 취소)을 한 번만 보낸다. 결과 분류는 placeOrder와 같다.
+ * 성공 응답에 새 주문번호(order_no)가 없으면 확인 불가다.
+ */
+async function sendOrderRequest<T extends { order_no: string }>(
+  url: string,
+  payload: object,
+): Promise<{ result: T; requestId: string | null }> {
   const unknown = (requestId: string | null = null) =>
     new ApiError(ORDER_RESULT_UNKNOWN, "접수 여부를 확인할 수 없습니다.", requestId);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ORDER_TIMEOUT_MS);
   let response: Response;
-  let body: { error?: { kind?: string; message?: string; request_id?: string } } & Partial<OrderAccepted>;
+  let body: { error?: { kind?: string; message?: string; request_id?: string } } & Partial<T>;
   try {
-    response = await fetch(`/api/environments/${environment}/orders`, {
+    response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(order),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     body = await response.json();
@@ -298,7 +309,7 @@ export async function placeOrder(
   const requestId = body?.error?.request_id ?? response.headers.get("X-Request-ID");
   if (response.ok) {
     if (typeof body?.order_no !== "string" || !body.order_no) throw unknown(requestId);
-    return { result: body as OrderAccepted, requestId };
+    return { result: body as T, requestId };
   }
   const kind = body?.error?.kind;
   // 로그인 세션이 없으면 서버가 주문을 키움에 보내기 전에 거부한다. 확인 불가가 아니라 실패다.
