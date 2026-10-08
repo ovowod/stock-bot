@@ -59,17 +59,24 @@ TRADE_TYPES: dict[Market, dict[str, str]] = {
 
 HoldingLookup = Callable[[EnvironmentSpec, str], Awaitable[dict[str, Any]]]
 OpenOrderLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
+# 취소가 접수되면 (투자 환경, 취소한 미체결 주문, 접수 응답)으로 부른다. 기다리지 않는다.
+CancelListener = Callable[[EnvironmentSpec, dict[str, Any], dict[str, Any]], None]
 
 
 class OrderService:
     def __init__(
-        self, kiwoom: KiwoomClient, holding: HoldingLookup, open_orders: OpenOrderLookup
+        self,
+        kiwoom: KiwoomClient,
+        holding: HoldingLookup,
+        open_orders: OpenOrderLookup,
+        on_cancelled: CancelListener | None = None,
     ) -> None:
         self._kiwoom = kiwoom
         # 매도 직전 잔고 확인. 계좌 서비스가 준다.
         self._holding = holding
         # 취소 직전 미체결 확인. 미체결 주문 서비스가 준다.
         self._open_orders = open_orders
+        self._on_cancelled = on_cancelled
         # 받은 주문 키. 처리 중이거나 이미 처리한 키로 다시 오면 키움에 보내지 않는다.
         # 서버가 다시 시작될 때까지만 기억한다.
         self._order_keys: dict[Environment, set[str]] = {}
@@ -217,13 +224,16 @@ class OrderService:
             order_no=order_no,
             cancel_quantity=cancelled,
         )
-        return {
+        result = {
             "order_key": cancel["order_key"],
             "order_no": order_no,
             "original_order_no": cancel["order_no"],
             "cancel_quantity": cancelled,
             "accepted_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
+        if self._on_cancelled:
+            self._on_cancelled(spec, order, result)
+        return result
 
     async def _check_sellable(self, spec: EnvironmentSpec, order: dict[str, str]) -> None:
         """매도 주문 직전에 잔고를 다시 조회한다. 확인하지 못하거나 넘치면 주문을 보내지 않는다."""

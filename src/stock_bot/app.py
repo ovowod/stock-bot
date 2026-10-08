@@ -20,7 +20,14 @@ from fastapi.staticfiles import StaticFiles
 
 from stock_bot.account import AccountService
 from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
-from stock_bot.config import ENVIRONMENTS, LOG_DIR, PROJECT_ROOT, load_env_file, parse_environment
+from stock_bot.config import (
+    ENVIRONMENTS,
+    LOG_DIR,
+    PROJECT_ROOT,
+    EnvironmentSpec,
+    load_env_file,
+    parse_environment,
+)
 from stock_bot.errors import AppError
 from stock_bot.fill_watch import FillWatcher, RealtimeConnect, connect_websocket
 from stock_bot.kiwoom import KST, KiwoomClient
@@ -62,7 +69,10 @@ def create_app(
     notifications: set[asyncio.Task[bool]] = set()
 
     def notify(embed: Embed) -> None:
-        """로그인 응답이 알림을 기다리지 않게 따로 보낸다. 실패는 notifier가 로그로 남긴다."""
+        """로그인·주문 취소 응답이 알림을 기다리지 않게 따로 보낸다.
+
+        실패는 notifier가 로그로 남긴다.
+        """
         if not notifier.enabled:
             return
         task = asyncio.create_task(notifier.send(embed=embed))
@@ -75,7 +85,12 @@ def create_app(
     accounts = AccountService(kiwoom, stocks.listings)
     quotes = QuoteService(kiwoom)
     open_orders = OpenOrderService(kiwoom)
-    orders = OrderService(kiwoom, accounts.holding, open_orders.orders)
+    orders = OrderService(
+        kiwoom,
+        accounts.holding,
+        open_orders.orders,
+        on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
+    )
     fills = FillWatcher(kiwoom, notifier, realtime_connect or connect_websocket)
 
     @asynccontextmanager
@@ -305,6 +320,7 @@ def create_app(
 
 _LOGIN_COLOR = 0x6C62A8
 _LOCK_COLOR = 0xE42939
+_CANCEL_COLOR = 0x8B95A1
 
 
 def _access_embed(title: str, color: int, client: ClientInfo, extra: list[EmbedField]) -> Embed:
@@ -316,6 +332,30 @@ def _access_embed(title: str, color: int, client: ClientInfo, extra: list[EmbedF
             *extra,
             EmbedField("IP", client.ip, inline=True),
             EmbedField("브라우저·OS", client.device, inline=True),
+        ),
+    )
+
+
+def _cancel_embed(spec: EnvironmentSpec, order: dict[str, Any], result: dict[str, Any]) -> Embed:
+    """접수된 주문 취소의 Discord 알림."""
+    quantity = result["cancel_quantity"]
+    return Embed(
+        title="주문 취소 접수",
+        color=_CANCEL_COLOR,
+        fields=(
+            EmbedField("투자 환경", spec.label, inline=True),
+            EmbedField("종목", f"{order['name']} ({order['code']})", inline=True),
+            EmbedField("원래 주문", order["side_label"], inline=True),
+            # 잔량 전부로 보내 키움이 수량을 확정해 주지 않으면 null이다.
+            EmbedField(
+                "취소 수량",
+                "남은 수량 전부" if quantity is None else f"{quantity:,}주",
+                inline=True,
+            ),
+            EmbedField(
+                "주문번호", f"{result['original_order_no']} → {result['order_no']}", inline=True
+            ),
+            EmbedField("시각", _kst(datetime.now(KST)), inline=True),
         ),
     )
 
