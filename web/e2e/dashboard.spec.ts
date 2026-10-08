@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { openDashboard, openLiveDashboard } from "./support";
+import { mockNoOpenOrders, openDashboard, openLiveDashboard } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 키움 서버나 실전 서버는 호출되지 않는다.
 
@@ -111,6 +111,7 @@ async function mockAccount(page: Page, replies: Record<string, Reply | (() => Re
     if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
     await route.fulfill({ status: reply.status ?? 200, json: reply.body }).catch(() => {});
   });
+  await mockNoOpenOrders(page);
 }
 
 const envButton = (page: Page, label: string) => page.getByRole("radio", { name: label });

@@ -62,14 +62,17 @@ export function Panel({
   aside,
   children,
   className = "",
+  label,
 }: {
   title?: string;
   aside?: ReactNode;
   children: ReactNode;
   className?: string;
+  /** 있으면 이 이름의 영역(region)으로 드러낸다. */
+  label?: string;
 }) {
   return (
-    <section className={`rounded-3xl bg-surface p-5 md:p-6 ${className}`}>
+    <section aria-label={label} className={`rounded-3xl bg-surface p-5 md:p-6 ${className}`}>
       {title && (
         <div className="mb-3 flex items-center justify-between gap-3">
           <h3 className="text-[17px] font-bold">{title}</h3>

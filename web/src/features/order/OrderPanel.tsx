@@ -1,6 +1,5 @@
-import { CircleAlert, Info, ShieldAlert, X } from "lucide-react";
+import { CircleAlert, Info, ShieldAlert } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 import {
   ApiError,
   fetchHolding,
@@ -26,6 +25,7 @@ import {
   type OrderTarget,
   type OrderType,
 } from "./order";
+import { Callout, Field, INPUT, Sheet } from "./Sheet";
 
 const OpenOrderPanel = createContext<(target: OrderTarget) => void>(() => {});
 
@@ -63,81 +63,36 @@ function OrderPanel({
   onClose: () => void;
 }) {
   const env = findEnvironment(environment);
-  const closeRef = useRef<HTMLButtonElement>(null);
   // 주문을 보내는 동안에는 결과를 확인하기 전에 닫지 못하게 한다.
   const [locked, setLocked] = useState(false);
-  const lockedRef = useRef(false);
-  useEffect(() => {
-    lockedRef.current = locked;
-  }, [locked]);
-  const requestClose = useCallback(() => {
-    if (!lockedRef.current) onClose();
-  }, [onClose]);
   const side = target.sell ? "매도" : "매수";
   const unavailable = orderUnavailableReason(env.market, env.isReal, target.exchange, side);
   const meta = [target.code, target.exchange ?? target.category].filter(Boolean).join(" · ");
 
-  // 패널이 열린 동안 뒤쪽 화면을 inert로 막고, 닫으면 패널을 열었던 요소로 초점을 되돌린다.
-  useEffect(() => {
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const root = document.getElementById("root");
-    root?.setAttribute("inert", "");
-    closeRef.current?.focus();
-    const close = (event: KeyboardEvent) => event.key === "Escape" && requestClose();
-    window.addEventListener("keydown", close);
-    return () => {
-      window.removeEventListener("keydown", close);
-      root?.removeAttribute("inert");
-      opener?.focus();
-    };
-  }, [requestClose]);
-
-  return createPortal(
-    <div className="fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label={`${target.name} 주문`}>
-      <button type="button" className="absolute inset-0 bg-ink/40" aria-label="주문 패널 닫기" onClick={requestClose} />
-      <div className="absolute inset-x-0 bottom-0 flex max-h-[90dvh] flex-col rounded-t-3xl bg-surface shadow-2xl md:inset-y-0 md:left-auto md:max-h-none md:w-[420px] md:rounded-none md:rounded-l-3xl">
-        <div className="flex items-start gap-3 px-5 pt-5 pb-3">
-          <div className="min-w-0 flex-1">
-            <p className="flex items-center gap-1.5 text-xs font-semibold text-sub">
-              {env.label} {side}
-              {env.isReal && (
-                <span className="inline-flex items-center gap-0.5 rounded-full bg-real-soft px-2 py-0.5 text-[11px] font-bold text-real">
-                  <ShieldAlert className="size-3" aria-hidden />
-                  실전
-                </span>
-              )}
-            </p>
-            <h2 className="mt-1 truncate text-xl font-bold">{target.name}</h2>
-            <p className="truncate text-sm text-muted">{meta}</p>
-          </div>
-          <button
-            ref={closeRef}
-            type="button"
-            className="-mr-1.5 rounded-xl p-2 text-sub hover:bg-canvas disabled:opacity-40"
-            aria-label="닫기"
-            disabled={locked}
-            onClick={requestClose}
-          >
-            <X className="size-5" />
-          </button>
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 pb-6">
-          {target.status && (
-            <Callout tone="real" icon={CircleAlert}>
-              이 종목은 "{target.status}" 상태입니다. 주문 전에 종목 상태를 확인하세요.
-            </Callout>
-          )}
-          {unavailable ? (
-            <Callout tone="muted" icon={Info} title={`${side}할 수 없는 종목입니다`}>
-              {unavailable}
-            </Callout>
-          ) : (
-            <OrderForm env={env} target={target} onAccepted={onClose} onSendingChange={setLocked} />
-          )}
-        </div>
-      </div>
-    </div>,
-    document.body,
+  return (
+    <Sheet
+      label={`${target.name} 주문`}
+      overlayLabel="주문 패널 닫기"
+      env={env}
+      eyebrow={side}
+      title={target.name}
+      meta={meta}
+      locked={locked}
+      onClose={onClose}
+    >
+      {target.status && (
+        <Callout tone="real" icon={CircleAlert}>
+          이 종목은 "{target.status}" 상태입니다. 주문 전에 종목 상태를 확인하세요.
+        </Callout>
+      )}
+      {unavailable ? (
+        <Callout tone="muted" icon={Info} title={`${side}할 수 없는 종목입니다`}>
+          {unavailable}
+        </Callout>
+      ) : (
+        <OrderForm env={env} target={target} onAccepted={onClose} onSendingChange={setLocked} />
+      )}
+    </Sheet>
   );
 }
 
@@ -555,52 +510,5 @@ function OrderForm({
         )}
       </div>
     </form>
-  );
-}
-
-const INPUT =
-  "w-full rounded-2xl bg-canvas px-4 py-3 text-[16px] outline-none placeholder:text-muted focus:ring-2 focus:ring-brand-100 aria-invalid:ring-2 aria-invalid:ring-real/40";
-
-function Field({
-  label,
-  error,
-  hint = null,
-  children,
-}: {
-  label: string;
-  error: string | null;
-  hint?: string | null;
-  children: ReactNode;
-}) {
-  return (
-    <label className="block space-y-1.5">
-      <span className="text-sm font-semibold text-sub">{label}</span>
-      {children}
-      {error && <span className="block text-xs font-semibold text-real">{error}</span>}
-      {hint && <span className="block text-xs text-muted">{hint}</span>}
-    </label>
-  );
-}
-
-function Callout({
-  tone,
-  icon: Icon,
-  title,
-  children,
-}: {
-  tone: "real" | "muted";
-  icon: typeof Info;
-  title?: string;
-  children: ReactNode;
-}) {
-  const color = tone === "real" ? "bg-real-soft text-real" : "bg-canvas text-sub";
-  return (
-    <div role="note" className={`flex gap-2.5 rounded-2xl px-4 py-3 text-sm ${color}`}>
-      <Icon className="mt-0.5 size-4 shrink-0" aria-hidden />
-      <div className="space-y-0.5">
-        {title && <p className="font-bold text-ink">{title}</p>}
-        <p>{children}</p>
-      </div>
-    </div>
   );
 }

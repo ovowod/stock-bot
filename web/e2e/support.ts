@@ -59,3 +59,10 @@ async function loginThroughScreen(page: Page, password: string): Promise<void> {
   // 로그인 직후에는 대시보드가 아직 그려지지 않았다. 다음 단계가 화면을 찾기 전에 기다린다.
   await expect(page.getByRole("radiogroup", { name: "투자 환경" }).first()).toBeVisible();
 }
+
+/** 계좌 확인이 함께 부르는 미체결 주문 요청에 빈 목록을 준다. 미체결 주문을 다루지 않는 테스트용이다. */
+export async function mockNoOpenOrders(page: Page): Promise<void> {
+  await page.route("**/api/environments/*/open-orders", (route) =>
+    route.fulfill({ json: { orders: [], fetched_at: "2026-10-05T06:30:00+00:00" } }),
+  );
+}

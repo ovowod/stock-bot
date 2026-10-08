@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mockAuth, openDashboard, PASSWORD } from "./support";
+import { mockAuth, mockNoOpenOrders, openDashboard, PASSWORD } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 키움 서버나 실제 서버는 호출되지 않는다.
 
@@ -27,6 +27,7 @@ async function mockAccount(page: Page, reply: () => Reply = () => ({ status: 200
     requests.push(route.request().url());
     return route.fulfill(reply());
   });
+  await mockNoOpenOrders(page);
   return requests;
 }
 
@@ -174,6 +175,7 @@ test("같은 브라우저에서 새 탭을 열면 로그인 세션이 끝나고,
       return route.fulfill({ status: 401, json: { error: { kind: "unauthorized", message: "로그인이 필요합니다." } } });
     }
     if (path === "/api/auth/session") return route.fulfill({ json: { authenticated: true } });
+    if (path.endsWith("/open-orders")) return route.fulfill({ json: { orders: [], fetched_at: ACCOUNT.fetched_at } });
     return route.fulfill({ json: ACCOUNT });
   });
   const login = async (page: Page) => {
