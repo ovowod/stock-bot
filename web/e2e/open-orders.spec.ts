@@ -70,9 +70,34 @@ const marketBuy = openOrder({
 type Reply = { status?: number; body: unknown };
 const listed = (orders: unknown[]): Reply => ({ body: { orders, fetched_at: "2026-10-05T06:30:00+00:00" } });
 
-async function mockApi(page: Page, { openOrders = (): Reply => listed([openOrder(), marketBuy]) } = {}) {
+type CancelBody = { order_key: string; order_no: string; quantity: string };
+/** 취소 응답. abort는 연결 끊김, html은 형식이 다른 응답이다. */
+type CancelReply = Reply | { abort: true } | { html: string } | { delayMs: number; reply: Reply };
+
+const cancelAccepted = (body: CancelBody): Reply => ({
+  body: {
+    order_key: body.order_key,
+    order_no: "0000141",
+    original_order_no: body.order_no,
+    cancel_quantity: null,
+    accepted_at: "2026-10-05T01:00:00+00:00",
+  },
+});
+const failure = (status: number, kind: string, message = "test"): Reply => ({
+  status,
+  body: { error: { kind, message, request_id: "req-1" } },
+});
+
+async function mockApi(
+  page: Page,
+  {
+    openOrders = (): Reply => listed([openOrder(), marketBuy]),
+    cancel = (body: CancelBody): CancelReply => cancelAccepted(body),
+  }: { openOrders?: () => Reply; cancel?: (body: CancelBody) => CancelReply } = {},
+) {
   const accountRequests: string[] = [];
   const openOrderRequests: string[] = [];
+  const cancels: CancelBody[] = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const [, , , environment, resource] = url.pathname.split("/");
@@ -83,6 +108,17 @@ async function mockApi(page: Page, { openOrders = (): Reply => listed([openOrder
       openOrderRequests.push(environment);
       const reply = openOrders();
       await route.fulfill({ status: reply.status ?? 200, json: reply.body });
+    } else if (resource === "cancellations") {
+      const body = route.request().postDataJSON() as CancelBody;
+      cancels.push(body);
+      let reply = cancel(body);
+      if ("abort" in reply) return route.abort("connectionreset");
+      if ("html" in reply) return route.fulfill({ status: 200, contentType: "text/html", body: reply.html });
+      if ("delayMs" in reply) {
+        await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
+        reply = reply.reply;
+      }
+      await route.fulfill({ status: reply.status ?? 200, json: reply.body }).catch(() => {});
     } else if (resource === "quote") {
       await route.fulfill({ json: { code: "005930", price: 84_500, fetched_at: "2026-10-05T01:00:00+00:00" } });
     } else if (resource === "holdings") {
@@ -98,7 +134,7 @@ async function mockApi(page: Page, { openOrders = (): Reply => listed([openOrder
       await route.fulfill({ status: 503, json: { error: { kind: "config_error", message: "test" } } });
     }
   });
-  return { accountRequests, openOrderRequests };
+  return { accountRequests, openOrderRequests, cancels };
 }
 
 const panel = (page: Page) => page.getByRole("region", { name: "미체결 주문" });
@@ -234,4 +270,182 @@ test("미체결 주문 패널이 가로 스크롤을 만들지 않는다", async
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   expect(await page.evaluate(() => window.innerWidth)).toBe(page.viewportSize()!.width);
+});
+
+// ---- 주문 취소 ----
+
+const sheet = (page: Page) => page.getByRole("dialog", { name: "SK하이닉스 주문 취소" });
+const submitCancel = (page: Page) => sheet(page).getByRole("button", { name: "주문 취소하기" });
+
+async function openCancel(page: Page) {
+  await row(page, "SK하이닉스").getByRole("button", { name: "SK하이닉스 주문 취소" }).click();
+  await expect(sheet(page)).toBeVisible();
+}
+
+test("취소 버튼을 누르면 미체결을 다시 확인한 최종 확인이 열리고, 주문 취소가 접수된다", async ({ page }) => {
+  let remaining = 3;
+  const { accountRequests, openOrderRequests, cancels } = await mockApi(page, {
+    openOrders: () => listed([openOrder({ remaining_quantity: remaining }), marketBuy]),
+  });
+  await open(page);
+  await expect(row(page, "SK하이닉스")).toBeVisible();
+  // 목록을 띄운 뒤 1주가 체결됐다.
+  remaining = 2;
+
+  await openCancel(page);
+
+  await expect.poll(() => openOrderRequests.length).toBe(2);
+  const confirm = sheet(page);
+  await expect(confirm.locator('dd[data-term="미체결 수량"]')).toHaveText("2주");
+  await expect(confirm.locator('dd[data-term="원주문번호"]')).toHaveText("0000070");
+  await expect(confirm.locator('dd[data-term="주문"]')).toHaveText("매도");
+  await expect(confirm.locator('dd[data-term="주문가격"]')).toHaveText("201,000원");
+  await expect(confirm.getByRole("button", { name: "닫기", exact: true }).last()).toBeVisible();
+  await submitCancel(page).click();
+
+  await expect(page.getByRole("status").filter({ hasText: "주문 취소가 접수되었습니다" })).toContainText("0000141");
+  await expect(page.getByRole("status").filter({ hasText: "주문 취소가 접수되었습니다" })).toContainText(
+    "남은 수량 전부",
+  );
+  await expect(sheet(page)).toHaveCount(0);
+  expect(cancels).toHaveLength(1);
+  expect(cancels[0]).toEqual({ order_key: expect.any(String), order_no: "0000070", quantity: "2" });
+  await expect.poll(() => accountRequests.length).toBe(2);
+  await expect.poll(() => openOrderRequests.length).toBe(3);
+});
+
+test("취소할 수 있는 주문에만 취소 버튼이 있다", async ({ page }) => {
+  await mockApi(page, {
+    openOrders: () => listed([openOrder(), openOrder({ order_no: "9", name: "신용종목", cancelable: false, blocked_reason: "credit" })]),
+  });
+  await open(page);
+
+  await expect(row(page, "SK하이닉스").getByRole("button", { name: "SK하이닉스 주문 취소" })).toBeVisible();
+  await expect(row(page, "신용종목").getByRole("button")).toHaveCount(0);
+});
+
+test("다시 확인했더니 주문이 없으면 안내와 함께 주문 취소하기가 막힌다", async ({ page }) => {
+  let first = true;
+  await mockApi(page, {
+    openOrders: () => {
+      const reply = first ? listed([openOrder()]) : listed([]);
+      first = false;
+      return reply;
+    },
+  });
+  await open(page);
+  await openCancel(page);
+
+  await expect(sheet(page)).toContainText("이미 체결되었거나 취소된 주문입니다");
+  await expect(submitCancel(page)).toBeDisabled();
+});
+
+test("다시 확인이 실패하면 다시 확인 버튼으로 다시 요청하고, 성공하면 주문 취소하기가 풀린다", async ({ page }) => {
+  let calls = 0;
+  const { openOrderRequests } = await mockApi(page, {
+    openOrders: () => {
+      calls += 1;
+      return calls === 2 ? failure(502, "connection_error", "키움 서버에 연결하지 못했습니다.") : listed([openOrder()]);
+    },
+  });
+  await open(page);
+  await openCancel(page);
+
+  await expect(sheet(page)).toContainText("미체결을 확인하지 못했습니다");
+  await expect(submitCancel(page)).toBeDisabled();
+  await sheet(page).getByRole("button", { name: "다시 확인" }).click();
+
+  await expect(submitCancel(page)).toBeEnabled();
+  expect(openOrderRequests).toHaveLength(3);
+});
+
+test("주문 취소하기를 여러 번 눌러도 요청은 하나이고, 보내는 동안 닫히지 않는다", async ({ page }) => {
+  const { cancels } = await mockApi(page, { cancel: (body) => ({ delayMs: 800, reply: cancelAccepted(body) }) });
+  await open(page);
+  await openCancel(page);
+  await expect(submitCancel(page)).toBeEnabled();
+
+  const submit = sheet(page).getByRole("button", { name: /취소/ }).last();
+  await submit.click();
+  await expect(sheet(page).getByRole("button", { name: "취소 중…" })).toBeDisabled();
+  await submit.click({ force: true });
+  await page.keyboard.press("Escape");
+  await expect(sheet(page)).toBeVisible();
+  await expect(sheet(page).getByRole("button", { name: "닫기", exact: true }).first()).toBeDisabled();
+
+  await expect(sheet(page)).toHaveCount(0);
+  expect(cancels).toHaveLength(1);
+});
+
+test("거부되면 실패 알림과 함께 최종 확인이 남고, 다시 보내면 새 주문 키를 쓴다", async ({ page }) => {
+  let reject = true;
+  const { cancels } = await mockApi(page, {
+    cancel: (body) => (reject ? failure(502, "open_orders_check_failed", "미체결을 확인하지 못해 취소하지 않았습니다.") : cancelAccepted(body)),
+  });
+  await open(page);
+  await openCancel(page);
+
+  await submitCancel(page).click();
+  const alert = page.getByRole("alert").filter({ hasText: "미체결을 확인하지 못해 취소하지 않았습니다." });
+  await expect(alert).toContainText("주문을 취소하지 못했습니다");
+  await expect(sheet(page)).toBeVisible();
+
+  reject = false;
+  await submitCancel(page).click();
+  await expect(sheet(page)).toHaveCount(0);
+  expect(cancels).toHaveLength(2);
+  expect(cancels[1].order_key).not.toBe(cancels[0].order_key);
+});
+
+test("주문 없음으로 거부되면 미체결을 다시 확인해 안내를 보여준다", async ({ page }) => {
+  let gone = false;
+  const { openOrderRequests } = await mockApi(page, {
+    openOrders: () => (gone ? listed([]) : listed([openOrder()])),
+    cancel: () => {
+      gone = true;
+      return failure(400, "open_order_not_found", "이미 체결되었거나 취소된 주문입니다.");
+    },
+  });
+  await open(page);
+  await openCancel(page);
+  await expect(submitCancel(page)).toBeEnabled();
+
+  await submitCancel(page).click();
+
+  await expect(sheet(page).getByRole("note")).toContainText("이미 체결되었거나 취소된 주문입니다");
+  await expect(submitCancel(page)).toBeDisabled();
+  expect(openOrderRequests).toHaveLength(3);
+});
+
+for (const [label, reply] of [
+  ["409 중복", failure(409, "duplicate_order")],
+  ["502 확인 불가", failure(502, "order_result_unknown")],
+  ["연결 끊김", { abort: true }],
+  ["HTML 응답", { html: "<html>bad gateway</html>" }],
+] as [string, CancelReply][]) {
+  test(`${label}이면 확인 불가 알림을 띄우고 최종 확인을 닫은 뒤 다시 불러온다`, async ({ page }) => {
+    const { accountRequests, openOrderRequests, cancels } = await mockApi(page, { cancel: () => reply });
+    await open(page);
+    await openCancel(page);
+    await expect(submitCancel(page)).toBeEnabled();
+
+    await submitCancel(page).click();
+
+    const alert = page.getByRole("alert").filter({ hasText: "접수 여부를 확인할 수 없습니다" });
+    await expect(alert).toContainText("키움에서 주문 내역을 확인한 뒤 다시 시도하세요.");
+    await expect(sheet(page)).toHaveCount(0);
+    await expect.poll(() => accountRequests.length).toBe(2);
+    await expect.poll(() => openOrderRequests.length).toBe(3);
+    expect(cancels).toHaveLength(1);
+  });
+}
+
+test("주문 취소 최종 확인이 가로 스크롤을 만들지 않는다", async ({ page }) => {
+  await mockApi(page);
+  await open(page);
+  await openCancel(page);
+  await expect(submitCancel(page)).toBeEnabled();
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
 });

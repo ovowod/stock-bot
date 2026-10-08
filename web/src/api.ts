@@ -352,6 +352,30 @@ export function fetchOpenOrders(environment: EnvironmentValue, signal: AbortSign
   return getJson<OpenOrders>(`/api/environments/${environment}/open-orders`, signal);
 }
 
+export interface CancelRequest {
+  order_key: string;
+  order_no: string;
+  quantity: string;
+}
+
+export interface CancelAccepted {
+  order_key: string;
+  /** 키움이 취소 주문에 붙인 새 주문번호. */
+  order_no: string;
+  original_order_no: string;
+  /** 키움이 확정해 준 취소 수량. 잔량 전부로 보내 키움이 0을 주면 null이다. */
+  cancel_quantity: number | null;
+  accepted_at: string;
+}
+
+/** 국내 미체결 주문을 취소한다. 결과 분류는 placeOrder와 같고, 다시 보내지 않는다. */
+export function cancelOrder(
+  environment: EnvironmentValue,
+  request: CancelRequest,
+): Promise<{ result: CancelAccepted; requestId: string | null }> {
+  return sendOrderRequest<CancelAccepted>(`/api/environments/${environment}/cancellations`, request);
+}
+
 export interface RankingConditions {
   exchange: string;
   period: string;

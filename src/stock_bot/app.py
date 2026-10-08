@@ -74,8 +74,8 @@ def create_app(
     stocks = StockSearchService(kiwoom, today or today_kst)
     accounts = AccountService(kiwoom, stocks.listings)
     quotes = QuoteService(kiwoom)
-    orders = OrderService(kiwoom, accounts.holding)
     open_orders = OpenOrderService(kiwoom)
+    orders = OrderService(kiwoom, accounts.holding, open_orders.orders)
     fills = FillWatcher(kiwoom, notifier, realtime_connect or connect_websocket)
 
     @asynccontextmanager
@@ -286,6 +286,16 @@ def create_app(
         except ValueError:
             payload = None
         return await orders.place(spec, payload)
+
+    @app.post("/api/environments/{environment}/cancellations")
+    async def cancel_order(environment: str, request: Request) -> dict[str, Any]:
+        spec = parse_environment(environment)
+        environment_var.set(spec.environment.value)
+        try:
+            payload = await request.json()
+        except ValueError:
+            payload = None
+        return await orders.cancel(spec, payload)
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

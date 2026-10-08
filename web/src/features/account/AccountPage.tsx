@@ -74,10 +74,11 @@ export function AccountPage({ environment }: { environment: EnvironmentValue }) 
               onSold={refreshAll}
               openOrders={
                 <OpenOrdersPanel
+                  env={env}
                   state={openOrders.state}
-                  isReal={env.isReal}
                   onRetry={openOrders.retry}
                   onRefresh={openOrders.refresh}
+                  onChanged={refreshAll}
                 />
               }
             />

@@ -1,7 +1,10 @@
 import { ShieldAlert } from "lucide-react";
+import { useState } from "react";
 import type { OpenOrder, OpenOrders } from "../../api";
+import type { EnvironmentOption } from "../../environments";
 import { formatCount, formatKrw } from "../../format";
 import { Callout } from "../order/Sheet";
+import { CancelSheet } from "./CancelSheet";
 import { ErrorNotice, Panel } from "./parts";
 import type { RemoteState } from "./useAccount";
 
@@ -9,17 +12,22 @@ const count = new Intl.NumberFormat("ko-KR");
 
 /** 국내 계좌 확인 맨 아래의 미체결 주문. 계좌와 따로 불러오므로 실패해도 이 패널에만 오류가 보인다. */
 export function OpenOrdersPanel({
+  env,
   state,
-  isReal,
   onRetry,
   onRefresh,
+  onChanged,
 }: {
+  env: EnvironmentOption;
   state: RemoteState<OpenOrders>;
-  isReal: boolean;
   onRetry: () => void;
   onRefresh: () => void;
+  /** 주문 취소가 접수됐거나 접수 여부를 모를 때. 계좌와 미체결 주문을 다시 불러온다. */
+  onChanged: () => void;
 }) {
   const ready = state.status === "ready" ? state : null;
+  const isReal = env.isReal;
+  const [cancelling, setCancelling] = useState<OpenOrder | null>(null);
   return (
     <Panel title="미체결 주문" label="미체결 주문" aside={ready ? `${ready.data.orders.length}건` : undefined}>
       {isReal && (
@@ -48,17 +56,25 @@ export function OpenOrdersPanel({
           ) : (
             <ul className="-mx-2">
               {ready.data.orders.map((order) => (
-                <OpenOrderRow key={order.order_no} order={order} isReal={isReal} />
+                <OpenOrderRow
+                  key={order.order_no}
+                  order={order}
+                  isReal={isReal}
+                  onCancel={() => setCancelling(order)}
+                />
               ))}
             </ul>
           )}
         </div>
       )}
+      {cancelling && (
+        <CancelSheet env={env} target={cancelling} onClose={() => setCancelling(null)} onChanged={onChanged} />
+      )}
     </Panel>
   );
 }
 
-function OpenOrderRow({ order, isReal }: { order: OpenOrder; isReal: boolean }) {
+function OpenOrderRow({ order, isReal, onCancel }: { order: OpenOrder; isReal: boolean; onCancel: () => void }) {
   const quantity =
     order.ordered_quantity === null
       ? `미체결 ${formatCount(order.remaining_quantity)}`
@@ -95,6 +111,16 @@ function OpenOrderRow({ order, isReal }: { order: OpenOrder; isReal: boolean }) 
       <div className="flex shrink-0 items-center gap-3">
         <p className="text-[15px] font-bold whitespace-nowrap">{quantity}</p>
         {!isReal && !order.cancelable && <p className="text-xs whitespace-nowrap text-muted">키움 앱에서 취소하세요</p>}
+        {!isReal && order.cancelable && (
+          <button
+            type="button"
+            aria-label={`${order.name} 주문 취소`}
+            onClick={onCancel}
+            className="shrink-0 rounded-xl bg-canvas px-3.5 py-2 text-sm font-bold text-sub hover:bg-ink hover:text-white"
+          >
+            취소
+          </button>
+        )}
       </div>
     </li>
   );
