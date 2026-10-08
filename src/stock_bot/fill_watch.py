@@ -545,11 +545,13 @@ class OpenOrder:
 
 def _domestic_open_order(row: Reader) -> OpenOrder:
     tm = row.text("tm")
+    order_type = row.text("trde_tp")
     return OpenOrder(
         name=row.text("stk_nm"),
         # +, -는 색 표시용이다.
         side=row.text("io_tp_nm").lstrip("+-"),
-        order_type=row.text("trde_tp"),
+        # 키움 국내 문서의 "보통"은 이 프로젝트에서 지정가라고 부른다.
+        order_type="지정가" if order_type == "보통" else order_type,
         price=_absolute(row.number("ord_pric")),
         remaining=row.number("oso_qty"),
         ordered=row.number("ord_qty"),
@@ -731,10 +733,8 @@ def _open_orders_field(orders: list[OpenOrder] | None) -> EmbedField:
 
 
 def _open_order_line(order: OpenOrder) -> str:
-    # 키움 국내 문서의 "보통"은 이 프로젝트에서 지정가라고 부른다.
-    order_type = "지정가" if order.order_type == "보통" else order.order_type
     price = MONEY_FORMATS[order.market](order.price)
-    pricing = order_type if order_type == "시장가" else f"{order_type} {price}"
+    pricing = order.order_type if order.order_type == "시장가" else f"{order.order_type} {price}"
     remaining = UNKNOWN if order.remaining is None else f"{order.remaining:,.0f}"
     ordered = UNKNOWN if order.ordered is None else f"{order.ordered:,.0f}"
     return (

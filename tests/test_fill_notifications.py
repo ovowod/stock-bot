@@ -857,7 +857,7 @@ async def test_us_profit_fails_when_purchase_amount_is_not_per_fill(second_cost)
     )
 
     assert second["embeds"][0]["title"] == "체결 · 매도"
-    assert fields(second)["매도 손익"] in ("조회 실패", "확인 불가")
+    assert fields(second)["매도 손익"] == "조회 실패"
 
 
 async def test_us_profit_fails_when_earlier_fills_were_missed():
@@ -881,3 +881,10 @@ async def test_same_order_number_in_two_environments_is_kept_apart():
     us = discord.payloads[1]
     assert us["content"] == "[미국 모의]"
     assert fields(us)["매도 손익"].startswith("+$13.18")
+
+
+async def test_us_unreadable_values_are_shown_as_unknown_and_next_fill_still_works():
+    broken, ok = await us_fills(fill_kiwoom(), us_fill_event(**{"911": "abc"}), us_fill_event())
+
+    assert fields(broken)["이번 체결"] == "확인 불가 @ $12.08 (확인 불가)"
+    assert fields(ok)["이번 체결"] == "1주 @ $12.08 ($12.08)"
