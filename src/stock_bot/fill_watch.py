@@ -41,6 +41,10 @@ RESPONSE_TIMEOUT_SECONDS = 10.0
 RECONNECT_INITIAL_SECONDS = 1.0
 RECONNECT_MAX_SECONDS = 60.0
 
+# 미체결·매입가 조회가 연결 실패·시간 초과로 끝나면 이만큼 기다렸다가 한 번만 다시 시도한다.
+# 조회만 하는 TR이라 다시 보내도 안전하다. 키움 오류 응답은 다시 시도하지 않는다.
+LOOKUP_RETRY_SECONDS = 1.0
+
 # 매도 손익 계산용으로 주문번호별로 더해 둔 체결을 마지막 체결 뒤 이만큼 지나면 지운다.
 # 일부만 체결된 채 끝난 주문이 쌓이지 않게 하기 위해서다.
 # 날짜로 지우지 않는 건 미국 장이 한국 자정을 넘기 때문이다.
@@ -335,7 +339,7 @@ class FillWatcher:
     async def _purchase_price(self, spec: EnvironmentSpec, code: str) -> Decimal | None:
         """당일 실현손익 상세(ka10077)에서 그 종목의 매입가를 찾는다. 못 찾으면 None이다."""
         try:
-            data = await self._kiwoom.call(spec, "ka10077", DOMESTIC_ACCOUNT_PATH, {"stk_cd": code})
+            data = await self._lookup(spec, "ka10077", DOMESTIC_ACCOUNT_PATH, {"stk_cd": code})
             prices = {
                 row.number("buy_uv")
                 # 응답 종목코드에는 A가 붙어 온다(A005930).
@@ -368,6 +372,25 @@ class FillWatcher:
         log(logger, logging.INFO, "purchase_price_fetched", api_id="ka10077", price=_plain(price))
         return price
 
+    async def _lookup(
+        self, spec: EnvironmentSpec, api_id: str, path: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            return await self._kiwoom.call(spec, api_id, path, body)
+        except AppError as exc:
+            if exc.kind != "connection_error":
+                raise
+            log(
+                logger,
+                logging.WARNING,
+                "lookup_retry",
+                api_id=api_id,
+                wait_seconds=LOOKUP_RETRY_SECONDS,
+                cause=exc.message,
+            )
+        await asyncio.sleep(LOOKUP_RETRY_SECONDS)
+        return await self._kiwoom.call(spec, api_id, path, body)
+
     async def _open_orders(self, spec: EnvironmentSpec) -> list[OpenOrder] | None:
         """그 투자 환경의 미체결 주문. 조회하지 못하면 None이다."""
         if spec.market is Market.DOMESTIC:
@@ -380,7 +403,7 @@ class FillWatcher:
             body = {"ord_dt": "", "slby_tp": "0", "stex_tp": "", "stk_cd": ""}
             parse = _us_open_order
         try:
-            data = await self._kiwoom.call(spec, api_id, path, body)
+            data = await self._lookup(spec, api_id, path, body)
             orders = [parse(row) for row in Reader(data, api_id).rows(list_key)]
         except AppError as exc:
             log(

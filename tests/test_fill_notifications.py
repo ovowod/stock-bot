@@ -902,3 +902,56 @@ async def test_us_unit_prices_keep_up_to_four_decimals():
     lines = fields(payload)["미체결 주문 (2건)"].split("\n")
     assert "지정가 $1,234.5 ·" in lines[0]
     assert "지정가 $12.0522 ·" in lines[1]
+
+
+def flaky(api_id: str, reply: dict, failures: int = 1):
+    """처음 failures번은 응답 시간 초과, 그 뒤로는 reply를 돌려주는 응답 함수."""
+    calls = {"count": 0}
+
+    def respond(request: httpx.Request):
+        calls["count"] += 1
+        if calls["count"] <= failures:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return page_response(reply)
+
+    return respond
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch):
+    monkeypatch.setattr(fill_watch, "LOOKUP_RETRY_SECONDS", 0)
+
+
+async def test_open_order_lookup_is_retried_once_after_a_timeout(no_retry_wait, caplog):
+    kiwoom = fill_kiwoom().respond("ka10075", flaky("ka10075", {"oso": [open_order()]}))
+    [payload] = await notify_fills(kiwoom)
+
+    assert len(kiwoom.calls("ka10075")) == 2
+    assert "미체결 주문 (1건)" in fields(payload)
+    retries = [r for r in caplog.records if r.getMessage() == "lookup_retry"]
+    assert retries and retries[0].fields["api_id"] == "ka10075"
+
+
+async def test_purchase_price_lookup_is_retried_once_after_a_timeout(no_retry_wait):
+    reply = {"tdy_rlzt_pl": "0", "tdy_rlzt_pl_dtl": [realized_row()]}
+    kiwoom = fill_kiwoom().respond("ka10077", flaky("ka10077", reply))
+    [payload] = await notify_fills(kiwoom, sell())
+
+    assert len(kiwoom.calls("ka10077")) == 2
+    assert fields(payload)["매도 손익"].startswith("+10,000원")
+
+
+async def test_lookup_gives_up_after_the_second_timeout(no_retry_wait):
+    kiwoom = fill_kiwoom().respond("ust21050", flaky("ust21050", {"result_list": []}, failures=2))
+    [payload] = await us_fills(kiwoom, us_fill_event())
+
+    assert len(kiwoom.calls("ust21050")) == 2
+    assert fields(payload)["미체결 주문"] == "조회 실패"
+
+
+async def test_kiwoom_rejection_is_not_retried(no_retry_wait):
+    kiwoom = fill_kiwoom({"return_code": 1, "return_msg": "조회 오류"})
+    [payload] = await notify_fills(kiwoom)
+
+    assert len(kiwoom.calls("ka10075")) == 1
+    assert fields(payload)["미체결 주문"] == "조회 실패"
