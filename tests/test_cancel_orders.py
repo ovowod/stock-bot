@@ -5,6 +5,7 @@ import threading
 import httpx
 import pytest
 
+from stock_bot import app as app_module
 from stock_bot.app import create_app
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, ThreadedTransport, body_of, kiwoom_error
 from tests.test_open_orders import open_order
@@ -304,3 +305,33 @@ def test_cancelling_more_than_the_remaining_is_refused(make_client, caplog):
     assert fake.calls("kt10003") == []
     blocked = [r for r in caplog.records if r.getMessage() == "cancel_blocked"]
     assert blocked[0].fields["remaining_quantity"] == 3  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("cncl_qty", ["000000000000", "", None])
+def test_partial_cancel_without_a_confirmed_quantity_reports_the_requested_one(
+    make_client, cncl_qty
+):
+    reply = {**CANCEL_REPLY, "cncl_qty": cncl_qty}
+    fake = kiwoom().reply("kt10003", reply)
+
+    response = make_client(fake).post(URL, json=cancel(quantity="2"))
+
+    assert response.json()["cancel_quantity"] == 2
+
+
+def test_a_failing_cancel_listener_does_not_turn_an_accepted_cancel_into_a_failure(
+    make_client, monkeypatch, caplog
+):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+
+    def broken(*args: object) -> None:
+        raise KeyError("name")
+
+    monkeypatch.setattr(app_module, "_cancel_embed", broken)
+    fake = kiwoom()
+
+    response = make_client(fake).post(URL, json=cancel())
+
+    assert response.status_code == 200
+    assert response.json()["order_no"] == "0000141"
+    assert any(r.getMessage() == "cancel_listener_failed" for r in caplog.records)

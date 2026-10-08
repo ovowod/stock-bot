@@ -39,7 +39,11 @@ function useOpenOrderCheck(env: EnvironmentOption, orderNo: string, onLoaded: (o
         setCheck({ status: "error", message: error instanceof ApiError ? error.message : "알 수 없는 오류입니다." });
       },
     );
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      // 다시 확인할 때 이전 결과로 주문 취소하기가 잠깐이라도 풀리지 않게 한다.
+      setCheck({ status: "loading" });
+    };
   }, [env.value, orderNo, attempt]);
 
   return { check, retry: () => setAttempt((value) => value + 1) };

@@ -215,6 +215,9 @@ class OrderService:
             CANCEL_UNKNOWN_RESULT_MESSAGE,
         )
         cancelled = _cancelled_quantity(data.get("cncl_qty"))
+        if cancelled is None and not all_remaining:
+            # 일부 취소는 보낸 수량이 곧 취소 수량이다. 잔량 전부(0)일 때만 모른다.
+            cancelled = int(cancel["quantity"])
         log(
             logger,
             logging.INFO,
@@ -232,7 +235,18 @@ class OrderService:
             "accepted_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         if self._on_cancelled:
-            self._on_cancelled(spec, order, result)
+            # 취소는 이미 접수됐다. 알림 쪽 문제로 접수 결과를 실패로 돌려주지 않는다.
+            try:
+                self._on_cancelled(spec, order, result)
+            except Exception as error:
+                log(
+                    logger,
+                    logging.ERROR,
+                    "cancel_listener_failed",
+                    order_key=cancel["order_key"],
+                    error_type=type(error).__name__,
+                    cause=str(error),
+                )
         return result
 
     async def _check_sellable(self, spec: EnvironmentSpec, order: dict[str, str]) -> None:
@@ -380,7 +394,7 @@ def _cancelled_quantity(value: Any) -> int | None:
     재조회한 미체결 수량은 그사이 체결됐을 수 있어 대신 쓰지 않는다.
     """
     try:
-        quantity = int(str(value).strip())
+        quantity = abs(int(str(value).strip()))
     except ValueError:
         return None
     return quantity or None

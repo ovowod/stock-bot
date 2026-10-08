@@ -49,7 +49,7 @@ def _order(row: Reader, spec: EnvironmentSpec) -> dict[str, Any]:
     # +, -는 색 표시용이다.
     side_label = row.text("io_tp_nm").lstrip("+-")
     order_type = row.text("trde_tp")
-    price = row.integer("ord_pric")
+    price = _optional_integer(row, "ord_pric")
     tm = row.text("tm")
     blocked = _blocked_reason(row, spec, side_label)
     return {
@@ -62,13 +62,26 @@ def _order(row: Reader, spec: EnvironmentSpec) -> dict[str, Any]:
         "order_type": "지정가" if order_type == "보통" else order_type,
         # 시장가 등 가격이 없는 주문은 0으로 온다.
         "price": abs(price) if price else None,
-        "ordered_quantity": row.integer("ord_qty"),
+        "ordered_quantity": _optional_integer(row, "ord_qty"),
         "remaining_quantity": remaining,
         "time": _hhmmss(tm) or tm,
         "exchange": row.text("stex_tp_txt"),
         "cancelable": blocked is None,
         "blocked_reason": blocked,
     }
+
+
+def _optional_integer(row: Reader, key: str) -> int | None:
+    """화면에 보여주기만 하는 숫자 칸. 깨진 값이면 목록 전체를 실패시키지 않고 그 칸만 비운다.
+
+    모의 서버가 숫자 칸을 '. 950'처럼 깨진 값으로 보낸 적이 있다(account.py의 _HoldingReader).
+    취소에 쓰는 주문번호·종목코드·미체결 수량은 여기에 넣지 않는다.
+    """
+    try:
+        return row.integer(key)
+    except AppError:
+        log(logger, logging.WARNING, "open_order_value_unreadable", key=key)
+        return None
 
 
 def _blocked_reason(row: Reader, spec: EnvironmentSpec, side_label: str) -> str | None:

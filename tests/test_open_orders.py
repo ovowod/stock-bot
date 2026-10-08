@@ -173,3 +173,16 @@ def test_us_environment_has_no_open_order_list(make_client):
 
     assert response.status_code == 400
     assert fake.requests == []
+
+
+@pytest.mark.parametrize("overrides", [{"ord_pric": ". 950"}, {"ord_qty": "abc"}])
+def test_an_unreadable_price_or_ordered_quantity_only_blanks_that_value(make_client, overrides):
+    client = make_client(FakeKiwoom().reply("ka10075", {"oso": [open_order(**overrides)]}))
+
+    response = client.get(URL)
+
+    assert response.status_code == 200
+    [order] = response.json()["orders"]
+    key = "price" if "ord_pric" in overrides else "ordered_quantity"
+    assert order[key] is None
+    assert order["remaining_quantity"] == 1
