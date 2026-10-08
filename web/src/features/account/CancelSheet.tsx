@@ -2,7 +2,7 @@ import { CircleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { ApiError, cancelOrder, fetchOpenOrders, ORDER_RESULT_UNKNOWN, type OpenOrder } from "../../api";
 import type { EnvironmentOption } from "../../environments";
-import { formatCount, formatKrw } from "../../format";
+import { EMPTY, formatCount, formatKrw } from "../../format";
 import { newOrderKey, parseQuantity } from "../order/order";
 import { Callout, Field, INPUT, Sheet } from "../order/Sheet";
 import { useToast } from "../toast/Toasts";
@@ -138,7 +138,7 @@ export function CancelSheet({
     ["주문", order.side_label],
     ["종목", order.name],
     ["종목코드", order.code],
-    ["거래소", order.exchange],
+    ["거래소", order.exchange ?? EMPTY],
     ["주문 유형", order.order_type],
     ["주문가격", order.price === null ? order.order_type : formatKrw(order.price)],
     ["주문 수량", formatCount(order.ordered_quantity)],
@@ -153,7 +153,7 @@ export function CancelSheet({
       env={env}
       eyebrow="주문 취소"
       title={target.name}
-      meta={`${target.code} · ${target.exchange}`}
+      meta={[target.code, target.exchange].filter(Boolean).join(" · ")}
       locked={sending}
       onClose={onClose}
     >

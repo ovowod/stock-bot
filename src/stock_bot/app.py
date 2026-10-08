@@ -84,7 +84,7 @@ def create_app(
     stocks = StockSearchService(kiwoom, today or today_kst)
     accounts = AccountService(kiwoom, stocks.listings)
     quotes = QuoteService(kiwoom)
-    open_orders = OpenOrderService(kiwoom)
+    open_orders = OpenOrderService(kiwoom, stocks.listings)
     orders = OrderService(
         kiwoom,
         accounts.holding,

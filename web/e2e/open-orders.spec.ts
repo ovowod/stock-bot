@@ -235,12 +235,86 @@ test("실전투자에서는 목록만 보이고 취소할 수 없다는 안내�
   await expect(panel(page).getByRole("button", { name: /취소/ })).toHaveCount(0);
 });
 
-test("미국 계좌 확인에는 미체결 주문 패널이 없고 요청도 나가지 않는다", async ({ page }) => {
-  const { openOrderRequests } = await mockApi(page);
+const usOrder = (overrides: Record<string, unknown> = {}) =>
+  openOrder({
+    order_no: "000000282",
+    code: "NVDA",
+    name: "엔비디아",
+    side: "buy",
+    side_label: "매수",
+    order_type: "지정가",
+    price: 200.5,
+    ordered_quantity: 5,
+    remaining_quantity: 5,
+    time: "21:46:06",
+    exchange: "NASDAQ",
+    ...overrides,
+  });
+
+test("미국 계좌 확인 아래에도 미체결 주문이 USD 가격과 거래소와 함께 보인다", async ({ page }) => {
+  const { openOrderRequests } = await mockApi(page, { openOrders: () => listed([usOrder()]) });
   await open(page, "미국 모의");
 
-  await expect(panel(page)).toHaveCount(0);
-  expect(openOrderRequests.filter((environment) => environment.startsWith("us"))).toEqual([]);
+  const nvda = row(page, "엔비디아");
+  await expect(nvda).toContainText("NVDA");
+  await expect(nvda).toContainText("매수");
+  await expect(nvda).toContainText("$200.50");
+  await expect(nvda).toContainText("NASDAQ");
+  await expect(nvda).toContainText("미체결 5 / 주문 5주");
+  await expect(nvda).toContainText("21:46:06");
+  expect(openOrderRequests).toContain("us_paper");
+});
+
+test("미국 예약 주문과 거래소를 모르는 주문은 이유와 안내만 보인다", async ({ page }) => {
+  await mockApi(page, {
+    openOrders: () =>
+      listed([
+        usOrder({ order_no: "1", name: "예약종목", cancelable: false, blocked_reason: "reserved" }),
+        usOrder({ order_no: "2", name: "모르는종목", exchange: null, cancelable: false, blocked_reason: "exchange" }),
+      ]),
+  });
+  await open(page, "미국 모의");
+
+  await expect(row(page, "예약종목")).toContainText("예약 주문");
+  await expect(row(page, "모르는종목")).toContainText("거래소 확인 불가");
+  for (const name of ["예약종목", "모르는종목"]) {
+    await expect(row(page, name)).toContainText("키움 앱에서 취소하세요");
+    await expect(row(page, name).getByRole("button")).toHaveCount(0);
+  }
+});
+
+test("미국 실전에서는 목록만 보이고 취소할 수 없다는 안내가 한 번 보인다", async ({ page }) => {
+  await mockApi(page, { openOrders: () => listed([usOrder({ cancelable: false, blocked_reason: "real" })]) });
+  await open(page, "미국 실전");
+
+  await expect(panel(page).getByText("실전투자에서는 주문 취소를 할 수 없습니다.")).toHaveCount(1);
+  await expect(row(page, "엔비디아")).toBeVisible();
+  await expect(panel(page).getByRole("button", { name: /취소/ })).toHaveCount(0);
+});
+
+test("미국에서도 상단 새로고침은 계좌와 미체결 주문을 함께 다시 불러온다", async ({ page }) => {
+  const { accountRequests, openOrderRequests } = await mockApi(page, { openOrders: () => listed([usOrder()]) });
+  await open(page, "미국 모의");
+  await expect(row(page, "엔비디아")).toBeVisible();
+  const accounts = accountRequests.length;
+  const opens = openOrderRequests.length;
+
+  await page.getByRole("button", { name: "새로고침" }).click();
+
+  await expect.poll(() => accountRequests.length).toBe(accounts + 1);
+  await expect.poll(() => openOrderRequests.length).toBe(opens + 1);
+});
+
+test("미국 미체결 패널이 가로 스크롤을 만들지 않는다", async ({ page }) => {
+  await mockApi(page, {
+    openOrders: () =>
+      listed([usOrder({ name: "아이셰어즈 MSCI 브라질 캡드 ETF 아주 긴 이름", exchange: null, cancelable: false, blocked_reason: "exchange" })]),
+  });
+  await open(page, "미국 모의");
+  await expect(panel(page)).toBeVisible();
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
 });
 
 test("보유종목 매도가 접수되면 미체결 주문도 다시 불러온다", async ({ page }) => {

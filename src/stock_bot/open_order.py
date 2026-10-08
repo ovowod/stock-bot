@@ -1,10 +1,10 @@
-"""국내 미체결 주문 조회: 키움 ka10075를 불러 화면과 주문 취소에 필요한 필드만 정리한다."""
+"""미체결 주문 조회: 국내 ka10075, 미국 ust21050을 불러 화면과 취소에 필요한 필드만 정리한다."""
 
 import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from stock_bot.account import DOMESTIC_ACCOUNT_PATH
+from stock_bot.account import DOMESTIC_ACCOUNT_PATH, US_ACCOUNT_PATH, StockListings
 from stock_bot.config import EnvironmentSpec, Market
 from stock_bot.errors import AppError, response_format_error
 from stock_bot.kiwoom import KiwoomClient
@@ -16,11 +16,21 @@ logger = logging.getLogger("stock_bot.open_order")
 API_ID = "ka10075"
 # stex_tp=0(통합)은 문서의 허용값이다. 모의투자에서 받아들이는지는 아직 확인하지 못했다.
 REQUEST_BODY = {"all_stk_tp": "0", "trde_tp": "0", "stk_cd": "", "stex_tp": "0"}
+US_API_ID = "ust21050"
+# ord_dt 빈 값은 오늘이다. 체결 알림과 같은 본문이다.
+US_REQUEST_BODY = {"ord_dt": "", "slby_tp": "0", "stex_tp": "", "stk_cd": ""}
+# ust21050의 주문종류(ord_cntr_tp). 취소주문 줄은 거둬들일 수 없으므로 보여주지 않는다.
+US_CANCEL_ORDER = "12"
+US_MODIFY_ORDER = "11"
+US_RESERVED = {"예약", "1"}
 
 
 class OpenOrderService:
-    def __init__(self, kiwoom: KiwoomClient) -> None:
+    def __init__(self, kiwoom: KiwoomClient, listings: StockListings | None = None) -> None:
         self._kiwoom = kiwoom
+        # 미국 미체결 응답은 거래소를 "미국"으로만 준다.
+        # 취소에 쓸 거래소와 이름을 종목 목록에서 찾는다.
+        self._listings = listings
 
     async def fetch(self, spec: EnvironmentSpec) -> dict[str, Any]:
         return {
@@ -29,15 +39,52 @@ class OpenOrderService:
         }
 
     async def orders(self, spec: EnvironmentSpec) -> list[dict[str, Any]]:
-        """그 투자 환경의 미체결 주문 전부. 국내만 지원한다."""
-        if spec.market is not Market.DOMESTIC:
-            raise AppError(
-                "unsupported_market", "미국 투자 환경의 미체결 주문은 지원하지 않습니다.", 400
-            )
+        """그 투자 환경의 미체결 주문 전부."""
+        if spec.market is Market.US:
+            return await self._us_orders(spec)
         data = await self._kiwoom.call(spec, API_ID, DOMESTIC_ACCOUNT_PATH, REQUEST_BODY)
         orders = [_order(row, spec) for row in Reader(data, API_ID).rows("oso")]
         log(logger, logging.INFO, "open_orders_fetched", api_id=API_ID, count=len(orders))
         return orders
+
+    async def _us_orders(self, spec: EnvironmentSpec) -> list[dict[str, Any]]:
+        data = await self._kiwoom.call(spec, US_API_ID, US_ACCOUNT_PATH, US_REQUEST_BODY)
+        rows = [
+            row
+            for row in Reader(data, US_API_ID).rows("result_list")
+            if row.optional("ord_cntr_tp") != US_CANCEL_ORDER
+        ]
+        listings = await self._us_listings(spec)
+        orders = [_us_order(row, spec, listings) for row in rows]
+        unlisted = sorted({o["code"] for o in orders if o["exchange"] is None})
+        if unlisted:
+            # 조회마다 한 줄만 남긴다. 그 주문의 취소가 막힌 이유다.
+            log(
+                logger,
+                logging.WARNING,
+                "open_order_tickers_unlisted",
+                api_id=US_API_ID,
+                tickers=",".join(unlisted),
+                count=len(unlisted),
+            )
+        log(logger, logging.INFO, "open_orders_fetched", api_id=US_API_ID, count=len(orders))
+        return orders
+
+    async def _us_listings(self, spec: EnvironmentSpec) -> dict[str, dict[str, Any]]:
+        """종목 목록을 받지 못해도 미체결 목록은 보여준다. 그때는 거래소를 모른다."""
+        if self._listings is None:
+            return {}
+        try:
+            return await self._listings(spec)
+        except AppError as error:
+            log(
+                logger,
+                logging.WARNING,
+                "stock_list_unavailable",
+                kind=error.kind,
+                cause=error.message,
+            )
+            return {}
 
 
 def _order(row: Reader, spec: EnvironmentSpec) -> dict[str, Any]:
@@ -69,6 +116,56 @@ def _order(row: Reader, spec: EnvironmentSpec) -> dict[str, Any]:
         "cancelable": blocked is None,
         "blocked_reason": blocked,
     }
+
+
+def _us_order(
+    row: Reader, spec: EnvironmentSpec, listings: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    order_no = row.text("ord_no")
+    code = row.text("stk_cd")
+    remaining = row.integer("ord_remnq")
+    if not order_no or not code or remaining is None:
+        raise response_format_error(US_API_ID, "ord_no, stk_cd, ord_remnq 중 빈 값이 있습니다.")
+    slby_tp = row.text("slby_tp")
+    # 국내 표기(매수정정·매도정정)와 맞춘다.
+    modified = "정정" if row.optional("ord_cntr_tp") == US_MODIFY_ORDER else ""
+    listing = listings.get(code, {})
+    exchange = listing.get("exchange")
+    price = _optional_decimal(row, "ord_uv")
+    if spec.is_real:
+        blocked: str | None = "real"
+    elif row.optional("rsrv_tp") in US_RESERVED:
+        # 예약주문은 다른 TR(ust21203)로 취소한다.
+        blocked = "reserved"
+    elif exchange is None:
+        blocked = "exchange"
+    else:
+        blocked = None
+    return {
+        "order_no": order_no,
+        "code": code,
+        "name": listing.get("name") or row.text("frgn_stk_nm"),
+        "side": "sell" if slby_tp == "1" else "buy" if slby_tp == "2" else None,
+        "side_label": row.text("slby_tp_nm") + modified,
+        "order_type": row.text("frgn_trde_nm"),
+        "price": price or None,
+        "ordered_quantity": _optional_integer(row, "ord_qty"),
+        "remaining_quantity": remaining,
+        # 이미 HH:mm:ss(KST)로 온다.
+        "time": row.text("ord_time"),
+        "exchange": exchange,
+        "cancelable": blocked is None,
+        "blocked_reason": blocked,
+    }
+
+
+def _optional_decimal(row: Reader, key: str) -> float | None:
+    """화면에 보여주기만 하는 소수 칸. 깨진 값이면 그 칸만 비운다."""
+    try:
+        return row.decimal(key)
+    except AppError:
+        log(logger, logging.WARNING, "open_order_value_unreadable", key=key)
+        return None
 
 
 def _optional_integer(row: Reader, key: str) -> int | None:

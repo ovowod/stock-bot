@@ -2,13 +2,15 @@ import { ShieldAlert } from "lucide-react";
 import { useState } from "react";
 import type { OpenOrder, OpenOrders } from "../../api";
 import type { EnvironmentOption } from "../../environments";
-import { formatCount, formatKrw } from "../../format";
+import { formatCount, formatForeign, formatKrw } from "../../format";
 import { Callout } from "../order/Sheet";
 import { CancelSheet } from "./CancelSheet";
 import { ErrorNotice, Panel } from "./parts";
 import type { RemoteState } from "./useAccount";
 
 const count = new Intl.NumberFormat("ko-KR");
+
+type Market = EnvironmentOption["market"];
 
 /** 국내 계좌 확인 맨 아래의 미체결 주문. 계좌와 따로 불러오므로 실패해도 이 패널에만 오류가 보인다. */
 export function OpenOrdersPanel({
@@ -59,6 +61,7 @@ export function OpenOrdersPanel({
                 <OpenOrderRow
                   key={order.order_no}
                   order={order}
+                  market={env.market}
                   isReal={isReal}
                   onCancel={() => setCancelling(order)}
                 />
@@ -74,7 +77,17 @@ export function OpenOrdersPanel({
   );
 }
 
-function OpenOrderRow({ order, isReal, onCancel }: { order: OpenOrder; isReal: boolean; onCancel: () => void }) {
+function OpenOrderRow({
+  order,
+  market,
+  isReal,
+  onCancel,
+}: {
+  order: OpenOrder;
+  market: Market;
+  isReal: boolean;
+  onCancel: () => void;
+}) {
   const quantity =
     order.ordered_quantity === null
       ? `미체결 ${formatCount(order.remaining_quantity)}`
@@ -83,12 +96,11 @@ function OpenOrderRow({ order, isReal, onCancel }: { order: OpenOrder; isReal: b
     order.code,
     order.order_type,
     // 시장가처럼 가격이 없는 주문은 주문 유형만 보여준다.
-    ...(order.price === null ? [] : [formatKrw(order.price)]),
+    ...(order.price === null ? [] : [formatOrderPrice(order.price, market)]),
     order.time,
-    order.exchange,
+    ...(order.exchange === null ? [] : [order.exchange]),
   ];
-  const blockedBadge =
-    order.blocked_reason === "credit" ? "신용" : order.blocked_reason === "exchange" ? `${order.exchange} 주문` : null;
+  const blockedBadge = blockedLabel(order, market);
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-2xl px-2 py-3 transition hover:bg-canvas/70">
       <div className="min-w-0 flex-1">
@@ -112,7 +124,8 @@ function OpenOrderRow({ order, isReal, onCancel }: { order: OpenOrder; isReal: b
       <div className="flex w-full items-center justify-between gap-3 md:w-auto md:shrink-0 md:justify-end">
         <p className="text-[15px] font-bold whitespace-nowrap">{quantity}</p>
         {!isReal && !order.cancelable && <p className="text-xs whitespace-nowrap text-muted">키움 앱에서 취소하세요</p>}
-        {!isReal && order.cancelable && (
+        {/* 미국 취소는 서버가 받기 전까지 버튼을 열지 않는다(.scratch/us-cancel-order 티켓 02). */}
+        {!isReal && order.cancelable && market === "domestic" && (
           <button
             type="button"
             aria-label={`${order.name} 주문 취소`}
@@ -125,6 +138,24 @@ function OpenOrderRow({ order, isReal, onCancel }: { order: OpenOrder; isReal: b
       </div>
     </li>
   );
+}
+
+/** 미체결 주문의 가격. 국내는 원, 미국은 보유종목과 같은 USD 4자리 표시다. */
+export function formatOrderPrice(price: number, market: Market): string {
+  return market === "domestic" ? formatKrw(price) : formatForeign(price, "USD", 4);
+}
+
+function blockedLabel(order: OpenOrder, market: Market): string | null {
+  switch (order.blocked_reason) {
+    case "credit":
+      return "신용";
+    case "reserved":
+      return "예약 주문";
+    case "exchange":
+      return market === "us" ? "거래소 확인 불가" : `${order.exchange} 주문`;
+    default:
+      return null;
+  }
 }
 
 function SideBadge({ order }: { order: OpenOrder }) {
