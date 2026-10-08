@@ -750,10 +750,10 @@ async def test_us_buy_fill_is_sent_in_usd_with_us_open_orders():
     assert payload["embeds"][0]["color"] == US_BUY_COLOR
     assert fields(payload) == {
         "종목": "포드 모터 (F)",
-        "이번 체결": "1주 @ $12.08 ($12.08)",
+        "이번 체결": "1주 @ $12.075 ($12.08)",
         "누적": "1 / 1주 · 전량 체결",
         "체결 시각": "23:23:08",
-        "미체결 주문 (1건)": "포드 모터 · 매수 · 지정가 $1.00 · 미체결 1/1주 · 23:22:11",
+        "미체결 주문 (1건)": "포드 모터 · 매수 · 지정가 $1 · 미체결 1/1주 · 23:22:11",
     }
     assert body_of(kiwoom.calls("ust21050")[0]) == {
         "ord_dt": "",
@@ -809,7 +809,8 @@ async def test_us_sell_profit_uses_realized_purchase_amount(price, title, color,
 
     assert payload["embeds"][0]["title"] == title
     assert payload["embeds"][0]["color"] == color
-    assert fields(payload)["매도 손익"] == f"{profit} · 매입가 $12.08 · 수수료·세금 제외"
+    # 1주 가격은 받은 대로 소수 넷째 자리까지, 금액·손익은 센트까지 보여준다.
+    assert fields(payload)["매도 손익"] == f"{profit} · 매입가 $12.075 · 수수료·세금 제외"
     # 매입 금액은 체결 이벤트에 들어 있어 따로 조회하지 않는다.
     assert kiwoom.calls("ust21630") == []
     assert kiwoom.calls("ka10077") == []
@@ -886,5 +887,18 @@ async def test_same_order_number_in_two_environments_is_kept_apart():
 async def test_us_unreadable_values_are_shown_as_unknown_and_next_fill_still_works():
     broken, ok = await us_fills(fill_kiwoom(), us_fill_event(**{"911": "abc"}), us_fill_event())
 
-    assert fields(broken)["이번 체결"] == "확인 불가 @ $12.08 (확인 불가)"
-    assert fields(ok)["이번 체결"] == "1주 @ $12.08 ($12.08)"
+    assert fields(broken)["이번 체결"] == "확인 불가 @ $12.075 (확인 불가)"
+    assert fields(ok)["이번 체결"] == "1주 @ $12.075 ($12.08)"
+
+
+async def test_us_unit_prices_keep_up_to_four_decimals():
+    kiwoom = fill_kiwoom().reply(
+        "ust21050",
+        {"result_list": [us_open_order(ord_uv="1234.5000"), us_open_order(ord_uv="12.0522")]},
+    )
+    [payload] = await us_fills(kiwoom, us_fill_event(**{"910": "0000012.0522", "911": "2"}))
+
+    assert fields(payload)["이번 체결"] == "2주 @ $12.0522 ($24.10)"
+    lines = fields(payload)["미체결 주문 (2건)"].split("\n")
+    assert "지정가 $1,234.5 ·" in lines[0]
+    assert "지정가 $12.0522 ·" in lines[1]

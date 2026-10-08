@@ -684,7 +684,10 @@ def _fill_embed(
         color=color,
         fields=(
             EmbedField("종목", stock or UNKNOWN),
-            EmbedField("이번 체결", f"{_shares(fill.quantity)} @ {money(fill.price)} ({amount})"),
+            EmbedField(
+                "이번 체결",
+                f"{_shares(fill.quantity)} @ {PRICE_FORMATS[fill.market](fill.price)} ({amount})",
+            ),
             EmbedField("누적", _progress(fill)),
             EmbedField("체결 시각", fill.time or UNKNOWN),
             *(
@@ -704,7 +707,7 @@ def _profit_text(profit: SellProfit, market: Market) -> str:
     sign = "+" if profit.amount > 0 else "-" if profit.amount < 0 else ""
     return (
         f"{sign}{money(abs(profit.amount))} ({sign}{abs(profit.rate):.2f}%)"
-        f" · 매입가 {money(profit.purchase)} · 수수료·세금 제외"
+        f" · 매입가 {PRICE_FORMATS[market](profit.purchase)} · 수수료·세금 제외"
     )
 
 
@@ -733,7 +736,7 @@ def _open_orders_field(orders: list[OpenOrder] | None) -> EmbedField:
 
 
 def _open_order_line(order: OpenOrder) -> str:
-    price = MONEY_FORMATS[order.market](order.price)
+    price = PRICE_FORMATS[order.market](order.price)
     pricing = order.order_type if order.order_type == "시장가" else f"{order.order_type} {price}"
     remaining = UNKNOWN if order.remaining is None else f"{order.remaining:,.0f}"
     ordered = UNKNOWN if order.ordered is None else f"{order.ordered:,.0f}"
@@ -772,4 +775,15 @@ def _usd(value: Decimal | None) -> str:
     return f"${value.quantize(MONEY_UNITS[Market.US], ROUND_HALF_UP):,}"
 
 
+def _usd_price(value: Decimal | None) -> str:
+    """1주 가격. 키움이 주는 소수 넷째 자리까지 보여주고 끝의 0은 지운다($12.0522, $1)."""
+    if value is None:
+        return UNKNOWN
+    text = f"{value.quantize(Decimal('0.0001'), ROUND_HALF_UP):,}".rstrip("0").rstrip(".")
+    return f"${text}"
+
+
+# 금액·손익 표시
 MONEY_FORMATS = {Market.DOMESTIC: _won, Market.US: _usd}
+# 1주 가격 표시. 미국은 금액보다 자릿수가 많아 따로 둔다.
+PRICE_FORMATS = {Market.DOMESTIC: _won, Market.US: _usd_price}
