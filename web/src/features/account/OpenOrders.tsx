@@ -108,7 +108,8 @@ function OpenOrderRow({ order, isReal, onCancel }: { order: OpenOrder; isReal: b
           ))}
         </p>
       </div>
-      <div className="flex shrink-0 items-center gap-3">
+      {/* 좁은 화면에서는 수량과 취소 버튼을 아래 줄 전체 너비로 내려 종목 정보가 좁아지지 않게 한다. */}
+      <div className="flex w-full items-center justify-between gap-3 md:w-auto md:shrink-0 md:justify-end">
         <p className="text-[15px] font-bold whitespace-nowrap">{quantity}</p>
         {!isReal && !order.cancelable && <p className="text-xs whitespace-nowrap text-muted">키움 앱에서 취소하세요</p>}
         {!isReal && order.cancelable && (
