@@ -80,6 +80,16 @@ class KiwoomClient:
         secrets.add(*credentials.secrets())
         return credentials
 
+    async def access_token(self, spec: EnvironmentSpec) -> str:
+        """REST 호출과 같은 캐시의 접근 토큰. 실시간 연결의 LOGIN에 쓴다."""
+        return (await self._token(spec)).value
+
+    async def discard_access_token(self, spec: EnvironmentSpec, value: str) -> None:
+        """실시간 LOGIN이 거부한 토큰을 버린다. 그사이 새로 받은 토큰은 지우지 않는다."""
+        cached = self._tokens.get(spec.credential_prefix)
+        if cached is not None and cached.value == value:
+            await self._discard_token(spec, cached)
+
     async def call(
         self, spec: EnvironmentSpec, api_id: str, path: str, body: dict[str, Any]
     ) -> dict[str, Any]:

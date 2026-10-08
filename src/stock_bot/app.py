@@ -6,7 +6,8 @@ import math
 import os
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from stock_bot.account import AccountService
 from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
 from stock_bot.config import ENVIRONMENTS, LOG_DIR, PROJECT_ROOT, load_env_file, parse_environment
 from stock_bot.errors import AppError
+from stock_bot.fill_watch import FillWatcher, RealtimeConnect, connect_websocket
 from stock_bot.kiwoom import KST, KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
@@ -45,6 +47,7 @@ def create_app(
     today: Callable[[], date] | None = None,
     clock: Callable[[], float] | None = None,
     notifier: DiscordNotifier | None = None,
+    realtime_connect: RealtimeConnect | None = None,
 ) -> FastAPI:
     setup_logging(log_dir)
     if environ is None:
@@ -71,7 +74,19 @@ def create_app(
     accounts = AccountService(kiwoom, stocks.listings)
     quotes = QuoteService(kiwoom)
     orders = OrderService(kiwoom, accounts.holding)
-    app = FastAPI(title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None)
+    fills = FillWatcher(kiwoom, notifier, realtime_connect or connect_websocket)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        fills.start()
+        try:
+            yield
+        finally:
+            await fills.stop()
+
+    app = FastAPI(
+        title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
 
     # 아래 request_context보다 먼저 등록해야 그 안쪽에서 돈다.
     # 그래야 거부 응답에도 요청 ID가 붙는다.

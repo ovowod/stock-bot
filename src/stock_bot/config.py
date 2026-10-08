@@ -15,6 +15,8 @@ LOG_DIR = PROJECT_ROOT / "logs"
 
 REAL_DOMAIN = "https://api.kiwoom.com"
 PAPER_DOMAIN = "https://mockapi.kiwoom.com"
+REAL_REALTIME_URL = "wss://api.kiwoom.com:10000/api/websocket"
+PAPER_REALTIME_URL = "wss://mockapi.kiwoom.com:10000/api/websocket"
 
 
 def load_env_file(path: Path = ENV_FILE) -> None:
@@ -43,6 +45,11 @@ class EnvironmentSpec:
     is_real: bool
     credential_prefix: str
     domain: str
+
+    @property
+    def realtime_url(self) -> str:
+        """실시간(WebSocket) 주소. REST 도메인과 같이 실전/모의로만 갈린다."""
+        return REAL_REALTIME_URL if self.is_real else PAPER_REALTIME_URL
 
 
 ENVIRONMENTS: dict[Environment, EnvironmentSpec] = {
