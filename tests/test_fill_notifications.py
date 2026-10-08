@@ -488,14 +488,17 @@ async def test_other_system_messages_are_logged_and_watching_continues(caplog):
     assert system and system[0].fields["code"] == "R99999"
 
 
-async def notify_one_fill(kiwoom: FakeKiwoom) -> dict:
+async def notify_fills(kiwoom: FakeKiwoom, *events: dict) -> list[dict]:
+    """체결 이벤트를 보내고 Discord로 나간 알림을 돌려준다. 이벤트가 없으면 매수 체결 하나다."""
+    events = events or (fill_event(),)
     realtime = FakeRealtime()
     discord = FakeDiscord()
     async with running(realtime, discord, kiwoom):
         [connection] = await realtime.wait_registered()
-        connection.push(fill_event())
-        await discord.wait_for(1)
-    return discord.payloads[0]
+        for event in events:
+            connection.push(event)
+        await discord.wait_for(len(events))
+    return discord.payloads
 
 
 async def test_open_orders_are_listed_oldest_first():
@@ -522,7 +525,7 @@ async def test_open_orders_are_listed_oldest_first():
             ]
         }
     )
-    payload = await notify_one_fill(kiwoom)
+    [payload] = await notify_fills(kiwoom)
 
     assert body_of(kiwoom.calls("ka10075")[0]) == {
         "all_stk_tp": "0",
@@ -542,7 +545,7 @@ async def test_open_orders_are_listed_oldest_first():
 
 async def test_more_than_ten_open_orders_are_summarized():
     rows = [open_order(tm=f"09{minute:02d}00") for minute in range(12)]
-    payload = await notify_one_fill(fill_kiwoom({"oso": rows}))
+    [payload] = await notify_fills(fill_kiwoom({"oso": rows}))
 
     lines = fields(payload)["미체결 주문 (12건)"].split("\n")
     assert len(lines) == 11
@@ -553,7 +556,7 @@ async def test_more_than_ten_open_orders_are_summarized():
 
 async def test_open_orders_stop_before_the_discord_field_limit():
     rows = [open_order(stk_nm="가" * 120, tm=f"09{minute:02d}00") for minute in range(10)]
-    payload = await notify_one_fill(fill_kiwoom({"oso": rows}))
+    [payload] = await notify_fills(fill_kiwoom({"oso": rows}))
 
     value = fields(payload)["미체결 주문 (10건)"]
     lines = value.split("\n")
@@ -568,7 +571,7 @@ async def test_open_orders_follow_continuation_pages():
         page_response({"oso": [open_order(tm="090000")]}, cont_yn="Y", next_key="k1"),
         page_response({"oso": [open_order(tm="091000")]}),
     )
-    payload = await notify_one_fill(kiwoom)
+    [payload] = await notify_fills(kiwoom)
 
     calls = kiwoom.calls("ka10075")
     assert [c.headers["cont-yn"] for c in calls] == ["N", "Y"]
@@ -586,7 +589,7 @@ async def test_open_orders_follow_continuation_pages():
 )
 async def test_open_order_lookup_failure_still_sends_the_fill(reply, caplog):
     kiwoom = fill_kiwoom(reply)
-    payload = await notify_one_fill(kiwoom)
+    [payload] = await notify_fills(kiwoom)
 
     assert fields(payload)["이번 체결"] == "3주 @ 60,000원 (180,000원)"
     assert fields(payload)["미체결 주문"] == "조회 실패"
@@ -601,17 +604,6 @@ def sell(**overrides: str) -> dict:
 
 def with_realized(*rows: dict) -> FakeKiwoom:
     return fill_kiwoom().reply("ka10077", {"tdy_rlzt_pl": "0", "tdy_rlzt_pl_dtl": list(rows)})
-
-
-async def notify_fills(kiwoom: FakeKiwoom, *events: dict) -> list[dict]:
-    realtime = FakeRealtime()
-    discord = FakeDiscord()
-    async with running(realtime, discord, kiwoom):
-        [connection] = await realtime.wait_registered()
-        for event in events:
-            connection.push(event)
-        await discord.wait_for(len(events))
-    return discord.payloads
 
 
 @pytest.mark.parametrize(

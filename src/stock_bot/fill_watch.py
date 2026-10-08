@@ -546,8 +546,15 @@ def _time(values: dict[str, Any], key: str) -> str | None:
     text = _text(values, key)
     if text is None:
         return None
-    if len(text) != 6 or not text.isdigit():
+    formatted = _hhmmss(text)
+    if formatted is None:
         log(logger, logging.WARNING, "fill_value_unreadable", key=key, raw=text[:40])
+    return formatted
+
+
+def _hhmmss(text: str) -> str | None:
+    """키움의 HHmmss를 HH:MM:SS로 바꾼다. 형식이 다르면 None이다."""
+    if len(text) != 6 or not text.isdigit():
         return None
     return f"{text[:2]}:{text[2:4]}:{text[4:]}"
 
@@ -625,9 +632,7 @@ def _open_order_line(order: OpenOrder) -> str:
     pricing = order_type if order_type == "시장가" else f"{order_type} {_won(order.price)}"
     remaining = UNKNOWN if order.remaining is None else f"{order.remaining:,.0f}"
     ordered = UNKNOWN if order.ordered is None else f"{order.ordered:,.0f}"
-    time = order.time
-    if len(time) == 6 and time.isdigit():
-        time = f"{time[:2]}:{time[2:4]}:{time[4:]}"
+    time = _hhmmss(order.time) or order.time
     return f"{order.name} · {order.side} · {pricing} · 미체결 {remaining}/{ordered}주 · {time}"
 
 
