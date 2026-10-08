@@ -449,3 +449,71 @@ test("주문 취소 최종 확인이 가로 스크롤을 만들지 않는다", a
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
 });
+
+// ---- 일부 수량 취소 ----
+
+const quantityInput = (page: Page) => sheet(page).getByLabel("취소 수량 (주)");
+
+test("취소 수량은 최신 미체결 수량으로 채워지고, 줄여서 일부만 취소할 수 있다", async ({ page }) => {
+  const { cancels } = await mockApi(page);
+  await open(page);
+  await openCancel(page);
+
+  await expect(quantityInput(page)).toHaveValue("3");
+  await quantityInput(page).fill("1");
+  await sheet(page).getByRole("button", { name: "전부" }).click();
+  await expect(quantityInput(page)).toHaveValue("3");
+  await quantityInput(page).fill("1");
+  await submitCancel(page).click();
+
+  await expect(sheet(page)).toHaveCount(0);
+  expect(cancels[0].quantity).toBe("1");
+});
+
+for (const [value, message] of [
+  ["0", "수량은 1주 이상"],
+  ["1.5", "수량은 1주 이상"],
+  ["4", "미체결 수량(3주)보다 많이 취소할 수 없습니다."],
+] as const) {
+  test(`취소 수량 ${value}은 안내와 함께 막힌다`, async ({ page }) => {
+    await mockApi(page);
+    await open(page);
+    await openCancel(page);
+    await expect(quantityInput(page)).toHaveValue("3");
+
+    await quantityInput(page).fill(value);
+
+    await expect(sheet(page)).toContainText(message);
+    await expect(submitCancel(page)).toBeDisabled();
+  });
+}
+
+test("수량 초과로 거부되면 다시 확인해 줄어든 미체결 수량을 보여주고, 입력 값은 그대로 둔다", async ({ page }) => {
+  let remaining = 3;
+  const { openOrderRequests, cancels } = await mockApi(page, {
+    openOrders: () => listed([openOrder({ remaining_quantity: remaining })]),
+    cancel: (body) => {
+      if (cancels.length > 1) return cancelAccepted(body);
+      remaining = 1;
+      return failure(400, "cancel_quantity_exceeded", "미체결 수량(1주)을 넘어 취소하지 않았습니다.");
+    },
+  });
+  await open(page);
+  await openCancel(page);
+  await quantityInput(page).fill("2");
+
+  await submitCancel(page).click();
+
+  await expect(page.getByRole("alert").filter({ hasText: "미체결 수량(1주)을 넘어" })).toBeVisible();
+  await expect(sheet(page).getByRole("note")).toContainText("미체결 수량이 1주로 줄었습니다");
+  await expect(quantityInput(page)).toHaveValue("2");
+  await expect(sheet(page).locator('dd[data-term="미체결 수량"]')).toHaveText("1주");
+  await expect(submitCancel(page)).toBeDisabled();
+  expect(openOrderRequests).toHaveLength(3);
+
+  await sheet(page).getByRole("button", { name: "전부" }).click();
+  await expect(quantityInput(page)).toHaveValue("1");
+  await submitCancel(page).click();
+  await expect(sheet(page)).toHaveCount(0);
+  expect(cancels.map((c) => c.quantity)).toEqual(["2", "1"]);
+});

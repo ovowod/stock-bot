@@ -275,11 +275,25 @@ def test_cancel_events_are_logged_with_the_order_key(make_client, caplog):
     assert events["cancel_accepted"]["original_order_no"] == "0000070"
 
 
-def test_only_all_remaining_can_be_cancelled_for_now(make_client):
+def test_cancelling_part_of_the_remaining_sends_that_quantity(make_client):
     fake = kiwoom()
 
     response = make_client(fake).post(URL, json=cancel(quantity="2"))
 
+    assert response.status_code == 200
+    assert body_of(fake.calls("kt10003")[0])["cncl_qty"] == "2"
+
+
+def test_cancelling_more_than_the_remaining_is_refused(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    fake = kiwoom()
+
+    response = make_client(fake).post(URL, json=cancel(quantity="4"))
+
     assert response.status_code == 400
-    assert response.json()["error"]["kind"] == "cancel_quantity_mismatch"
+    error = response.json()["error"]
+    assert error["kind"] == "cancel_quantity_exceeded"
+    assert "3주" in error["message"]
     assert fake.calls("kt10003") == []
+    blocked = [r for r in caplog.records if r.getMessage() == "cancel_blocked"]
+    assert blocked[0].fields["remaining_quantity"] == 3  # type: ignore[attr-defined]

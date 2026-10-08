@@ -3,22 +3,26 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, cancelOrder, fetchOpenOrders, ORDER_RESULT_UNKNOWN, type OpenOrder } from "../../api";
 import type { EnvironmentOption } from "../../environments";
 import { formatCount, formatKrw } from "../../format";
-import { newOrderKey } from "../order/order";
-import { Callout, Sheet } from "../order/Sheet";
+import { newOrderKey, parseQuantity } from "../order/order";
+import { Callout, Field, INPUT, Sheet } from "../order/Sheet";
 import { useToast } from "../toast/Toasts";
 
 type Check = { status: "loading" } | { status: "ready"; order: OpenOrder | null } | { status: "error"; message: string };
 
 // 이 응답을 받으면 미체결을 다시 확인해 최신 상태를 보여준다.
-const RECHECK_KINDS = new Set(["open_order_not_found"]);
+const RECHECK_KINDS = new Set(["open_order_not_found", "cancel_quantity_exceeded"]);
 
 /**
  * 시트가 열려 있는 동안 미체결을 다시 조회해 그 주문의 최신 상태를 찾는다. retry를 부르면 다시 조회한다.
  * 시트를 닫으면 진행 중인 조회를 취소하고 그 응답은 반영하지 않는다.
  */
-function useOpenOrderCheck(env: EnvironmentOption, orderNo: string) {
+function useOpenOrderCheck(env: EnvironmentOption, orderNo: string, onLoaded: (order: OpenOrder | null) => void) {
   const [check, setCheck] = useState<Check>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
+  const loaded = useRef(onLoaded);
+  useEffect(() => {
+    loaded.current = onLoaded;
+  });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -26,7 +30,9 @@ function useOpenOrderCheck(env: EnvironmentOption, orderNo: string) {
     fetchOpenOrders(env.value, controller.signal).then(
       (data) => {
         if (controller.signal.aborted) return;
-        setCheck({ status: "ready", order: data.orders.find((order) => order.order_no === orderNo) ?? null });
+        const order = data.orders.find((item) => item.order_no === orderNo) ?? null;
+        loaded.current(order);
+        setCheck({ status: "ready", order });
       },
       (error) => {
         if (controller.signal.aborted) return;
@@ -55,25 +61,45 @@ export function CancelSheet({
   const [sending, setSending] = useState(false);
   // 최종 확인을 열 때 주문 키를 만든다. 확실히 거부된 뒤 다시 보낼 때는 새 키를 쓴다.
   const orderKey = useRef(newOrderKey());
-  const { check, retry } = useOpenOrderCheck(env, target.order_no);
+  const [quantityText, setQuantityText] = useState("");
+  const filled = useRef(false);
+  // 직전 재조회의 미체결 수량. 다시 확인했을 때 줄었는지 판단한다.
+  const lastRemaining = useRef<number | null>(null);
+  const [previousRemaining, setPreviousRemaining] = useState<number | null>(null);
+  const { check, retry } = useOpenOrderCheck(env, target.order_no, (order) => {
+    if (!order) return;
+    setPreviousRemaining(lastRemaining.current);
+    lastRemaining.current = order.remaining_quantity;
+    // 처음 확인했을 때만 남은 수량 전부로 채운다. 그 뒤에는 입력 값을 그대로 둔다.
+    if (!filled.current) {
+      filled.current = true;
+      setQuantityText(String(order.remaining_quantity));
+    }
+  });
   const latest = check.status === "ready" ? check.order : null;
-  const canSubmit = !sending && latest !== null && latest.cancelable;
+  const quantity = parseQuantity(quantityText);
+  const over = latest !== null && quantity.quantity !== null && quantity.quantity > latest.remaining_quantity;
+  const shrunk = over && previousRemaining !== null && latest.remaining_quantity < previousRemaining;
+  const quantityError =
+    quantity.error ??
+    (over && !shrunk ? `미체결 수량(${formatCount(latest.remaining_quantity)})보다 많이 취소할 수 없습니다.` : null);
+  const canSubmit = !sending && latest !== null && latest.cancelable && quantity.text !== null && !over;
 
   const submit = async () => {
-    if (!canSubmit || latest === null) return;
+    if (!canSubmit || quantity.text === null) return;
     setSending(true);
     const key = orderKey.current;
     try {
       const { result, requestId } = await cancelOrder(env.value, {
         order_key: key,
         order_no: target.order_no,
-        quantity: String(latest.remaining_quantity),
+        quantity: quantity.text,
       });
-      const quantity = result.cancel_quantity === null ? "남은 수량 전부" : formatCount(result.cancel_quantity);
+      const cancelled = result.cancel_quantity === null ? "남은 수량 전부" : formatCount(result.cancel_quantity);
       showToast({
         tone: "success",
         title: "주문 취소가 접수되었습니다",
-        body: `${target.name} · ${quantity} · 주문번호 ${result.order_no}`,
+        body: `${target.name} · ${cancelled} · 주문번호 ${result.order_no}`,
         meta: [`주문 키 ${key}`, ...(requestId ? [`요청 ID ${requestId}`] : [])],
       });
       setSending(false);
@@ -139,6 +165,28 @@ export function CancelSheet({
             </div>
           ))}
         </dl>
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <Field label="취소 수량 (주)" error={quantityError}>
+              <input
+                value={quantityText}
+                onChange={(event) => setQuantityText(event.target.value)}
+                inputMode="numeric"
+                disabled={sending}
+                aria-invalid={quantityError !== null}
+                className={INPUT}
+              />
+            </Field>
+          </div>
+          <button
+            type="button"
+            disabled={sending || latest === null}
+            onClick={() => latest && setQuantityText(String(latest.remaining_quantity))}
+            className="mt-7 rounded-2xl bg-canvas px-4 py-3 text-sm font-bold text-sub hover:text-ink disabled:opacity-40"
+          >
+            전부
+          </button>
+        </div>
         {check.status === "loading" && <p className="text-sm text-sub">미체결을 확인하는 중입니다.</p>}
         {check.status === "error" && (
           <div className="space-y-2">
@@ -159,7 +207,18 @@ export function CancelSheet({
             미체결 주문에 이 주문이 없어 취소할 수 없습니다.
           </Callout>
         )}
-        <p className="text-xs text-muted">주문 취소하기를 누르면 이 주문의 남은 수량 전부를 취소합니다.</p>
+        {shrunk && latest && (
+          <Callout tone="real" icon={CircleAlert} title={`미체결 수량이 ${formatCount(latest.remaining_quantity)}로 줄었습니다`}>
+            취소 수량을 고친 뒤 다시 취소하세요.
+          </Callout>
+        )}
+        <p className="text-xs text-muted">
+          주문 취소하기를 누르면{" "}
+          {latest !== null && quantity.quantity === latest.remaining_quantity
+            ? "이 주문의 남은 수량 전부를"
+            : `${quantity.quantity === null ? "입력한 수량" : formatCount(quantity.quantity)}만큼`}{" "}
+          취소합니다.
+        </p>
         <div className="sticky bottom-0 mt-auto grid grid-cols-2 gap-2 bg-surface pt-2">
           <button
             type="button"

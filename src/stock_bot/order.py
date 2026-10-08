@@ -170,7 +170,7 @@ class OrderService:
                 "이 앱에서 취소할 수 없는 주문입니다. 키움 앱에서 취소하세요.",
                 400,
             )
-        if int(cancel["quantity"]) != remaining:
+        if int(cancel["quantity"]) > remaining:
             log(
                 logger,
                 logging.WARNING,
@@ -181,8 +181,8 @@ class OrderService:
                 remaining_quantity=remaining,
             )
             raise AppError(
-                "cancel_quantity_mismatch",
-                f"남은 수량({remaining:,}주) 전부만 취소할 수 있습니다.",
+                "cancel_quantity_exceeded",
+                f"미체결 수량({remaining:,}주)을 넘어 취소하지 않았습니다.",
                 400,
                 {"remaining_quantity": remaining},
             )
