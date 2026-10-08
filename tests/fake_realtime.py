@@ -131,3 +131,40 @@ def fill_event(**overrides: str) -> dict[str, Any]:
         "trnm": "REAL",
         "data": [{"values": values, "type": "00", "name": "주문체결", "item": values["9001"]}],
     }
+
+
+def open_order(**overrides: str) -> dict[str, str]:
+    """ka10075 미체결 목록(oso)의 한 줄. kra-docs responseExample을 따른다."""
+    row = {
+        "acnt_no": "8100000111",
+        "ord_no": "0000069",
+        "mang_empno": "",
+        "stk_cd": "005930",
+        "tsk_tp": "",
+        "ord_stt": "접수",
+        "stk_nm": "삼성전자",
+        "ord_qty": "10",
+        "ord_pric": "60000",
+        "oso_qty": "7",
+        "cntr_tot_amt": "0",
+        "orig_ord_no": "0000000",
+        "io_tp_nm": "+매수",
+        "trde_tp": "보통",
+        "tm": "094022",
+        "cntr_no": "",
+        "cntr_pric": "0",
+        "cntr_qty": "0",
+        "cur_prc": "+60000",
+        "sel_bid": "0",
+        "buy_bid": "+60000",
+        "unit_cntr_pric": "",
+        "unit_cntr_qty": "",
+        "tdy_trde_cmsn": "0",
+        "tdy_trde_tax": "0",
+        "ind_invsr": "",
+        "stex_tp": "1",
+        "stex_tp_txt": "KRX",
+        "sor_yn": "N",
+    }
+    row.update(overrides)
+    return row

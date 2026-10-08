@@ -15,11 +15,13 @@ from typing import Any, Protocol
 
 from websockets.asyncio.client import connect as websocket_connect
 
+from stock_bot.account import DOMESTIC_ACCOUNT_PATH
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec
 from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
-from stock_bot.notification import DiscordNotifier, Embed, EmbedField
+from stock_bot.notification import FIELD_VALUE_LIMIT, DiscordNotifier, Embed, EmbedField
+from stock_bot.reader import Reader
 
 logger = logging.getLogger("stock_bot.fill_watch")
 
@@ -243,8 +245,29 @@ class FillWatcher:
             quantity=_plain(fill.quantity),
             remaining=_plain(fill.remaining),
         )
-        sent = await self._notifier.send(embed=_fill_embed(fill), spec=spec)
+        open_orders = await self._open_orders(spec)
+        sent = await self._notifier.send(embed=_fill_embed(fill, open_orders), spec=spec)
         log(logger, logging.INFO, "fill_notified", order_no=fill.order_no, sent=sent)
+
+    async def _open_orders(self, spec: EnvironmentSpec) -> list[OpenOrder] | None:
+        """그 투자 환경의 미체결 주문. 조회하지 못하면 None이다."""
+        # stex_tp=0(통합)은 문서의 허용값이다. 모의투자에서 받아들이는지는 아직 확인하지 못했다.
+        body = {"all_stk_tp": "0", "trde_tp": "0", "stk_cd": "", "stex_tp": "0"}
+        try:
+            data = await self._kiwoom.call(spec, "ka10075", DOMESTIC_ACCOUNT_PATH, body)
+            orders = [_domestic_open_order(row) for row in Reader(data, "ka10075").rows("oso")]
+        except AppError as exc:
+            log(
+                logger,
+                logging.WARNING,
+                "open_orders_failed",
+                api_id="ka10075",
+                kind=exc.kind,
+                cause=exc.message,
+            )
+            return None
+        log(logger, logging.INFO, "open_orders_fetched", api_id="ka10075", count=len(orders))
+        return orders
 
 
 async def _send(connection: RealtimeConnection, message: dict[str, Any]) -> None:
@@ -333,6 +356,34 @@ class Fill:
     time: str | None
 
 
+@dataclass(frozen=True)
+class OpenOrder:
+    name: str
+    side: str  # 매수, 매도, 매수정정 등
+    order_type: str
+    price: Decimal | None
+    remaining: Decimal | None
+    ordered: Decimal | None
+    time: str  # HHmmss
+
+
+def _domestic_open_order(row: Reader) -> OpenOrder:
+    return OpenOrder(
+        name=row.text("stk_nm"),
+        # +, -는 색 표시용이다.
+        side=row.text("io_tp_nm").lstrip("+-"),
+        order_type=row.text("trde_tp"),
+        price=_absolute(row.number("ord_pric")),
+        remaining=row.number("oso_qty"),
+        ordered=row.number("ord_qty"),
+        time=row.text("tm"),
+    )
+
+
+def _absolute(value: Decimal | None) -> Decimal | None:
+    return None if value is None else abs(value)
+
+
 def _domestic_fill(values: dict[str, Any]) -> Fill:
     return Fill(
         code=_text(values, "9001"),
@@ -388,7 +439,7 @@ def _time(values: dict[str, Any], key: str) -> str | None:
     return f"{text[:2]}:{text[2:4]}:{text[4:]}"
 
 
-def _fill_embed(fill: Fill) -> Embed:
+def _fill_embed(fill: Fill, open_orders: list[OpenOrder] | None) -> Embed:
     side = {"buy": "매수", "sell": "매도"}.get(fill.side or "")
     title = f"체결 · {side}" if side else "체결"
     color = BUY_COLOR if fill.side == "buy" else NEUTRAL_COLOR
@@ -406,8 +457,45 @@ def _fill_embed(fill: Fill) -> Embed:
             EmbedField("이번 체결", f"{_shares(fill.quantity)} @ {_won(fill.price)} ({amount})"),
             EmbedField("누적", _progress(fill)),
             EmbedField("체결 시각", fill.time or UNKNOWN),
+            _open_orders_field(open_orders),
         ),
     )
+
+
+# 미체결 주문은 이 수까지만 한 줄씩 보여주고 나머지는 "외 N건"으로 줄인다.
+OPEN_ORDER_LINES = 10
+
+
+def _open_orders_field(orders: list[OpenOrder] | None) -> EmbedField:
+    if orders is None:
+        return EmbedField("미체결 주문", "조회 실패")
+    name = f"미체결 주문 ({len(orders)}건)"
+    if not orders:
+        return EmbedField(name, "없음")
+    lines: list[str] = []
+    for order in sorted(orders, key=lambda o: o.time)[:OPEN_ORDER_LINES]:
+        line = _open_order_line(order)
+        rest = len(orders) - len(lines) - 1
+        # 다음 줄과 "외 N건"까지 들어갈 자리가 없으면 멈춘다. 잘린 줄 대신 생략 건수로 보여준다.
+        candidate = [*lines, line, *([f"외 {rest}건"] if rest else [])]
+        if len("\n".join(candidate)) > FIELD_VALUE_LIMIT:
+            break
+        lines.append(line)
+    if len(lines) < len(orders):
+        lines.append(f"외 {len(orders) - len(lines)}건")
+    return EmbedField(name, "\n".join(lines))
+
+
+def _open_order_line(order: OpenOrder) -> str:
+    # 키움 국내 문서의 "보통"은 이 프로젝트에서 지정가라고 부른다.
+    order_type = "지정가" if order.order_type == "보통" else order.order_type
+    pricing = order_type if order_type == "시장가" else f"{order_type} {_won(order.price)}"
+    remaining = UNKNOWN if order.remaining is None else f"{order.remaining:,.0f}"
+    ordered = UNKNOWN if order.ordered is None else f"{order.ordered:,.0f}"
+    time = order.time
+    if len(time) == 6 and time.isdigit():
+        time = f"{time[:2]}:{time[2:4]}:{time[4:]}"
+    return f"{order.name} · {order.side} · {pricing} · 미체결 {remaining}/{ordered}주 · {time}"
 
 
 def _progress(fill: Fill) -> str:

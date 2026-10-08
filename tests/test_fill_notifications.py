@@ -10,8 +10,8 @@ from fastapi import FastAPI
 from stock_bot import fill_watch
 from stock_bot.app import create_app
 from stock_bot.notification import DiscordNotifier
-from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom
-from tests.fake_realtime import OK_LOGIN, OK_REG, FakeRealtime, fill_event
+from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, body_of, page_response
+from tests.fake_realtime import OK_LOGIN, OK_REG, FakeRealtime, fill_event, open_order
 
 pytestmark = pytest.mark.anyio
 
@@ -52,6 +52,11 @@ async def wait_until(condition: Callable[[], bool]) -> None:
     raise AssertionError("조건을 기다렸지만 만족하지 않았습니다.")
 
 
+def fill_kiwoom(*open_order_pages: dict | httpx.Response) -> FakeKiwoom:
+    """체결 알림이 부르는 조회 TR의 응답. 기본은 미체결 주문이 없다."""
+    return FakeKiwoom().reply("ka10075", *(open_order_pages or ({"oso": []},)))
+
+
 @asynccontextmanager
 async def running(
     realtime: FakeRealtime,
@@ -63,7 +68,7 @@ async def running(
     """앱 수명(lifespan)을 실행한 채로 둔다. 체결 감시는 앱이 시작할 때 뜬다."""
     app = create_app(
         environ=environ,
-        transport=httpx.MockTransport(kiwoom or FakeKiwoom()),
+        transport=httpx.MockTransport(kiwoom or fill_kiwoom()),
         static_dir=None,
         log_dir=None,
         notifier=DiscordNotifier(
@@ -128,7 +133,7 @@ async def test_answers_ping_with_the_same_message():
 async def test_domestic_buy_fill_is_sent_to_discord():
     realtime = FakeRealtime()
     discord = FakeDiscord()
-    kiwoom = FakeKiwoom()
+    kiwoom = fill_kiwoom()
     async with running(realtime, discord, kiwoom):
         [connection] = await realtime.wait_registered()
         connection.push(fill_event())
@@ -144,9 +149,10 @@ async def test_domestic_buy_fill_is_sent_to_discord():
         "이번 체결": "3주 @ 60,000원 (180,000원)",
         "누적": "3 / 10주 · 남은 7주",
         "체결 시각": "09:41:05",
+        "미체결 주문 (0건)": "없음",
     }
-    # 매수 체결은 토큰 발급 말고 다른 키움 호출을 하지 않는다.
-    assert [r.url.path for r in kiwoom.requests] == ["/oauth2/token"]
+    # 매수 체결은 미체결 조회 말고 다른 키움 TR을 부르지 않는다.
+    assert [r.headers.get("api-id") for r in kiwoom.requests[1:]] == ["ka10075"]
 
 
 async def test_last_fill_of_a_sell_order_shows_fully_filled():
@@ -170,7 +176,8 @@ async def test_last_fill_of_a_sell_order_shows_fully_filled():
 async def test_only_fills_are_notified():
     realtime = FakeRealtime()
     discord = FakeDiscord()
-    async with running(realtime, discord):
+    kiwoom = fill_kiwoom()
+    async with running(realtime, discord, kiwoom):
         [connection] = await realtime.wait_registered()
         for status in ("접수", "확인", "취소", "거부"):
             connection.push(fill_event(**{"913": status, "911": "", "910": ""}))
@@ -180,6 +187,7 @@ async def test_only_fills_are_notified():
 
     assert len(discord.payloads) == 1
     assert fields(discord.payloads[0])["이번 체결"].startswith("4주")
+    assert len(kiwoom.calls("ka10075")) == 1
 
 
 async def test_unreadable_values_are_shown_as_unknown_and_next_fill_still_works(caplog):
@@ -246,7 +254,7 @@ async def test_no_reply_to_login_or_registration_times_out(monkeypatch, caplog, 
 async def test_connection_and_fill_steps_are_logged_without_secrets(caplog):
     realtime = FakeRealtime()
     discord = FakeDiscord()
-    kiwoom = FakeKiwoom()
+    kiwoom = fill_kiwoom()
     async with running(realtime, discord, kiwoom):
         [connection] = await realtime.wait_registered()
         connection.push(fill_event())
@@ -260,6 +268,7 @@ async def test_connection_and_fill_steps_are_logged_without_secrets(caplog):
         "realtime_logged_in",
         "realtime_registered",
         "fill_received",
+        "open_orders_fetched",
         "fill_notified",
     ]
     received = next(r for r in caplog.records if r.getMessage() == "fill_received")
@@ -465,3 +474,108 @@ async def test_other_system_messages_are_logged_and_watching_continues(caplog):
     assert discord.payloads[0]["embeds"][0]["title"] == "체결 · 매수"
     system = [r for r in caplog.records if r.getMessage() == "realtime_system_message"]
     assert system and system[0].fields["code"] == "R99999"
+
+
+async def notify_one_fill(kiwoom: FakeKiwoom) -> dict:
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    async with running(realtime, discord, kiwoom):
+        [connection] = await realtime.wait_registered()
+        connection.push(fill_event())
+        await discord.wait_for(1)
+    return discord.payloads[0]
+
+
+async def test_open_orders_are_listed_oldest_first():
+    kiwoom = fill_kiwoom(
+        {
+            "oso": [
+                open_order(
+                    stk_nm="SK하이닉스",
+                    io_tp_nm="-매도",
+                    ord_pric="+201000",
+                    tm="101500",
+                    ord_qty="5",
+                    oso_qty="5",
+                ),
+                open_order(tm="094022"),
+                open_order(
+                    stk_nm="카카오",
+                    trde_tp="시장가",
+                    ord_pric="0",
+                    tm="100000",
+                    ord_qty="3",
+                    oso_qty="1",
+                ),
+            ]
+        }
+    )
+    payload = await notify_one_fill(kiwoom)
+
+    assert body_of(kiwoom.calls("ka10075")[0]) == {
+        "all_stk_tp": "0",
+        "trde_tp": "0",
+        "stk_cd": "",
+        "stex_tp": "0",
+    }
+    assert kiwoom.calls("ka10075")[0].url.host == "mockapi.kiwoom.com"
+    assert fields(payload)["미체결 주문 (3건)"] == "\n".join(
+        [
+            "삼성전자 · 매수 · 지정가 60,000원 · 미체결 7/10주 · 09:40:22",
+            "카카오 · 매수 · 시장가 · 미체결 1/3주 · 10:00:00",
+            "SK하이닉스 · 매도 · 지정가 201,000원 · 미체결 5/5주 · 10:15:00",
+        ]
+    )
+
+
+async def test_more_than_ten_open_orders_are_summarized():
+    rows = [open_order(tm=f"09{minute:02d}00") for minute in range(12)]
+    payload = await notify_one_fill(fill_kiwoom({"oso": rows}))
+
+    lines = fields(payload)["미체결 주문 (12건)"].split("\n")
+    assert len(lines) == 11
+    assert lines[0].endswith("09:00:00")
+    assert lines[9].endswith("09:09:00")
+    assert lines[10] == "외 2건"
+
+
+async def test_open_orders_stop_before_the_discord_field_limit():
+    rows = [open_order(stk_nm="가" * 120, tm=f"09{minute:02d}00") for minute in range(10)]
+    payload = await notify_one_fill(fill_kiwoom({"oso": rows}))
+
+    value = fields(payload)["미체결 주문 (10건)"]
+    lines = value.split("\n")
+    assert len(value) <= 1024
+    assert "…" not in value
+    shown = len(lines) - 1
+    assert lines[-1] == f"외 {10 - shown}건"
+
+
+async def test_open_orders_follow_continuation_pages():
+    kiwoom = fill_kiwoom(
+        page_response({"oso": [open_order(tm="090000")]}, cont_yn="Y", next_key="k1"),
+        page_response({"oso": [open_order(tm="091000")]}),
+    )
+    payload = await notify_one_fill(kiwoom)
+
+    calls = kiwoom.calls("ka10075")
+    assert [c.headers["cont-yn"] for c in calls] == ["N", "Y"]
+    assert calls[1].headers["next-key"] == "k1"
+    assert "미체결 주문 (2건)" in fields(payload)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"return_code": 1, "return_msg": "조회 오류"},
+        httpx.Response(500, text="oops"),
+        {"oso": "not a list"},
+    ],
+)
+async def test_open_order_lookup_failure_still_sends_the_fill(reply, caplog):
+    kiwoom = fill_kiwoom(reply)
+    payload = await notify_one_fill(kiwoom)
+
+    assert fields(payload)["이번 체결"] == "3주 @ 60,000원 (180,000원)"
+    assert fields(payload)["미체결 주문"] == "조회 실패"
+    assert "open_orders_failed" in [r.getMessage() for r in caplog.records]
