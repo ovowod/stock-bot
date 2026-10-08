@@ -73,7 +73,7 @@ class FakeRealtime:
         return connection
 
     async def wait_registered(self, count: int = 1) -> list[FakeConnection]:
-        """REG를 보낸 연결이 count개가 될 때까지 기다린다."""
+        """REG를 보낸 연결이 count개가 될 때까지 기다린다. 연결된 순서대로 돌려준다."""
         for _ in range(200):
             registered = [c for c in self.connections if "REG" in c.sent_trnm()]
             if len(registered) >= count:
@@ -182,6 +182,76 @@ def realized_row(**overrides: str) -> dict[str, str]:
         "tdy_trde_cmsn": "0",
         "tdy_trde_tax": "0",
         "stk_cd": "A005930",
+    }
+    row.update(overrides)
+    return row
+
+
+def us_fill_event(**overrides: str) -> dict[str, Any]:
+    """미국 F5 실시간 체결 메시지. 2026-10-08 모의 서버에서 받은 모양을 따른다.
+    기본값은 포드 모터 1주 매수 체결완료다."""
+    values = {
+        "9201": "8200000222",
+        "9203": "000002662",
+        "9001": "F",
+        "905": "21",
+        "8046": "000030",
+        "907": "02",
+        "904": "000000000",
+        "909": "000007164",
+        "900": "1",
+        "901": "0000012.3200",
+        "911": "1",
+        "910": "0000012.0750",
+        "913": "체결완료",
+        "902": "0",
+        "908": "232308",
+        "8018": "0.0000",
+        "8019": "0.0000",
+        "930": "1",
+        "931": "0000012.0750",
+        "8043": "USD",
+        "50072": "매수",
+        "302": "포드 모터",
+        "50073": "지정가",
+        "50724": "0000000.0000",
+        "50725": "000000000000",
+    }
+    values.update(overrides)
+    return {
+        "trnm": "REAL",
+        "data": [{"values": values, "type": "F5", "name": "해외주식체결", "item": values["9001"]}],
+    }
+
+
+def us_open_order(**overrides: str) -> dict[str, str]:
+    """ust21050 미체결 목록(result_list)의 한 줄. 2026-10-08 모의 서버 응답을 따른다."""
+    row = {
+        "ord_cntr_tp": "10",
+        "ord_no": "000002624",
+        "orig_ord_no": "000000000",
+        "stex_nm": "뉴욕",
+        "crnc_code": "USD",
+        "stk_cd": "F",
+        "frgn_stk_nm": "포드 모터",
+        "frgn_trde_tp": "00",
+        "frgn_trde_nm": "지정가",
+        "slby_tp": "2",
+        "slby_tp_nm": "매수",
+        "ord_qty": "000000000001",
+        "ord_uv": "1.0000",
+        "stop_pric": "0000000.0000",
+        "cntr_qty": "000000000000",
+        "cntr_uv": "0.0000",
+        "mdfy_qty": "000000000000",
+        "mdfy_uv": "0.0000",
+        "cncl_qty": "000000000000",
+        "ord_remnq": "000000000001",
+        "ord_time": "23:22:11",
+        "ord_resp_time": "23:22:11",
+        "ord_stat": "접수",
+        "rsrv_tp": "정상",
+        "natn_nm": "미국",
     }
     row.update(overrides)
     return row

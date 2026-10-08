@@ -16,8 +16,8 @@ from typing import Any, Protocol
 
 from websockets.asyncio.client import connect as websocket_connect
 
-from stock_bot.account import DOMESTIC_ACCOUNT_PATH
-from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec
+from stock_bot.account import DOMESTIC_ACCOUNT_PATH, US_ACCOUNT_PATH
+from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
@@ -49,8 +49,14 @@ FILL_MEMORY_SECONDS = 24 * 3600
 # 같은 앱 키로 다른 연결이 들어왔을 때 키움이 기존 연결에 보내는 SYSTEM 코드(모의 서버에서 확인).
 SESSION_REPLACED_CODE = "R10001"
 
-# 지켜볼 투자 환경과 실시간 항목. 00은 국내 주문체결이다.
-WATCHED = ((ENVIRONMENTS[Environment.DOMESTIC_PAPER], "00"),)
+# 지켜볼 투자 환경과 실시간 항목. 00은 국내 주문체결, F5는 미국 실시간 체결이다.
+WATCHED = (
+    (ENVIRONMENTS[Environment.DOMESTIC_PAPER], "00"),
+    (ENVIRONMENTS[Environment.US_PAPER], "F5"),
+)
+# 실시간 항목별로 체결을 뜻하는 주문상태(913). 접수·확인·취소·거부 등은 알리지 않는다.
+# F5의 체결완료는 2026-10-08 모의 서버에서 확인했고, 부분체결은 키움 가이드 설명을 따른다.
+FILL_STATUSES = {"00": {"체결"}, "F5": {"부분체결", "체결완료"}}
 
 
 async def connect_websocket(url: str) -> RealtimeConnection:
@@ -234,14 +240,15 @@ class FillWatcher:
         # 체결 하나의 수신·처리·알림 로그를 같은 ID로 묶는다.
         request_id_var.set(uuid.uuid4().hex[:12])
         values = item.get("values") if isinstance(item, dict) else None
-        if not isinstance(values, dict) or item.get("type") != "00":
-            log(logger, logging.DEBUG, "realtime_item_skipped")
+        realtime_type = item.get("type") if isinstance(item, dict) else None
+        if not isinstance(values, dict) or realtime_type not in FILL_STATUSES:
+            log(logger, logging.DEBUG, "realtime_item_skipped", type=realtime_type)
             return
         status = values.get("913")
-        if status != "체결":
-            log(logger, logging.DEBUG, "fill_skipped", status=status)
+        if status not in FILL_STATUSES[realtime_type]:
+            log(logger, logging.DEBUG, "fill_skipped", type=realtime_type, status=status)
             return
-        fill = _domestic_fill(values)
+        fill = _domestic_fill(values) if realtime_type == "00" else _us_fill(values)
         log(
             logger,
             logging.INFO,
@@ -279,6 +286,8 @@ class FillWatcher:
         entry.amount += fill.price * fill.quantity
         entry.quantity += fill.quantity
         entry.updated = now
+        if fill.market is Market.US:
+            entry.add_realized_cost(fill.realized_cost, fill.quantity)
         if fill.remaining == 0:
             del self._sell_fills[key]
         filled = fill.ordered - fill.remaining
@@ -295,12 +304,30 @@ class FillWatcher:
             )
             return SellProfit(failure=LOOKUP_FAILED)
 
-        purchase = await self._purchase_price(spec, fill.code)
-        if purchase is None:
-            return SellProfit(failure=LOOKUP_FAILED)
-        cost = purchase * filled
+        if fill.market is Market.US:
+            # 미국은 체결 이벤트의 실현손익매입금(50724)이 이번 체결분의 매입 금액이다.
+            # ust21630은 모의투자에서 매도 뒤 -994로 실패해 쓰지 않는다(spec Implementation Notes).
+            if entry.cost is None:
+                log(
+                    logger,
+                    logging.WARNING,
+                    "sell_profit_failed",
+                    order_no=fill.order_no,
+                    cause="realized_cost_unusable",
+                    realized_cost=_plain(fill.realized_cost),
+                )
+                return SellProfit(failure=LOOKUP_FAILED)
+            cost = entry.cost
+            purchase = cost / filled
+        else:
+            domestic_purchase = await self._purchase_price(spec, fill.code)
+            if domestic_purchase is None:
+                return SellProfit(failure=LOOKUP_FAILED)
+            purchase = domestic_purchase
+            cost = purchase * filled
+        unit = MONEY_UNITS[fill.market]
         return SellProfit(
-            amount=(entry.amount - cost).quantize(Decimal(1), ROUND_HALF_UP),
+            amount=(entry.amount - cost).quantize(unit, ROUND_HALF_UP),
             rate=((entry.amount - cost) / cost * 100).quantize(Decimal("0.01"), ROUND_HALF_UP),
             purchase=purchase,
         )
@@ -343,22 +370,29 @@ class FillWatcher:
 
     async def _open_orders(self, spec: EnvironmentSpec) -> list[OpenOrder] | None:
         """그 투자 환경의 미체결 주문. 조회하지 못하면 None이다."""
-        # stex_tp=0(통합)은 문서의 허용값이다. 모의투자에서 받아들이는지는 아직 확인하지 못했다.
-        body = {"all_stk_tp": "0", "trde_tp": "0", "stk_cd": "", "stex_tp": "0"}
+        if spec.market is Market.DOMESTIC:
+            # stex_tp=0(통합)은 문서의 허용값이다. 모의투자에서 받아들이는지는 아직 확인하지 못했다.
+            api_id, path, list_key = "ka10075", DOMESTIC_ACCOUNT_PATH, "oso"
+            body = {"all_stk_tp": "0", "trde_tp": "0", "stk_cd": "", "stex_tp": "0"}
+            parse = _domestic_open_order
+        else:
+            api_id, path, list_key = "ust21050", US_ACCOUNT_PATH, "result_list"
+            body = {"ord_dt": "", "slby_tp": "0", "stex_tp": "", "stk_cd": ""}
+            parse = _us_open_order
         try:
-            data = await self._kiwoom.call(spec, "ka10075", DOMESTIC_ACCOUNT_PATH, body)
-            orders = [_domestic_open_order(row) for row in Reader(data, "ka10075").rows("oso")]
+            data = await self._kiwoom.call(spec, api_id, path, body)
+            orders = [parse(row) for row in Reader(data, api_id).rows(list_key)]
         except AppError as exc:
             log(
                 logger,
                 logging.WARNING,
                 "open_orders_failed",
-                api_id="ka10075",
+                api_id=api_id,
                 kind=exc.kind,
                 cause=exc.message,
             )
             return None
-        log(logger, logging.INFO, "open_orders_fetched", api_id="ka10075", count=len(orders))
+        log(logger, logging.INFO, "open_orders_fetched", api_id=api_id, count=len(orders))
         return orders
 
 
@@ -437,18 +471,43 @@ UNKNOWN = "확인 불가"
 LOOKUP_FAILED = "조회 실패"
 
 
+# 금액 비교·표시 단위. 원은 1원, 달러는 1센트.
+MONEY_UNITS = {Market.DOMESTIC: Decimal(1), Market.US: Decimal("0.01")}
+# 같은 주문의 체결마다 실현손익매입금 ÷ 체결량(매입단가)이 이만큼 넘게 다르면
+# 체결분 값이 아니라고 본다.
+UNIT_COST_TOLERANCE = Decimal("0.0001")
+
+
 @dataclass
 class _OrderFills:
     amount: Decimal = Decimal(0)
     quantity: Decimal = Decimal(0)
     updated: float = 0.0
+    # 미국만 쓴다. 쓸 수 없는 값을 한 번이라도 받으면 None이 되어 그 주문의 손익은 조회 실패다.
+    cost: Decimal | None = Decimal(0)
+    unit_cost: Decimal | None = None
+
+    def add_realized_cost(self, cost: Decimal | None, quantity: Decimal) -> None:
+        """체결분 매입 금액을 더한다. 매도로는 평균 매입단가가 바뀌지 않으므로,
+        체결마다 매입 금액 ÷ 체결량이 같아야 체결분 값이다. 누계 값이면 비율이 달라진다."""
+        if self.cost is None:
+            return
+        if cost is None or cost <= 0 or quantity <= 0:
+            self.cost = None
+            return
+        unit_cost = cost / quantity
+        if self.unit_cost is not None and abs(unit_cost - self.unit_cost) > UNIT_COST_TOLERANCE:
+            self.cost = None
+            return
+        self.unit_cost = unit_cost
+        self.cost += cost
 
 
 @dataclass(frozen=True)
 class SellProfit:
     """매도 손익. 계산하지 못했으면 failure에 이유를 담는다."""
 
-    amount: Decimal | None = None  # 원 단위로 반올림
+    amount: Decimal | None = None  # 원 또는 센트 단위로 반올림
     rate: Decimal | None = None  # %, 소수 둘째 자리
     purchase: Decimal | None = None
     failure: str | None = None
@@ -458,6 +517,7 @@ class SellProfit:
 class Fill:
     """체결 이벤트 하나. 읽지 못한 값은 None이다."""
 
+    market: Market
     code: str | None
     name: str | None
     order_no: str | None
@@ -467,6 +527,8 @@ class Fill:
     ordered: Decimal | None
     remaining: Decimal | None
     time: str | None
+    # 미국 매도 체결분의 매입 금액(F5 50724). 국내는 None이다.
+    realized_cost: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -477,10 +539,12 @@ class OpenOrder:
     price: Decimal | None
     remaining: Decimal | None
     ordered: Decimal | None
-    time: str  # HHmmss
+    time: str  # HH:MM:SS로 바꾸지 못하면 받은 그대로
+    market: Market
 
 
 def _domestic_open_order(row: Reader) -> OpenOrder:
+    tm = row.text("tm")
     return OpenOrder(
         name=row.text("stk_nm"),
         # +, -는 색 표시용이다.
@@ -489,7 +553,22 @@ def _domestic_open_order(row: Reader) -> OpenOrder:
         price=_absolute(row.number("ord_pric")),
         remaining=row.number("oso_qty"),
         ordered=row.number("ord_qty"),
-        time=row.text("tm"),
+        time=_hhmmss(tm) or tm,
+        market=Market.DOMESTIC,
+    )
+
+
+def _us_open_order(row: Reader) -> OpenOrder:
+    return OpenOrder(
+        name=row.text("frgn_stk_nm"),
+        side=row.text("slby_tp_nm"),
+        order_type=row.text("frgn_trde_nm"),
+        price=row.number("ord_uv"),
+        remaining=row.number("ord_remnq"),
+        ordered=row.number("ord_qty"),
+        # 이미 HH:mm:ss로 온다.
+        time=row.text("ord_time"),
+        market=Market.US,
     )
 
 
@@ -499,6 +578,7 @@ def _absolute(value: Decimal | None) -> Decimal | None:
 
 def _domestic_fill(values: dict[str, Any]) -> Fill:
     return Fill(
+        market=Market.DOMESTIC,
         code=_text(values, "9001"),
         name=_text(values, "302"),
         order_no=_text(values, "9203"),
@@ -508,6 +588,24 @@ def _domestic_fill(values: dict[str, Any]) -> Fill:
         ordered=_number(values, "900"),
         remaining=_number(values, "902"),
         time=_time(values, "908"),
+    )
+
+
+def _us_fill(values: dict[str, Any]) -> Fill:
+    side = _side(values)
+    return Fill(
+        market=Market.US,
+        code=_text(values, "9001"),
+        name=_text(values, "302"),
+        order_no=_text(values, "9203"),
+        side=side,
+        price=_number(values, "910"),
+        quantity=_number(values, "911"),
+        ordered=_number(values, "900"),
+        remaining=_number(values, "902"),
+        # 미국 체결시각도 한국 시간이다.
+        time=_time(values, "908"),
+        realized_cost=_number(values, "50724") if side == "sell" else None,
     )
 
 
@@ -573,8 +671,9 @@ def _fill_embed(
         else:
             title = f"{title} · 본절"
     stock = f"{fill.name} ({fill.code})" if fill.name and fill.code else fill.name or fill.code
+    money = MONEY_FORMATS[fill.market]
     amount = (
-        _won(fill.price * fill.quantity)
+        money(fill.price * fill.quantity)
         if fill.price is not None and fill.quantity is not None
         else UNKNOWN
     )
@@ -583,22 +682,27 @@ def _fill_embed(
         color=color,
         fields=(
             EmbedField("종목", stock or UNKNOWN),
-            EmbedField("이번 체결", f"{_shares(fill.quantity)} @ {_won(fill.price)} ({amount})"),
+            EmbedField("이번 체결", f"{_shares(fill.quantity)} @ {money(fill.price)} ({amount})"),
             EmbedField("누적", _progress(fill)),
             EmbedField("체결 시각", fill.time or UNKNOWN),
-            *([] if profit is None else [EmbedField("매도 손익", _profit_text(profit))]),
+            *(
+                []
+                if profit is None
+                else [EmbedField("매도 손익", _profit_text(profit, fill.market))]
+            ),
             _open_orders_field(open_orders),
         ),
     )
 
 
-def _profit_text(profit: SellProfit) -> str:
+def _profit_text(profit: SellProfit, market: Market) -> str:
     if profit.amount is None or profit.rate is None or profit.purchase is None:
         return profit.failure or LOOKUP_FAILED
+    money = MONEY_FORMATS[market]
     sign = "+" if profit.amount > 0 else "-" if profit.amount < 0 else ""
     return (
-        f"{sign}{abs(profit.amount):,}원 ({sign}{abs(profit.rate):.2f}%)"
-        f" · 매입가 {_won(profit.purchase)} · 수수료·세금 제외"
+        f"{sign}{money(abs(profit.amount))} ({sign}{abs(profit.rate):.2f}%)"
+        f" · 매입가 {money(profit.purchase)} · 수수료·세금 제외"
     )
 
 
@@ -629,11 +733,13 @@ def _open_orders_field(orders: list[OpenOrder] | None) -> EmbedField:
 def _open_order_line(order: OpenOrder) -> str:
     # 키움 국내 문서의 "보통"은 이 프로젝트에서 지정가라고 부른다.
     order_type = "지정가" if order.order_type == "보통" else order.order_type
-    pricing = order_type if order_type == "시장가" else f"{order_type} {_won(order.price)}"
+    price = MONEY_FORMATS[order.market](order.price)
+    pricing = order_type if order_type == "시장가" else f"{order_type} {price}"
     remaining = UNKNOWN if order.remaining is None else f"{order.remaining:,.0f}"
     ordered = UNKNOWN if order.ordered is None else f"{order.ordered:,.0f}"
-    time = _hhmmss(order.time) or order.time
-    return f"{order.name} · {order.side} · {pricing} · 미체결 {remaining}/{ordered}주 · {time}"
+    return (
+        f"{order.name} · {order.side} · {pricing} · 미체결 {remaining}/{ordered}주 · {order.time}"
+    )
 
 
 def _progress(fill: Fill) -> str:
@@ -655,4 +761,15 @@ def _shares(value: Decimal | None) -> str:
 
 
 def _won(value: Decimal | None) -> str:
-    return UNKNOWN if value is None else f"{value:,.0f}원"
+    if value is None:
+        return UNKNOWN
+    return f"{value.quantize(MONEY_UNITS[Market.DOMESTIC], ROUND_HALF_UP):,}원"
+
+
+def _usd(value: Decimal | None) -> str:
+    if value is None:
+        return UNKNOWN
+    return f"${value.quantize(MONEY_UNITS[Market.US], ROUND_HALF_UP):,}"
+
+
+MONEY_FORMATS = {Market.DOMESTIC: _won, Market.US: _usd}

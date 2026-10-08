@@ -18,10 +18,15 @@ from tests.fake_realtime import (
     fill_event,
     open_order,
     realized_row,
+    us_fill_event,
+    us_open_order,
 )
 
 pytestmark = pytest.mark.anyio
 
+# 기본은 국내 모의 인증정보만 둔다. 다른 투자 환경 연결은 그 환경을 다루는 테스트에서 연다.
+DOMESTIC_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_US_", "REAL_"))}
+US_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_KR_", "REAL_"))}
 DISCORD_ENV = {"DISCORD_BOT_TOKEN": "discord-token-ZZZZ9999", "DISCORD_CHANNEL_ID": "123456789"}
 PAPER_REALTIME = "wss://mockapi.kiwoom.com:10000/api/websocket"
 RED = 0xE42939
@@ -66,6 +71,7 @@ def fill_kiwoom(*open_order_pages: dict | httpx.Response) -> FakeKiwoom:
         FakeKiwoom()
         .reply("ka10075", *(open_order_pages or ({"oso": []},)))
         .reply("ka10077", {"tdy_rlzt_pl": "0", "tdy_rlzt_pl_dtl": []})
+        .reply("ust21050", {"result_list": []})
     )
 
 
@@ -74,7 +80,7 @@ async def running(
     realtime: FakeRealtime,
     discord: FakeDiscord | None = None,
     kiwoom: FakeKiwoom | None = None,
-    environ: dict[str, str] = FAKE_ENV,
+    environ: dict[str, str] = DOMESTIC_PAPER_ENV,
     discord_env: dict[str, str] = DISCORD_ENV,
 ) -> AsyncIterator[FastAPI]:
     """앱 수명(lifespan)을 실행한 채로 둔다. 체결 감시는 앱이 시작할 때 뜬다."""
@@ -122,7 +128,7 @@ async def test_does_not_watch_when_discord_is_off(caplog):
 
 
 async def test_skips_environment_without_credentials(caplog):
-    environ = {k: v for k, v in FAKE_ENV.items() if not k.startswith("PAPER_KR_")}
+    environ = {k: v for k, v in DOMESTIC_PAPER_ENV.items() if not k.startswith("PAPER_KR_")}
     realtime = FakeRealtime()
     async with running(realtime, environ=environ):
         await asyncio.sleep(0.05)
@@ -276,6 +282,7 @@ async def test_connection_and_fill_steps_are_logged_without_secrets(caplog):
     events = [r.getMessage() for r in caplog.records if r.name == "stock_bot.fill_watch"]
     assert events == [
         "fill_watch_started",
+        "fill_watch_skipped",
         "realtime_connected",
         "realtime_logged_in",
         "realtime_registered",
@@ -488,16 +495,23 @@ async def test_other_system_messages_are_logged_and_watching_continues(caplog):
     assert system and system[0].fields["code"] == "R99999"
 
 
-async def notify_fills(kiwoom: FakeKiwoom, *events: dict) -> list[dict]:
-    """체결 이벤트를 보내고 Discord로 나간 알림을 돌려준다. 이벤트가 없으면 매수 체결 하나다."""
+async def notify_fills(
+    kiwoom: FakeKiwoom,
+    *events: dict,
+    environ: dict[str, str] = DOMESTIC_PAPER_ENV,
+    expect: int | None = None,
+) -> list[dict]:
+    """체결 이벤트를 보내고 Discord로 나간 알림을 돌려준다. 이벤트가 없으면 매수 체결 하나다.
+    expect는 기다릴 알림 수이고, 없으면 이벤트 수만큼 기다린다."""
     events = events or (fill_event(),)
     realtime = FakeRealtime()
     discord = FakeDiscord()
-    async with running(realtime, discord, kiwoom):
+    async with running(realtime, discord, kiwoom, environ=environ):
         [connection] = await realtime.wait_registered()
         for event in events:
             connection.push(event)
-        await discord.wait_for(len(events))
+        await discord.wait_for(len(events) if expect is None else expect)
+        await asyncio.sleep(0.05)
     return discord.payloads
 
 
@@ -703,3 +717,167 @@ async def test_unreadable_sell_values_make_profit_unknown():
     assert payload["embeds"][0]["title"] == "체결 · 매도"
     assert payload["embeds"][0]["color"] == GRAY
     assert fields(payload)["매도 손익"] == "확인 불가"
+
+
+US_BUY_COLOR = RED
+
+
+async def test_paper_environments_each_get_their_own_connection():
+    realtime = FakeRealtime()
+    kiwoom = fill_kiwoom()
+    async with running(realtime, kiwoom=kiwoom, environ=FAKE_ENV):
+        domestic, us = await realtime.wait_registered(2)
+
+    registered = {c.sent[1]["data"][0]["type"][0]: c for c in (domestic, us)}
+    assert set(registered) == {"00", "F5"}
+    assert registered["F5"].url == PAPER_REALTIME
+    assert registered["F5"].sent[1]["data"][0]["item"] == [""]
+    # 국내 모의와 미국 모의는 인증정보가 달라 토큰도 다르다.
+    assert registered["00"].sent[0]["token"] != registered["F5"].sent[0]["token"]
+    assert {c.sent[0]["token"] for c in (domestic, us)} == set(kiwoom.issued_tokens)
+
+
+async def us_fills(kiwoom: FakeKiwoom, *events: dict, expect: int | None = None) -> list[dict]:
+    return await notify_fills(kiwoom, *events, environ=US_PAPER_ENV, expect=expect)
+
+
+async def test_us_buy_fill_is_sent_in_usd_with_us_open_orders():
+    kiwoom = fill_kiwoom().reply("ust21050", {"result_list": [us_open_order()]})
+    [payload] = await us_fills(kiwoom, us_fill_event())
+
+    assert payload["content"] == "[미국 모의]"
+    assert payload["embeds"][0]["title"] == "체결 · 매수"
+    assert payload["embeds"][0]["color"] == US_BUY_COLOR
+    assert fields(payload) == {
+        "종목": "포드 모터 (F)",
+        "이번 체결": "1주 @ $12.08 ($12.08)",
+        "누적": "1 / 1주 · 전량 체결",
+        "체결 시각": "23:23:08",
+        "미체결 주문 (1건)": "포드 모터 · 매수 · 지정가 $1.00 · 미체결 1/1주 · 23:22:11",
+    }
+    assert body_of(kiwoom.calls("ust21050")[0]) == {
+        "ord_dt": "",
+        "slby_tp": "0",
+        "stex_tp": "",
+        "stk_cd": "",
+    }
+    assert kiwoom.calls("ust21050")[0].url.host == "mockapi.kiwoom.com"
+    assert kiwoom.calls("ka10075") == []
+
+
+async def test_us_order_events_other_than_fills_are_ignored():
+    kiwoom = fill_kiwoom()
+    payloads = await us_fills(
+        kiwoom,
+        us_fill_event(**{"913": "접수", "911": "0", "910": "000000000000", "902": "1"}),
+        us_fill_event(**{"913": "취소완료", "911": "0", "910": "000000000000"}),
+        us_fill_event(**{"913": "부분체결", "900": "30", "911": "10", "902": "20"}),
+        expect=1,
+    )
+
+    assert len(payloads) == 1
+    assert fields(payloads[0])["누적"] == "10 / 30주 · 남은 20주"
+    assert len(kiwoom.calls("ust21050")) == 1
+
+
+def us_sell(**overrides: str) -> dict:
+    """포드 모터 31주 매도의 체결. 기본은 12.50달러 전량 체결, 매입단가 12.075달러다."""
+    values = {
+        "907": "01",
+        "50072": "매도",
+        "9203": "000002675",
+        "900": "31",
+        "911": "31",
+        "902": "0",
+        "910": "0000012.5000",
+        "50724": "0000374.3250",
+    }
+    return us_fill_event(**{**values, **overrides})
+
+
+@pytest.mark.parametrize(
+    ("price", "title", "color", "profit"),
+    [
+        ("0000012.5000", "체결 · 매도 · 익절", RED, "+$13.18 (+3.52%)"),
+        ("0000011.9000", "체결 · 매도 · 손절", BLUE, "-$5.43 (-1.45%)"),
+        ("0000012.0750", "체결 · 매도 · 본절", GRAY, "$0.00 (0.00%)"),
+    ],
+)
+async def test_us_sell_profit_uses_realized_purchase_amount(price, title, color, profit):
+    kiwoom = fill_kiwoom()
+    [payload] = await us_fills(kiwoom, us_sell(**{"910": price}))
+
+    assert payload["embeds"][0]["title"] == title
+    assert payload["embeds"][0]["color"] == color
+    assert fields(payload)["매도 손익"] == f"{profit} · 매입가 $12.08 · 수수료·세금 제외"
+    # 매입 금액은 체결 이벤트에 들어 있어 따로 조회하지 않는다.
+    assert kiwoom.calls("ust21630") == []
+    assert kiwoom.calls("ka10077") == []
+
+
+async def test_us_split_sell_adds_up_fills_across_midnight():
+    first, second = await us_fills(
+        fill_kiwoom(),
+        us_sell(
+            **{
+                "911": "10",
+                "902": "21",
+                "910": "0000012.5000",
+                "50724": "0000120.7500",
+                "908": "235959",
+            }
+        ),
+        us_sell(
+            **{
+                "911": "21",
+                "902": "0",
+                "910": "0000012.6000",
+                "50724": "0000253.5750",
+                "908": "000001",
+            }
+        ),
+    )
+
+    # 10 x 12.50 - 120.75 = 4.25
+    assert fields(first)["매도 손익"].startswith("+$4.25 (+3.52%)")
+    # (125.00 + 264.60) - 374.325 = 15.275
+    assert fields(second)["매도 손익"].startswith("+$15.28 (+4.08%)")
+
+
+@pytest.mark.parametrize(
+    "second_cost",
+    ["0000374.3250", "0000000.0000", ""],
+    ids=["looks-cumulative", "zero", "missing"],
+)
+async def test_us_profit_fails_when_purchase_amount_is_not_per_fill(second_cost):
+    _, second = await us_fills(
+        fill_kiwoom(),
+        us_sell(**{"911": "10", "902": "21", "50724": "0000120.7500"}),
+        us_sell(**{"911": "21", "902": "0", "50724": second_cost}),
+    )
+
+    assert second["embeds"][0]["title"] == "체결 · 매도"
+    assert fields(second)["매도 손익"] in ("조회 실패", "확인 불가")
+
+
+async def test_us_profit_fails_when_earlier_fills_were_missed():
+    [payload] = await us_fills(fill_kiwoom(), us_sell(**{"911": "21", "50724": "0000253.5750"}))
+
+    assert fields(payload)["매도 손익"] == "조회 실패"
+
+
+async def test_same_order_number_in_two_environments_is_kept_apart():
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    async with running(realtime, discord, fill_kiwoom(), environ=FAKE_ENV):
+        connections = await realtime.wait_registered(2)
+        by_type = {c.sent[1]["data"][0]["type"][0]: c for c in connections}
+        # 국내 모의 매도 주문과 미국 모의 매도 주문의 주문번호가 같다.
+        by_type["00"].push(sell(**{"9203": "000002675", "911": "3", "902": "7"}))
+        await discord.wait_for(1)
+        by_type["F5"].push(us_sell())
+        await discord.wait_for(2)
+
+    us = discord.payloads[1]
+    assert us["content"] == "[미국 모의]"
+    assert fields(us)["매도 손익"].startswith("+$13.18")
