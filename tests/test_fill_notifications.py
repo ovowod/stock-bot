@@ -423,3 +423,45 @@ async def test_malformed_fill_time_is_logged(caplog):
         r.fields["key"] for r in caplog.records if r.getMessage() == "fill_value_unreadable"
     ]
     assert unreadable == ["908"]
+
+
+REPLACED = {
+    "trnm": "SYSTEM",
+    "code": "R10001",
+    "message": "동일한 App key로 접속이 되었습니다. 기존 세션은 종료가 됩니다",
+}
+
+
+async def test_stops_watching_when_another_connection_takes_the_app_key(fast_reconnect, caplog):
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    async with running(realtime, discord):
+        [connection] = await realtime.wait_registered()
+        connection.push(REPLACED)
+        connection.drop()
+        await discord.wait_for(1)
+        await asyncio.sleep(0.1)
+
+    # 서로 끊어내지 않도록 다시 연결하지 않는다.
+    assert len(realtime.connections) == 1
+    assert connection.closed
+    payload = discord.payloads[0]
+    assert payload["content"] == "[국내 모의]"
+    assert payload["embeds"][0]["title"] == "체결 감시 중단"
+    assert "같은 앱 키" in payload["embeds"][0]["description"]
+    replaced = [r for r in caplog.records if r.getMessage() == "realtime_session_replaced"]
+    assert replaced and replaced[0].levelname == "ERROR"
+
+
+async def test_other_system_messages_are_logged_and_watching_continues(caplog):
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    async with running(realtime, discord):
+        [connection] = await realtime.wait_registered()
+        connection.push({"trnm": "SYSTEM", "code": "R99999", "message": "공지"})
+        connection.push(fill_event())
+        await discord.wait_for(1)
+
+    assert discord.payloads[0]["embeds"][0]["title"] == "체결 · 매수"
+    system = [r for r in caplog.records if r.getMessage() == "realtime_system_message"]
+    assert system and system[0].fields["code"] == "R99999"

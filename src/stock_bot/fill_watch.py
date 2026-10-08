@@ -38,6 +38,9 @@ RESPONSE_TIMEOUT_SECONDS = 10.0
 RECONNECT_INITIAL_SECONDS = 1.0
 RECONNECT_MAX_SECONDS = 60.0
 
+# 같은 앱 키로 다른 연결이 들어왔을 때 키움이 기존 연결에 보내는 SYSTEM 코드(모의 서버에서 확인).
+SESSION_REPLACED_CODE = "R10001"
+
 # 지켜볼 투자 환경과 실시간 항목. 00은 국내 주문체결이다.
 WATCHED = ((ENVIRONMENTS[Environment.DOMESTIC_PAPER], "00"),)
 
@@ -104,6 +107,27 @@ class FillWatcher:
                 log(logger, logging.WARNING, "realtime_reconnect_wait", wait_seconds=delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_SECONDS)
+        except _SessionReplaced as replaced:
+            # 같은 앱 키로 서버가 둘 떠 있으면 다시 연결할 때마다 서로를 끊어낸다.
+            # 나중에 연결한 쪽이 지켜보도록 이 서버는 멈추고, 알림이 조용히 끊기지 않게 알린다.
+            log(
+                logger,
+                logging.ERROR,
+                "realtime_session_replaced",
+                code=replaced.code,
+                message=replaced.message,
+            )
+            await self._notifier.send(
+                embed=Embed(
+                    title="체결 감시 중단",
+                    description=(
+                        "다른 곳에서 같은 앱 키로 접속해 이 서버의 체결 감시를 멈춥니다. "
+                        "다시 지켜보려면 이 서버를 재시작하세요."
+                    ),
+                    color=NEUTRAL_COLOR,
+                ),
+                spec=spec,
+            )
         finally:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
@@ -148,6 +172,8 @@ class FillWatcher:
                 message = await _receive(connection)
                 if message.get("trnm") == "REAL":
                     queue.put_nowait(message)
+        except _SessionReplaced:
+            raise
         except _RealtimeFailure as failure:
             log(logger, logging.ERROR, failure.event, target=target, **failure.fields)
             if failure.fields.get("trnm") == "LOGIN":
@@ -225,6 +251,15 @@ async def _send(connection: RealtimeConnection, message: dict[str, Any]) -> None
     await connection.send(json.dumps(message, ensure_ascii=False))
 
 
+class _SessionReplaced(Exception):
+    """같은 앱 키로 다른 연결이 들어와 키움이 이 연결을 끊었다."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(code)
+        self.code = code
+        self.message = message
+
+
 class _RealtimeFailure(Exception):
     def __init__(self, event: str, **fields: Any) -> None:
         super().__init__(event)
@@ -268,6 +303,12 @@ async def _receive(connection: RealtimeConnection) -> dict[str, Any]:
         if message.get("trnm") == "PING":
             await connection.send(text)
             log(logger, logging.DEBUG, "realtime_ping")
+            continue
+        if message.get("trnm") == "SYSTEM":
+            code, notice = str(message.get("code", "")), str(message.get("message", ""))
+            if code == SESSION_REPLACED_CODE:
+                raise _SessionReplaced(code, notice)
+            log(logger, logging.WARNING, "realtime_system_message", code=code, message=notice)
             continue
         return message
 
