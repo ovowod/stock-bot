@@ -38,23 +38,31 @@ class OpenOrderService:
             "fetched_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
 
-    async def orders(self, spec: EnvironmentSpec) -> list[dict[str, Any]]:
-        """그 투자 환경의 미체결 주문 전부."""
+    async def orders(
+        self, spec: EnvironmentSpec, listing_required: bool = False
+    ) -> list[dict[str, Any]]:
+        """그 투자 환경의 미체결 주문 전부.
+
+        listing_required면 미국 종목 목록을 받지 못했을 때 오류를 던진다. 취소 재확인은 이것을 써서,
+        일시적인 목록 장애를 "취소할 수 없는 주문"이 아니라 다시 시도할 수 있는 실패로 돌려준다.
+        """
         if spec.market is Market.US:
-            return await self._us_orders(spec)
+            return await self._us_orders(spec, listing_required)
         data = await self._kiwoom.call(spec, API_ID, DOMESTIC_ACCOUNT_PATH, REQUEST_BODY)
         orders = [_order(row, spec) for row in Reader(data, API_ID).rows("oso")]
         log(logger, logging.INFO, "open_orders_fetched", api_id=API_ID, count=len(orders))
         return orders
 
-    async def _us_orders(self, spec: EnvironmentSpec) -> list[dict[str, Any]]:
+    async def _us_orders(
+        self, spec: EnvironmentSpec, listing_required: bool
+    ) -> list[dict[str, Any]]:
         data = await self._kiwoom.call(spec, US_API_ID, US_ACCOUNT_PATH, US_REQUEST_BODY)
         rows = [
             row
             for row in Reader(data, US_API_ID).rows("result_list")
             if row.optional("ord_cntr_tp") != US_CANCEL_ORDER
         ]
-        listings = await self._us_listings(spec)
+        listings = await self._us_listings(spec, listing_required)
         orders = [_us_order(row, spec, listings) for row in rows]
         unlisted = sorted({o["code"] for o in orders if o["exchange"] is None})
         if unlisted:
@@ -70,7 +78,9 @@ class OpenOrderService:
         log(logger, logging.INFO, "open_orders_fetched", api_id=US_API_ID, count=len(orders))
         return orders
 
-    async def _us_listings(self, spec: EnvironmentSpec) -> dict[str, dict[str, Any]]:
+    async def _us_listings(
+        self, spec: EnvironmentSpec, required: bool
+    ) -> dict[str, dict[str, Any]]:
         """종목 목록을 받지 못해도 미체결 목록은 보여준다. 그때는 거래소를 모른다."""
         if self._listings is None:
             return {}
@@ -83,7 +93,10 @@ class OpenOrderService:
                 "stock_list_unavailable",
                 kind=error.kind,
                 cause=error.message,
+                required=required,
             )
+            if required:
+                raise
             return {}
 
 

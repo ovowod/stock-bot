@@ -2,7 +2,7 @@ import { ShieldAlert } from "lucide-react";
 import { useState } from "react";
 import type { OpenOrder, OpenOrders } from "../../api";
 import type { EnvironmentOption } from "../../environments";
-import { formatCount, formatForeign, formatKrw } from "../../format";
+import { formatCount, formatOrderPrice } from "../../format";
 import { Callout } from "../order/Sheet";
 import { CancelSheet } from "./CancelSheet";
 import { ErrorNotice, Panel } from "./parts";
@@ -137,11 +137,6 @@ function OpenOrderRow({
       </div>
     </li>
   );
-}
-
-/** 미체결 주문의 가격. 국내는 원, 미국은 보유종목과 같은 USD 4자리 표시다. */
-export function formatOrderPrice(price: number, market: Market): string {
-  return market === "domestic" ? formatKrw(price) : formatForeign(price, "USD", 4);
 }
 
 function blockedLabel(order: OpenOrder, market: Market): string | null {

@@ -19,6 +19,11 @@ export function formatForeign(value: number | null, currency: string, digits = 2
   return currency === "USD" ? `${minus(value)}$${formatted}` : `${minus(value)}${formatted} ${currency}`;
 }
 
+/** 미체결 주문의 가격. 국내는 원, 미국은 보유종목과 같은 USD 4자리 표시다. */
+export function formatOrderPrice(price: number, market: "domestic" | "us"): string {
+  return market === "domestic" ? formatKrw(price) : formatForeign(price, "USD", 4);
+}
+
 /** 큰 원화 금액을 짧게: 5.36조, 5,308억, 1,234만 */
 export function formatCompactKrw(value: number | null): string {
   if (value === null) return EMPTY;

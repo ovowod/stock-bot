@@ -2,10 +2,9 @@ import { CircleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { ApiError, cancelOrder, fetchOpenOrders, ORDER_RESULT_UNKNOWN, type OpenOrder } from "../../api";
 import type { EnvironmentOption } from "../../environments";
-import { EMPTY, formatCount } from "../../format";
+import { EMPTY, formatCount, formatOrderPrice } from "../../format";
 import { newOrderKey, parseQuantity } from "../order/order";
 import { Callout, Field, INPUT, Sheet } from "../order/Sheet";
-import { formatOrderPrice } from "./OpenOrders";
 import { useToast } from "../toast/Toasts";
 
 type Check = { status: "loading" } | { status: "ready"; order: OpenOrder | null } | { status: "error"; message: string };
@@ -223,7 +222,12 @@ export function CancelSheet({
           </Callout>
         )}
         {shrunk && latest && (
-          <Callout tone="real" icon={CircleAlert} title={`미체결 수량이 ${formatCount(latest.remaining_quantity)}로 줄었습니다`}>
+          // 미국은 막지 않고 알리기만 하므로 경고색을 쓰지 않는다.
+          <Callout
+            tone={allOnly ? "muted" : "real"}
+            icon={CircleAlert}
+            title={`미체결 수량이 ${formatCount(latest.remaining_quantity)}로 줄었습니다`}
+          >
             {allOnly ? "남은 수량 전부로 다시 취소할 수 있습니다." : "취소 수량을 고친 뒤 다시 취소하세요."}
           </Callout>
         )}

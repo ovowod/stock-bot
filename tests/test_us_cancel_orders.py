@@ -196,3 +196,13 @@ def test_accepted_us_cancel_is_described_for_discord(make_client, monkeypatch):
     assert fields["원래 주문"] == "매수"
     assert fields["취소 수량"] == "5주"
     assert fields["주문번호"] == "000000282 → 000000285"
+
+
+def test_a_listing_outage_during_the_recheck_is_a_retryable_failure(make_client):
+    fake = us_kiwoom().reply("usa10099", kiwoom_error(1, "목록 실패"))
+
+    response = make_client(fake).post(URL, json=cancel())
+
+    assert response.status_code == 502
+    assert response.json()["error"]["kind"] == "open_orders_check_failed"
+    assert fake.calls("ust20003") == []
