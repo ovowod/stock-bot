@@ -20,13 +20,22 @@ import { useAccount, useOpenOrders } from "./useAccount";
 export function AccountPage({ environment }: { environment: EnvironmentValue }) {
   const { state, refresh, retry } = useAccount(environment);
   const env = findEnvironment(environment);
-  const openOrders = useOpenOrders(environment, env.market === "domestic");
+  const openOrders = useOpenOrders(environment);
   const ready = state.status === "ready" ? state : null;
   // 상단 새로고침과 주문 접수는 계좌와 미체결 주문을 함께 다시 불러온다.
   const refreshAll = () => {
     void refresh();
     void openOrders.refresh();
   };
+  const openOrdersPanel = (
+    <OpenOrdersPanel
+      env={env}
+      state={openOrders.state}
+      onRetry={openOrders.retry}
+      onRefresh={openOrders.refresh}
+      onChanged={refreshAll}
+    />
+  );
 
   return (
     <div className="mx-auto max-w-6xl space-y-5">
@@ -69,21 +78,9 @@ export function AccountPage({ environment }: { environment: EnvironmentValue }) 
         >
           {ready.refreshError && <ErrorNotice error={ready.refreshError} onRetry={refresh} compact />}
           {ready.data.market === "domestic" ? (
-            <DomesticView
-              data={ready.data}
-              onSold={refreshAll}
-              openOrders={
-                <OpenOrdersPanel
-                  env={env}
-                  state={openOrders.state}
-                  onRetry={openOrders.retry}
-                  onRefresh={openOrders.refresh}
-                  onChanged={refreshAll}
-                />
-              }
-            />
+            <DomesticView data={ready.data} onSold={refreshAll} openOrders={openOrdersPanel} />
           ) : (
-            <UsView data={ready.data} onSold={refresh} />
+            <UsView data={ready.data} onSold={refreshAll} openOrders={openOrdersPanel} />
           )}
         </div>
       )}
@@ -216,7 +213,7 @@ function DomesticView({
   );
 }
 
-function UsView({ data, onSold }: { data: UsAccount; onSold: () => void }) {
+function UsView({ data, onSold, openOrders }: { data: UsAccount; onSold: () => void; openOrders: ReactNode }) {
   const { summary, summary_krw: krw, deposit } = data;
   const openOrder = useOrderPanel();
   const currency = data.currency || "USD";
@@ -224,6 +221,7 @@ function UsView({ data, onSold }: { data: UsAccount; onSold: () => void }) {
   const price = (value: number | null) => formatForeign(value, currency, 4);
   return (
     <Layout
+      openOrders={openOrders}
       hero={
         <Panel>
           <p className="text-[15px] font-medium text-sub">총평가금액</p>

@@ -2,7 +2,7 @@
 
 매수는 국내 kt10000·미국 ust20000, 매도는 국내 kt10001·미국 ust20001이다.
 매도는 보내기 직전에 잔고를 다시 확인한다.
-국내 주문 취소는 kt10003이고, 보내기 직전에 미체결을 다시 확인한다.
+주문 취소는 국내 kt10003·미국 ust20003이고, 보내기 직전에 미체결을 다시 확인한다.
 주문은 중복될 수 있으므로 키움 호출을 자동으로 다시 보내지 않는다.
 """
 
@@ -38,9 +38,9 @@ UNKNOWN_RESULT_MESSAGE = (
 CANCEL_UNKNOWN_RESULT_MESSAGE = (
     "접수 여부를 확인할 수 없습니다. 키움에서 주문 내역을 확인한 뒤 다시 시도하세요."
 )
-CANCEL_API_ID = "kt10003"
-# 키움 문서의 orig_ord_no 길이(7)를 따른다.
-_ORDER_NO = re.compile(r"^\d{1,7}$")
+CANCEL_API_IDS = {Market.DOMESTIC: "kt10003", Market.US: "ust20003"}
+# 키움 문서의 orig_ord_no 길이(국내 7, 미국 9)를 따른다.
+_ORDER_NO = {Market.DOMESTIC: re.compile(r"^\d{1,7}$"), Market.US: re.compile(r"^\d{1,9}$")}
 # 키움 문서의 ord_qty·ord_uv 길이(12)를 따른다.
 MAX_NUMBER_LENGTH = 12
 _INTEGER = re.compile(r"^\d+$")
@@ -103,17 +103,13 @@ class OrderService:
         return await self._send(spec, order)
 
     async def cancel(self, spec: EnvironmentSpec, request: Any) -> dict[str, Any]:
-        """국내 미체결 주문을 취소한다. request는 브라우저가 보낸 JSON 본문이다."""
+        """미체결 주문을 취소한다. request는 브라우저가 보낸 JSON 본문이다."""
         # 실전투자는 입력 검사보다 먼저, 키움을 부르기 전에 막는다.
         if spec.is_real:
             order_key = request.get("order_key") if isinstance(request, dict) else None
             log(logger, logging.WARNING, "cancel_blocked_real", order_key=order_key)
             raise AppError("order_not_allowed", "실전투자에서는 주문 취소를 할 수 없습니다.", 403)
-        if spec.market is not Market.DOMESTIC:
-            raise AppError(
-                "unsupported_market", "미국 투자 환경의 주문 취소는 지원하지 않습니다.", 400
-            )
-        cancel = _validate_cancel(request)
+        cancel = _validate_cancel(request, spec.market)
         self._claim_key(spec, cancel["order_key"])
         log(logger, logging.INFO, "cancel_requested", **cancel)
         # 같은 원주문의 취소는 미체결 재확인부터 키움 응답까지 하나씩 처리한다.
@@ -193,28 +189,56 @@ class OrderService:
                 400,
                 {"remaining_quantity": remaining},
             )
+        if spec.market is Market.US and int(cancel["quantity"]) < remaining:
+            # 미국 취소 TR(ust20003)에는 수량 칸이 없어 남은 수량 전부를 취소한다.
+            log(
+                logger,
+                logging.WARNING,
+                "cancel_blocked",
+                **fields,
+                reason="partial",
+                quantity=cancel["quantity"],
+                remaining_quantity=remaining,
+            )
+            raise AppError(
+                "partial_cancel_unsupported",
+                "미국 주문은 남은 수량 전부만 취소할 수 있습니다.",
+                400,
+                {"remaining_quantity": remaining},
+            )
         return order
 
     async def _send_cancel(
         self, spec: EnvironmentSpec, cancel: dict[str, str], order: dict[str, Any]
     ) -> dict[str, Any]:
-        """취소 TR을 한 번만 호출한다. 남은 수량 전부면 0(잔량 전부)으로 보낸다."""
+        """취소 TR을 한 번만 호출한다. 국내는 남은 수량 전부면 0(잔량 전부)으로 보낸다."""
         all_remaining = int(cancel["quantity"]) == order["remaining_quantity"]
-        body = {
-            "dmst_stex_tp": "KRX",
-            "orig_ord_no": cancel["order_no"],
-            "stk_cd": order["code"],
-            "cncl_qty": "0" if all_remaining else cancel["quantity"],
-        }
+        if spec.market is Market.DOMESTIC:
+            path, quantity_key = DOMESTIC_ORDER_PATH, "cncl_qty"
+            body = {
+                "dmst_stex_tp": "KRX",
+                "orig_ord_no": cancel["order_no"],
+                "stk_cd": order["code"],
+                "cncl_qty": "0" if all_remaining else cancel["quantity"],
+            }
+        else:
+            # 미체결 응답에는 거래소가 없어 종목 목록에서 찾은 거래소를 쓴다.
+            # 거래소를 못 찾은 주문은 취소 가능 판단에서 이미 막혔다.
+            path, quantity_key = US_ORDER_PATH, "cncl_ord_qty"
+            body = {
+                "orig_ord_no": cancel["order_no"],
+                "stex_tp": US_EXCHANGE_CODES[order["exchange"]],
+                "stk_cd": order["code"],
+            }
         data, order_no = await self._call_order(
             spec,
-            CANCEL_API_ID,
-            DOMESTIC_ORDER_PATH,
+            CANCEL_API_IDS[spec.market],
+            path,
             body,
             cancel["order_key"],
             CANCEL_UNKNOWN_RESULT_MESSAGE,
         )
-        cancelled = _cancelled_quantity(data.get("cncl_qty"))
+        cancelled = _cancelled_quantity(data.get(quantity_key))
         if cancelled is None and not all_remaining:
             # 일부 취소는 보낸 수량이 곧 취소 수량이다. 잔량 전부(0)일 때만 모른다.
             cancelled = int(cancel["quantity"])
@@ -372,14 +396,14 @@ class OrderService:
         return data, order_no
 
 
-def _validate_cancel(request: Any) -> dict[str, str]:
+def _validate_cancel(request: Any, market: Market) -> dict[str, str]:
     if not isinstance(request, dict):
         raise _invalid("취소 내용이 올바르지 않습니다.")
     order_key = _text(request, "order_key")
     if not order_key or len(order_key) > MAX_ORDER_KEY_LENGTH:
         raise _invalid("주문 키가 필요합니다.")
     order_no = _text(request, "order_no")
-    if not _ORDER_NO.match(order_no):
+    if not _ORDER_NO[market].match(order_no):
         raise _invalid("원주문번호가 올바르지 않습니다.")
     quantity = _text(request, "quantity")
     if not _number(quantity, _INTEGER) or int(quantity) < 1:

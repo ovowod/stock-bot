@@ -123,6 +123,9 @@ async function mockApi(
       const reply = holdingReply(code);
       if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
       await route.fulfill({ status: reply.status ?? 200, json: reply.body }).catch(() => {});
+    } else if (resource === "open-orders") {
+      // 계좌 확인이 함께 부르는 미체결 주문. 매도 테스트와 관계없으므로 빈 목록이다.
+      await route.fulfill({ json: { orders: [], fetched_at: "2026-10-05T06:30:00+00:00" } });
     } else if (resource === "orders") {
       const request = { environment, body: route.request().postDataJSON() };
       orders.push(request);

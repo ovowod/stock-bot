@@ -18,11 +18,10 @@ export function useAccount(environment: EnvironmentValue) {
   return useRemote<Account>(useCallback((signal: AbortSignal) => fetchAccount(environment, signal), [environment]));
 }
 
-/** 국내 투자 환경의 미체결 주문. enabled가 false면(미국) 요청하지 않는다. */
-export function useOpenOrders(environment: EnvironmentValue, enabled: boolean) {
+/** 그 투자 환경의 미체결 주문. */
+export function useOpenOrders(environment: EnvironmentValue) {
   return useRemote<OpenOrders>(
     useCallback((signal: AbortSignal) => fetchOpenOrders(environment, signal), [environment]),
-    enabled,
   );
 }
 
@@ -30,13 +29,12 @@ export function useOpenOrders(environment: EnvironmentValue, enabled: boolean) {
  * 처음에는 불러오는 동안 loading, 실패하면 error다.
  * 한 번 받은 뒤 refresh는 기존 데이터를 둔 채 다시 불러오고, 실패하면 refreshError에 담는다.
  */
-function useRemote<T>(fetcher: (signal: AbortSignal) => Promise<T>, enabled = true) {
+function useRemote<T>(fetcher: (signal: AbortSignal) => Promise<T>) {
   const [state, setState] = useState<RemoteState<T>>({ status: "loading" });
   const controller = useRef<AbortController | null>(null);
 
   const load = useCallback(
     async (mode: "initial" | "refresh") => {
-      if (!enabled) return;
       controller.current?.abort();
       const current = new AbortController();
       controller.current = current;
@@ -61,7 +59,7 @@ function useRemote<T>(fetcher: (signal: AbortSignal) => Promise<T>, enabled = tr
         );
       }
     },
-    [fetcher, enabled],
+    [fetcher],
   );
 
   useEffect(() => {

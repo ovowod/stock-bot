@@ -322,8 +322,11 @@ export function fetchAccount(environment: EnvironmentValue, signal: AbortSignal)
   return getJson<Account>(`/api/environments/${environment}/account`, signal);
 }
 
-/** 이 앱에서 취소할 수 없는 이유. 실전투자, 신용주문, KRX가 아닌 거래소(NXT·통합) 주문. */
-export type CancelBlockedReason = "real" | "credit" | "exchange";
+/**
+ * 이 앱에서 취소할 수 없는 이유. 실전투자, 신용주문(국내), 예약주문(미국),
+ * 취소할 거래소를 쓸 수 없는 주문(국내 NXT·통합, 미국은 종목 목록에서 거래소를 찾지 못한 주문).
+ */
+export type CancelBlockedReason = "real" | "credit" | "reserved" | "exchange";
 
 export interface OpenOrder {
   order_no: string;
@@ -338,7 +341,8 @@ export interface OpenOrder {
   ordered_quantity: number | null;
   remaining_quantity: number;
   time: string;
-  exchange: string;
+  /** 국내는 KRX·NXT·통합, 미국은 NYSE·NASDAQ·AMEX. 미국에서 종목 목록에 없으면 null. */
+  exchange: string | null;
   cancelable: boolean;
   blocked_reason: CancelBlockedReason | null;
 }

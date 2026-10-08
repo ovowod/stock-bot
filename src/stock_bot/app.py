@@ -84,11 +84,12 @@ def create_app(
     stocks = StockSearchService(kiwoom, today or today_kst)
     accounts = AccountService(kiwoom, stocks.listings)
     quotes = QuoteService(kiwoom)
-    open_orders = OpenOrderService(kiwoom)
+    open_orders = OpenOrderService(kiwoom, stocks.listings)
     orders = OrderService(
         kiwoom,
         accounts.holding,
-        open_orders.orders,
+        # 취소 재확인은 미국 종목 목록이 꼭 있어야 거래소를 정할 수 있다.
+        lambda spec: open_orders.orders(spec, listing_required=True),
         on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
     )
     fills = FillWatcher(kiwoom, notifier, realtime_connect or connect_websocket)

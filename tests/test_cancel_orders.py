@@ -80,15 +80,6 @@ def test_real_environment_cancels_are_refused_before_any_kiwoom_request(make_cli
     assert any(r.getMessage() == "cancel_blocked_real" for r in caplog.records)
 
 
-def test_us_environment_cancels_are_refused(make_client):
-    fake = kiwoom()
-
-    response = make_client(fake).post("/api/environments/us_paper/cancellations", json=cancel())
-
-    assert response.status_code == 400
-    assert fake.requests == []
-
-
 @pytest.mark.parametrize(
     "body",
     [
