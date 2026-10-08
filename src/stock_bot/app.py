@@ -27,6 +27,7 @@ from stock_bot.kiwoom import KST, KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
 from stock_bot.notification import DiscordNotifier, Embed, EmbedField
+from stock_bot.open_order import OpenOrderService
 from stock_bot.order import OrderService
 from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
@@ -74,6 +75,7 @@ def create_app(
     accounts = AccountService(kiwoom, stocks.listings)
     quotes = QuoteService(kiwoom)
     orders = OrderService(kiwoom, accounts.holding)
+    open_orders = OpenOrderService(kiwoom)
     fills = FillWatcher(kiwoom, notifier, realtime_connect or connect_websocket)
 
     @asynccontextmanager
@@ -246,6 +248,12 @@ def create_app(
         environment_var.set(spec.environment.value)
         holding = await accounts.holding(spec, code)
         return {**holding, "fetched_at": datetime.now(UTC).isoformat(timespec="seconds")}
+
+    @app.get("/api/environments/{environment}/open-orders")
+    async def get_open_orders(environment: str) -> dict[str, Any]:
+        spec = parse_environment(environment)
+        environment_var.set(spec.environment.value)
+        return await open_orders.fetch(spec)
 
     @app.get("/api/environments/{environment}/rankings/{kind}")
     async def get_ranking(

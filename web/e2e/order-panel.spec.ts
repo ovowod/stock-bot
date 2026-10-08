@@ -78,7 +78,7 @@ async function mockApi(
           items: searchItems,
         },
       });
-    } else if (resource === "account") {
+    } else if (resource === "account" || resource === "open-orders") {
       await route.fulfill({ status: 503, json: { error: { kind: "config_error", message: "test" } } });
     } else {
       unexpected.push(url.pathname);

@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { openDashboard } from "./support";
+import { mockNoOpenOrders, openDashboard } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 키움 서버나 실전 서버는 호출되지 않는다.
 
@@ -62,6 +62,7 @@ async function mockRankings(page: Page, handler: (request: Seen) => Reply) {
   await page.route("**/api/environments/*/account", (route) =>
     route.fulfill({ status: 503, json: { error: { kind: "config_error", message: "test" } } }),
   );
+  await mockNoOpenOrders(page);
   return seen;
 }
 

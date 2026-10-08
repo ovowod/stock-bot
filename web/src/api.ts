@@ -322,6 +322,36 @@ export function fetchAccount(environment: EnvironmentValue, signal: AbortSignal)
   return getJson<Account>(`/api/environments/${environment}/account`, signal);
 }
 
+/** 이 앱에서 취소할 수 없는 이유. 실전투자, 신용주문, KRX가 아닌 거래소(NXT·통합) 주문. */
+export type CancelBlockedReason = "real" | "credit" | "exchange";
+
+export interface OpenOrder {
+  order_no: string;
+  code: string;
+  name: string;
+  side: "buy" | "sell" | null;
+  /** 매수, 매도, 매수정정, 매수신용 등 키움 주문구분. */
+  side_label: string;
+  order_type: string;
+  /** 시장가처럼 가격이 없으면 null. */
+  price: number | null;
+  ordered_quantity: number | null;
+  remaining_quantity: number;
+  time: string;
+  exchange: string;
+  cancelable: boolean;
+  blocked_reason: CancelBlockedReason | null;
+}
+
+export interface OpenOrders {
+  orders: OpenOrder[];
+  fetched_at: string;
+}
+
+export function fetchOpenOrders(environment: EnvironmentValue, signal: AbortSignal): Promise<OpenOrders> {
+  return getJson<OpenOrders>(`/api/environments/${environment}/open-orders`, signal);
+}
+
 export interface RankingConditions {
   exchange: string;
   period: string;

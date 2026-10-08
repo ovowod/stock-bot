@@ -14,12 +14,19 @@ import {
   Panel,
   Row,
 } from "./parts";
-import { useAccount } from "./useAccount";
+import { OpenOrdersPanel } from "./OpenOrders";
+import { useAccount, useOpenOrders } from "./useAccount";
 
 export function AccountPage({ environment }: { environment: EnvironmentValue }) {
   const { state, refresh, retry } = useAccount(environment);
   const env = findEnvironment(environment);
+  const openOrders = useOpenOrders(environment, env.market === "domestic");
   const ready = state.status === "ready" ? state : null;
+  // 상단 새로고침과 주문 접수는 계좌와 미체결 주문을 함께 다시 불러온다.
+  const refreshAll = () => {
+    void refresh();
+    void openOrders.refresh();
+  };
 
   return (
     <div className="mx-auto max-w-6xl space-y-5">
@@ -44,7 +51,7 @@ export function AccountPage({ environment }: { environment: EnvironmentValue }) 
         </div>
         <button
           type="button"
-          onClick={refresh}
+          onClick={refreshAll}
           disabled={state.status !== "ready" || state.refreshing}
           className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-surface px-3.5 py-2.5 text-sm font-semibold text-sub shadow-[0_1px_3px_rgba(0,0,0,0.06)] hover:text-ink disabled:cursor-not-allowed disabled:opacity-60"
         >
@@ -62,7 +69,18 @@ export function AccountPage({ environment }: { environment: EnvironmentValue }) 
         >
           {ready.refreshError && <ErrorNotice error={ready.refreshError} onRetry={refresh} compact />}
           {ready.data.market === "domestic" ? (
-            <DomesticView data={ready.data} onSold={refresh} />
+            <DomesticView
+              data={ready.data}
+              onSold={refreshAll}
+              openOrders={
+                <OpenOrdersPanel
+                  state={openOrders.state}
+                  isReal={env.isReal}
+                  onRetry={openOrders.retry}
+                  onRefresh={openOrders.refresh}
+                />
+              }
+            />
           ) : (
             <UsView data={ready.data} onSold={refresh} />
           )}
@@ -72,13 +90,27 @@ export function AccountPage({ environment }: { environment: EnvironmentValue }) 
   );
 }
 
-/** 모바일: 요약 → 예수금 → 보유종목. 넓은 화면: 왼쪽에 요약·보유종목, 오른쪽에 예수금. */
-function Layout({ hero, deposit, holdings }: { hero: ReactNode; deposit: ReactNode; holdings: ReactNode }) {
+/**
+ * 모바일: 요약 → 예수금 → 보유종목 → 미체결 주문.
+ * 넓은 화면: 왼쪽에 요약·보유종목, 오른쪽에 예수금, 맨 아래 전체 너비로 미체결 주문.
+ */
+function Layout({
+  hero,
+  deposit,
+  holdings,
+  openOrders,
+}: {
+  hero: ReactNode;
+  deposit: ReactNode;
+  holdings: ReactNode;
+  openOrders?: ReactNode;
+}) {
   return (
     <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
       <div className="lg:col-start-1">{hero}</div>
       <div className="lg:col-start-2 lg:row-span-2 lg:row-start-1">{deposit}</div>
       <div className="lg:col-start-1">{holdings}</div>
+      {openOrders && <div className="lg:col-span-2">{openOrders}</div>}
     </div>
   );
 }
@@ -91,11 +123,20 @@ function HeroValue({ children }: { children: ReactNode }) {
   );
 }
 
-function DomesticView({ data, onSold }: { data: DomesticAccount; onSold: () => void }) {
+function DomesticView({
+  data,
+  onSold,
+  openOrders,
+}: {
+  data: DomesticAccount;
+  onSold: () => void;
+  openOrders: ReactNode;
+}) {
   const { summary, deposit } = data;
   const openOrder = useOrderPanel();
   return (
     <Layout
+      openOrders={openOrders}
       hero={
         <Panel>
           <p className="text-[15px] font-medium text-sub">추정예탁자산</p>
