@@ -2,15 +2,16 @@ import { CircleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { ApiError, cancelOrder, fetchOpenOrders, ORDER_RESULT_UNKNOWN, type OpenOrder } from "../../api";
 import type { EnvironmentOption } from "../../environments";
-import { EMPTY, formatCount, formatKrw } from "../../format";
+import { EMPTY, formatCount } from "../../format";
 import { newOrderKey, parseQuantity } from "../order/order";
 import { Callout, Field, INPUT, Sheet } from "../order/Sheet";
+import { formatOrderPrice } from "./OpenOrders";
 import { useToast } from "../toast/Toasts";
 
 type Check = { status: "loading" } | { status: "ready"; order: OpenOrder | null } | { status: "error"; message: string };
 
 // 이 응답을 받으면 미체결을 다시 확인해 최신 상태를 보여준다.
-const RECHECK_KINDS = new Set(["open_order_not_found", "cancel_quantity_exceeded"]);
+const RECHECK_KINDS = new Set(["open_order_not_found", "cancel_quantity_exceeded", "partial_cancel_unsupported"]);
 
 /**
  * 시트가 열려 있는 동안 미체결을 다시 조회해 그 주문의 최신 상태를 찾는다. retry를 부르면 다시 조회한다.
@@ -81,9 +82,16 @@ export function CancelSheet({
     }
   });
   const latest = check.status === "ready" ? check.order : null;
-  const quantity = parseQuantity(quantityText);
+  // 미국 취소 TR에는 수량 칸이 없어 남은 수량 전부만 취소한다. 보낼 수량은 늘 가장 최근 재조회의 값이다.
+  const allOnly = env.market === "us";
+  const quantity = parseQuantity(allOnly ? String(latest?.remaining_quantity ?? "") : quantityText);
   const over = latest !== null && quantity.quantity !== null && quantity.quantity > latest.remaining_quantity;
-  const shrunk = over && previousRemaining !== null && latest.remaining_quantity < previousRemaining;
+  // 국내는 입력 값이 줄어든 수량을 넘을 때 막으며 안내하고, 미국은 안내만 하고 그대로 보낼 수 있다.
+  const shrunk =
+    latest !== null &&
+    previousRemaining !== null &&
+    latest.remaining_quantity < previousRemaining &&
+    (allOnly || over);
   const quantityError =
     quantity.error ??
     (over && !shrunk ? `미체결 수량(${formatCount(latest.remaining_quantity)})보다 많이 취소할 수 없습니다.` : null);
@@ -140,10 +148,11 @@ export function CancelSheet({
     ["종목코드", order.code],
     ["거래소", order.exchange ?? EMPTY],
     ["주문 유형", order.order_type],
-    ["주문가격", order.price === null ? order.order_type : formatKrw(order.price)],
+    ["주문가격", order.price === null ? order.order_type : formatOrderPrice(order.price, env.market)],
     ["주문 수량", formatCount(order.ordered_quantity)],
     ["원주문번호", order.order_no],
     ["미체결 수량", latest ? formatCount(latest.remaining_quantity) : "확인 중"],
+    ...(allOnly ? ([["취소 수량", "남은 수량 전부"]] as [string, string][]) : []),
   ];
 
   return (
@@ -169,28 +178,30 @@ export function CancelSheet({
             </div>
           ))}
         </dl>
-        <div className="flex items-start gap-2">
-          <div className="min-w-0 flex-1">
-            <Field label="취소 수량 (주)" error={quantityError}>
-              <input
-                value={quantityText}
-                onChange={(event) => setQuantityText(event.target.value)}
-                inputMode="numeric"
-                disabled={sending}
-                aria-invalid={quantityError !== null}
-                className={INPUT}
-              />
-            </Field>
+        {!allOnly && (
+          <div className="flex items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <Field label="취소 수량 (주)" error={quantityError}>
+                <input
+                  value={quantityText}
+                  onChange={(event) => setQuantityText(event.target.value)}
+                  inputMode="numeric"
+                  disabled={sending}
+                  aria-invalid={quantityError !== null}
+                  className={INPUT}
+                />
+              </Field>
+            </div>
+            <button
+              type="button"
+              disabled={sending || latest === null}
+              onClick={() => latest && setQuantityText(String(latest.remaining_quantity))}
+              className="mt-7 rounded-2xl bg-canvas px-4 py-3 text-sm font-bold text-sub hover:text-ink disabled:opacity-40"
+            >
+              전부
+            </button>
           </div>
-          <button
-            type="button"
-            disabled={sending || latest === null}
-            onClick={() => latest && setQuantityText(String(latest.remaining_quantity))}
-            className="mt-7 rounded-2xl bg-canvas px-4 py-3 text-sm font-bold text-sub hover:text-ink disabled:opacity-40"
-          >
-            전부
-          </button>
-        </div>
+        )}
         {check.status === "loading" && <p className="text-sm text-sub">미체결을 확인하는 중입니다.</p>}
         {check.status === "error" && (
           <div className="space-y-2">
@@ -213,7 +224,7 @@ export function CancelSheet({
         )}
         {shrunk && latest && (
           <Callout tone="real" icon={CircleAlert} title={`미체결 수량이 ${formatCount(latest.remaining_quantity)}로 줄었습니다`}>
-            취소 수량을 고친 뒤 다시 취소하세요.
+            {allOnly ? "남은 수량 전부로 다시 취소할 수 있습니다." : "취소 수량을 고친 뒤 다시 취소하세요."}
           </Callout>
         )}
         <p className="text-xs text-muted">

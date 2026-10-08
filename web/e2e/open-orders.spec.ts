@@ -591,3 +591,62 @@ test("수량 초과로 거부되면 다시 확인해 줄어든 미체결 수량�
   await expect(sheet(page)).toHaveCount(0);
   expect(cancels.map((c) => c.quantity)).toEqual(["2", "1"]);
 });
+
+// ---- 미국 주문 취소 ----
+
+const usSheet = (page: Page) => page.getByRole("dialog", { name: "엔비디아 주문 취소" });
+
+async function openUsCancel(page: Page) {
+  await row(page, "엔비디아").getByRole("button", { name: "엔비디아 주문 취소" }).click();
+  await expect(usSheet(page)).toBeVisible();
+}
+
+test("미국 주문 취소는 수량 칸 없이 남은 수량 전부로 보내고 접수된다", async ({ page }) => {
+  const { accountRequests, openOrderRequests, cancels } = await mockApi(page, {
+    openOrders: () => listed([usOrder()]),
+  });
+  await open(page, "미국 모의");
+  await openUsCancel(page);
+
+  const confirm = usSheet(page);
+  await expect(confirm.locator('dd[data-term="거래소"]')).toHaveText("NASDAQ");
+  await expect(confirm.locator('dd[data-term="주문가격"]')).toHaveText("$200.50");
+  await expect(confirm.locator('dd[data-term="취소 수량"]')).toHaveText("남은 수량 전부");
+  await expect(confirm.getByLabel("취소 수량 (주)")).toHaveCount(0);
+  await expect(confirm.getByRole("button", { name: "전부" })).toHaveCount(0);
+  const accounts = accountRequests.length;
+  const opens = openOrderRequests.length;
+  await confirm.getByRole("button", { name: "주문 취소하기" }).click();
+
+  await expect(page.getByRole("status").filter({ hasText: "주문 취소가 접수되었습니다" })).toBeVisible();
+  await expect(usSheet(page)).toHaveCount(0);
+  expect(cancels[0]).toEqual({ order_key: expect.any(String), order_no: "000000282", quantity: "5" });
+  await expect.poll(() => accountRequests.length).toBe(accounts + 1);
+  await expect.poll(() => openOrderRequests.length).toBe(opens + 1);
+});
+
+test("미국 취소가 수량 초과로 거부되면 줄어든 수량을 안내하고 같은 창에서 새 키로 다시 보낸다", async ({ page }) => {
+  let remaining = 3;
+  const { cancels } = await mockApi(page, {
+    openOrders: () => listed([usOrder({ remaining_quantity: remaining })]),
+    cancel: (body) => {
+      if (cancels.length > 1) return cancelAccepted(body);
+      remaining = 1;
+      return failure(400, "cancel_quantity_exceeded", "미체결 수량(1주)을 넘어 취소하지 않았습니다.");
+    },
+  });
+  await open(page, "미국 모의");
+  await openUsCancel(page);
+  const submit = usSheet(page).getByRole("button", { name: "주문 취소하기" });
+  await expect(submit).toBeEnabled();
+
+  await submit.click();
+
+  await expect(usSheet(page).getByRole("note")).toContainText("미체결 수량이 1주로 줄었습니다");
+  await expect(usSheet(page).locator('dd[data-term="미체결 수량"]')).toHaveText("1주");
+  await expect(submit).toBeEnabled();
+  await submit.click();
+  await expect(usSheet(page)).toHaveCount(0);
+  expect(cancels.map((c) => c.quantity)).toEqual(["3", "1"]);
+  expect(cancels[1].order_key).not.toBe(cancels[0].order_key);
+});

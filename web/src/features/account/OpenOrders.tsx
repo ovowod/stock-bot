@@ -124,8 +124,7 @@ function OpenOrderRow({
       <div className="flex w-full items-center justify-between gap-3 md:w-auto md:shrink-0 md:justify-end">
         <p className="text-[15px] font-bold whitespace-nowrap">{quantity}</p>
         {!isReal && !order.cancelable && <p className="text-xs whitespace-nowrap text-muted">키움 앱에서 취소하세요</p>}
-        {/* 미국 취소는 서버가 받기 전까지 버튼을 열지 않는다(.scratch/us-cancel-order 티켓 02). */}
-        {!isReal && order.cancelable && market === "domestic" && (
+        {!isReal && order.cancelable && (
           <button
             type="button"
             aria-label={`${order.name} 주문 취소`}
