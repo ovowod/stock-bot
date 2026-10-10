@@ -27,9 +27,6 @@ DOMESTIC_STOCK_INFO_PATH = "/api/dostk/stkinfo"
 US_STOCK_INFO_PATH = "/api/us/stkinfo"
 # ka10099 시장구분: 0 코스피(ETF·ETN·리츠 포함), 10 코스닥
 DOMESTIC_MARKETS = ("0", "10")
-# 같은 TR을 바로 이어 부르면 호출 한도(1700)에 걸린 적이 있어 두 국내 목록 호출 사이에 간격을 둔다.
-# 목록은 하루 한 번만 받으므로 첫 검색만 이만큼 늦어진다.
-DOMESTIC_LIST_INTERVAL_SECONDS = 1.0
 # ka10099는 코스피 주식의 시장명을 "거래소"로 준다. 용어집의 거래소와 헷갈리지 않게 바꿔 보여준다.
 DOMESTIC_CATEGORY_NAMES = {"거래소": "코스피"}
 # 문서에 있는 미국 거래소만 남긴다. 모의 서버는 문서에 없는 NP도 보냈다.
@@ -134,9 +131,7 @@ class StockSearchService:
         if spec.market is Market.DOMESTIC:
             stocks: list[_Stock] = []
             # 코스피와 코스닥이 모두 성공해야 보관한다. 하나라도 실패하면 예외가 그대로 나간다.
-            for index, market in enumerate(DOMESTIC_MARKETS):
-                if index:
-                    await asyncio.sleep(DOMESTIC_LIST_INTERVAL_SECONDS)
+            for market in DOMESTIC_MARKETS:
                 data = await self._kiwoom.call(
                     spec, "ka10099", DOMESTIC_STOCK_INFO_PATH, {"mrkt_tp": market}
                 )

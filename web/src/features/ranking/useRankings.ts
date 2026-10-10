@@ -13,7 +13,7 @@ export type CardState =
   | { status: "error"; error: ApiError }
   | { status: "ready"; data: Ranking; refreshing: boolean; refreshError: ApiError | null };
 
-/** 화면에 위에서부터 놓이는 순서이자 조회 순서. */
+/** 화면에 위에서부터 놓이는 순서. */
 export const KINDS: RankingKind[] = ["trading_value", "gainers", "volume", "popular"];
 /** 거래소 선택이 적용되는 카드. 인기 종목은 집계 구간만 따른다. */
 const EXCHANGE_KINDS = KINDS.filter((kind) => kind !== "popular");
@@ -27,7 +27,7 @@ const allLoading = (): Cards =>
 /**
  * 순위 카드들의 데이터. 한 투자 환경에만 묶인다(환경이 바뀌면 컴포넌트가 새로 만들어진다).
  *
- * 카드는 한 번에 하나씩 순서대로 조회한다. 조회를 시작할 때 카드마다 번호표를 새로 받고,
+ * 카드는 동시에 조회한다. 같은 TR의 호출 간격은 서버가 맞춘다. 조회를 시작할 때 카드마다 번호표를 새로 받고,
  * 응답이 왔을 때 번호표가 바뀌었으면(조건 변경·다시 시도로 새 조회가 시작됨) 버린다.
  */
 export function useRankings(environment: EnvironmentValue) {
@@ -60,25 +60,26 @@ export function useRankings(environment: EnvironmentValue) {
         return next;
       });
 
-      for (const [kind, mine] of claimed) {
-        if (tickets.current[kind] !== mine) continue;
-        const controller = new AbortController();
-        controllers.current[kind] = controller;
-        try {
-          const data = await fetchRanking(environment, kind, conditions, controller.signal);
-          if (tickets.current[kind] !== mine) continue;
-          update(kind, () => ({ status: "ready", data, refreshing: false, refreshError: null }));
-        } catch (error) {
-          if (tickets.current[kind] !== mine) continue;
-          const apiError =
-            error instanceof ApiError ? error : new ApiError("unknown", "알 수 없는 오류입니다.", null);
-          update(kind, (prev) =>
-            prev.status === "ready"
-              ? { ...prev, refreshing: false, refreshError: apiError }
-              : { status: "error", error: apiError },
-          );
-        }
-      }
+      await Promise.all(
+        claimed.map(async ([kind, mine]) => {
+          const controller = new AbortController();
+          controllers.current[kind] = controller;
+          try {
+            const data = await fetchRanking(environment, kind, conditions, controller.signal);
+            if (tickets.current[kind] !== mine) return;
+            update(kind, () => ({ status: "ready", data, refreshing: false, refreshError: null }));
+          } catch (error) {
+            if (tickets.current[kind] !== mine) return;
+            const apiError =
+              error instanceof ApiError ? error : new ApiError("unknown", "알 수 없는 오류입니다.", null);
+            update(kind, (prev) =>
+              prev.status === "ready"
+                ? { ...prev, refreshing: false, refreshError: apiError }
+                : { status: "error", error: apiError },
+            );
+          }
+        }),
+      );
     },
     [environment],
   );
