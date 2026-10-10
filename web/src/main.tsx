@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { AccountSnapshotProvider } from "./features/account/useAccount";
 import { AuthGate } from "./features/auth/AuthGate";
 import { ToastProvider } from "./features/toast/Toasts";
 import "./index.css";
@@ -9,7 +10,9 @@ import "./index.css";
 createRoot(document.getElementById("root")!).render(
   <ToastProvider>
     <AuthGate>
-      <App />
+      <AccountSnapshotProvider>
+        <App />
+      </AccountSnapshotProvider>
     </AuthGate>
   </ToastProvider>,
 );

@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { mockNoOpenOrders, openDashboard, openLiveDashboard } from "./support";
+import { mockNoOpenOrders, openDashboard, openLiveDashboard, PASSWORD } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 키움 서버나 실전 서버는 호출되지 않는다.
 
@@ -352,6 +352,49 @@ test("새로고침 중에는 기존 데이터를 유지하고 버튼을 비활�
   await expect(refreshing).toBeDisabled();
   await expect(page.getByText("512,345,678원")).toBeVisible();
   await expect(page.getByRole("button", { name: "새로고침", exact: true })).toBeEnabled();
+});
+
+/** 모바일에서는 메뉴 서랍을 연 뒤 메뉴를 고른다. */
+async function selectMenu(page: Page, name: string) {
+  const menu = page.getByRole("button", { name: "메뉴 열기" });
+  if (await menu.isVisible()) await menu.click();
+  await page.getByRole("button", { name }).filter({ visible: true }).click();
+}
+
+test("다른 메뉴에 갔다 돌아오면 마지막 계좌 화면을 바로 보여주고 뒤에서 다시 불러온다", async ({ page }) => {
+  let requests = 0;
+  await mockAccount(page, {
+    domestic_paper: () => ({ body: domestic(), delayMs: requests++ === 0 ? 0 : 1500 }),
+  });
+  await openDashboard(page);
+  await expect(page.getByText("512,345,678원")).toBeVisible();
+
+  await selectMenu(page, "종목 검색");
+  await expect(page.getByText("512,345,678원")).toHaveCount(0);
+  await selectMenu(page, "계좌 확인");
+
+  await expect(page.getByText("512,345,678원")).toBeVisible();
+  await expect(page.getByRole("status", { name: "계좌 정보를 불러오는 중" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "새로고침 중" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "새로고침", exact: true })).toBeEnabled();
+  expect(requests).toBe(2);
+});
+
+test("로그아웃하면 기억해 둔 계좌 화면을 지운다", async ({ page }) => {
+  let requests = 0;
+  await mockAccount(page, {
+    domestic_paper: () => ({ body: domestic(), delayMs: requests++ === 0 ? 0 : 1500 }),
+  });
+  await openDashboard(page);
+  await expect(page.getByText("512,345,678원")).toBeVisible();
+
+  await selectMenu(page, "로그아웃");
+  await page.getByLabel("비밀번호").fill(PASSWORD);
+  await page.getByRole("button", { name: "로그인" }).click();
+
+  await expect(page.getByRole("status", { name: "계좌 정보를 불러오는 중" })).toBeVisible();
+  await expect(page.getByText("512,345,678원")).toHaveCount(0);
+  await expect(page.getByText("512,345,678원")).toBeVisible();
 });
 
 test("보유종목이 없으면 빈 상태를 안내하고 요약은 그대로 보여준다", async ({ page }, info) => {
