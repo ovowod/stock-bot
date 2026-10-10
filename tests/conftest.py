@@ -5,7 +5,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from stock_bot import stock_search
+from stock_bot import kiwoom
 from stock_bot.app import create_app
 from tests.fake_kiwoom import FAKE_ENV
 
@@ -44,9 +44,9 @@ def make_client() -> Iterator[Callable[..., TestClient]]:
 
 
 @pytest.fixture(autouse=True)
-def no_list_interval(monkeypatch: pytest.MonkeyPatch) -> None:
-    """국내 종목 목록 호출 사이의 대기 시간을 테스트에서는 없앤다."""
-    monkeypatch.setattr(stock_search, "DOMESTIC_LIST_INTERVAL_SECONDS", 0)
+def no_call_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """같은 TR 호출 사이의 대기 시간을 테스트에서는 없앤다. 간격 테스트는 따로 되돌린다."""
+    monkeypatch.setattr(kiwoom, "CALL_INTERVAL_SECONDS", 0)
 
 
 @pytest.fixture

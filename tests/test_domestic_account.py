@@ -1,8 +1,20 @@
 import logging
+import threading
 
+import httpx
 import pytest
 
-from tests.fake_kiwoom import FAKE_ENV, KT00018_REPLY, body_of, domestic_fake, us_fake
+from stock_bot.app import create_app
+from tests.fake_kiwoom import (
+    FAKE_ENV,
+    KT00001_REPLY,
+    KT00018_REPLY,
+    ThreadedTransport,
+    body_of,
+    domestic_fake,
+    kiwoom_error,
+    us_fake,
+)
 
 URL = "/api/environments/domestic_paper/account"
 
@@ -103,6 +115,73 @@ def test_token_is_reused_across_requests(make_client):
     assert len(fake.token_requests()) == 1
 
 
+def test_account_number_is_checked_once_per_token(make_client):
+    fake = domestic_fake()
+    client = make_client(fake)
+
+    assert client.get(URL).status_code == 200
+    assert client.get(URL).status_code == 200
+
+    assert len(fake.calls("ka00001")) == 1
+
+
+def test_skipped_account_check_is_logged(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    client = make_client(domestic_fake())
+
+    client.get(URL)
+    client.get(URL)
+
+    assert [r.getMessage() for r in caplog.records].count("account_check_skipped") == 1
+
+
+def test_account_number_is_checked_again_after_the_token_changes(make_client):
+    fake = domestic_fake().reply(
+        "kt00018", KT00018_REPLY, kiwoom_error(8005, "Token이 유효하지 않습니다"), KT00018_REPLY
+    )
+    client = make_client(fake)
+
+    client.get(URL)
+    client.get(URL)  # 잔고 조회 중 토큰이 바뀐다.
+    client.get(URL)
+
+    assert len(fake.calls("ka00001")) == 2
+    assert fake.calls("ka00001")[1].headers["authorization"] == "Bearer token-2-XYZW9876"
+
+
+def test_token_changed_during_the_account_check_is_checked_again(make_client):
+    fake = domestic_fake().reply(
+        "ka00001", kiwoom_error(8005, "Token이 유효하지 않습니다"), {"acctNo": "8100000111"}
+    )
+    client = make_client(fake)
+
+    assert client.get(URL).status_code == 200
+    assert client.get(URL).status_code == 200
+
+    assert len(fake.calls("ka00001")) == 3
+
+
+def test_account_mismatch_is_checked_again_every_time(make_client):
+    fake = domestic_fake(account_no="9999999999")
+    client = make_client(fake)
+
+    client.get(URL)
+    client.get(URL)
+
+    assert len(fake.calls("ka00001")) == 2
+
+
+def test_environments_sharing_a_token_check_the_account_separately(make_client):
+    fake = us_fake("5012345611").reply("kt00018", KT00018_REPLY).reply("kt00001", KT00001_REPLY)
+    client = make_client(fake)
+
+    assert client.get("/api/environments/domestic_real/account").status_code == 200
+    assert client.get("/api/environments/us_real/account").status_code == 200
+
+    assert len(fake.token_requests()) == 1
+    assert len(fake.calls("ka00001")) == 2
+
+
 def test_account_mismatch_stops_before_balance_lookup(make_client):
     fake = domestic_fake(account_no="9999999999")
     response = make_client(fake).get(URL)
@@ -170,3 +249,45 @@ def test_eight_digit_account_number_still_detects_a_different_account(make_clien
 
     assert response.status_code == 409
     assert fake.calls("kt00018") == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("environment", "make_fake", "api_ids"),
+    [
+        ("domestic_paper", domestic_fake, {"kt00018", "kt00001"}),
+        ("us_paper", us_fake, {"ust21070", "ust21110", "usa10099"}),
+    ],
+)
+async def test_balance_deposit_and_listings_are_requested_at_the_same_time(
+    environment, make_fake, api_ids
+):
+    fake = make_fake()
+    state = {"active": 0, "max_active": 0}
+    lock = threading.Lock()
+    all_active = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("api-id") not in api_ids:
+            return fake(request)
+        with lock:
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+            if state["active"] == len(api_ids):
+                all_active.set()
+        all_active.wait(timeout=0.5)
+        with lock:
+            state["active"] -= 1
+        return fake(request)
+
+    app = create_app(
+        environ=FAKE_ENV, transport=ThreadedTransport(handler), static_dir=None, log_dir=None
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
+        response = await client.get(f"/api/environments/{environment}/account")
+
+    assert response.status_code == 200
+    assert state["max_active"] == len(api_ids)

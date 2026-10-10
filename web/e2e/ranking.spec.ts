@@ -233,18 +233,17 @@ test("상승률은 등락률을 크게, 거래량은 거래량을 짧게 보여�
   await expect(card(page, "거래량 상위")).toContainText("5.05억주");
 });
 
-test("카드는 위에서부터 한 번에 하나씩 조회한다", async ({ page }) => {
+test("네 카드를 앞 응답을 기다리지 않고 동시에 조회한다", async ({ page }) => {
   const seen = await mockRankings(page, ({ environment, kind }) => ({
     body: ranking(environment, kind, [DOMESTIC_ITEM]),
     delayMs: 300,
   }));
   await openRanking(page);
-  await expect(card(page, "거래량 상위")).toContainText("SK하이닉스");
+  await expect(card(page, "인기 종목")).toContainText("SK하이닉스");
 
-  expect(seen.map((r) => r.kind)).toEqual(["trading_value", "gainers", "volume", "popular"]);
-  for (let i = 1; i < seen.length; i++) {
-    expect(seen[i].startedAt).toBeGreaterThanOrEqual(seen[i - 1].endedAt!);
-  }
+  expect([...seen.map((r) => r.kind)].sort()).toEqual(["gainers", "popular", "trading_value", "volume"]);
+  const firstEnded = Math.min(...seen.map((r) => r.endedAt!));
+  expect(seen.every((r) => r.startedAt < firstEnded)).toBe(true);
 });
 
 test("한 카드가 실패해도 나머지는 보이고, 다시 시도는 그 카드만 요청한다", async ({ page }) => {

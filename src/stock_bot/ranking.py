@@ -1,6 +1,5 @@
 """순위: 선택한 투자 환경의 시장에서 순위 TR을 호출해 화면에 필요한 필드만 정리한다."""
 
-import asyncio
 import logging
 import re
 from collections.abc import Callable
@@ -253,9 +252,6 @@ KINDS = {kind for kind, _ in TRS}
 class RankingService:
     def __init__(self, kiwoom: KiwoomClient) -> None:
         self._kiwoom = kiwoom
-        # 순위 화면은 TR 여러 개를 이어 부른다. 다시 시도나 조건 변경이 겹쳐도
-        # 호출 한도에 덜 걸리도록 순위용 키움 호출은 한 번에 하나만 실행한다.
-        self._lock = asyncio.Lock()
 
     async def fetch(
         self, spec: EnvironmentSpec, kind: str, conditions: dict[str, str | None]
@@ -274,8 +270,7 @@ class RankingService:
                 {tr.condition: value},
             )
 
-        async with self._lock:
-            data = await self._kiwoom.call_first_page(spec, tr.api_id, tr.path, tr.body(code))
+        data = await self._kiwoom.call_first_page(spec, tr.api_id, tr.path, tr.body(code))
         rows = Reader(data, tr.api_id).rows(tr.list_key)[:RANK_LIMIT]
         items = [
             {**_common(row, index, tr, spec.market), **tr.extra(row, spec.market)}

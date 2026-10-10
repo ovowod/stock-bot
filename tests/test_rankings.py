@@ -229,19 +229,23 @@ def test_rate_limit_is_reported_as_429(make_client):
 
 
 @pytest.mark.anyio
-async def test_concurrent_ranking_requests_reach_kiwoom_one_at_a_time():
-    fake = ranking_fake("ka10032", {"trde_prica_upper": [KA10032_ROW]})
+async def test_different_ranking_trs_reach_kiwoom_at_the_same_time():
+    fake = ranking_fake("ka10032", {"trde_prica_upper": [KA10032_ROW]}).reply(
+        "ka10027", {"pred_pre_flu_rt_upper": [KA10027_ROW]}
+    )
     state = {"active": 0, "max_active": 0}
     lock = threading.Lock()
-    release = threading.Event()
+    both_active = threading.Event()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.headers.get("api-id") != "ka10032":
+        if request.headers.get("api-id") not in {"ka10032", "ka10027"}:
             return fake(request)
         with lock:
             state["active"] += 1
             state["max_active"] = max(state["max_active"], state["active"])
-        release.wait(timeout=0.2)
+            if state["active"] == 2:
+                both_active.set()
+        both_active.wait(timeout=0.5)
         with lock:
             state["active"] -= 1
         return fake(request)
@@ -253,14 +257,13 @@ async def test_concurrent_ranking_requests_reach_kiwoom_one_at_a_time():
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
-        pending = [asyncio.create_task(client.get(DOMESTIC_URL)) for _ in range(2)]
-        await asyncio.sleep(0.05)
-        release.set()
-        responses = await asyncio.gather(*pending)
+        responses = await asyncio.gather(
+            client.get(DOMESTIC_URL),
+            client.get("/api/environments/domestic_paper/rankings/gainers"),
+        )
 
     assert [r.status_code for r in responses] == [200, 200]
-    assert len(fake.calls("ka10032")) == 2
-    assert state["max_active"] == 1
+    assert state["max_active"] == 2
 
 
 DOMESTIC_GAINERS_BODY = {

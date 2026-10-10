@@ -1,12 +1,13 @@
 """계좌 확인: 키움 계좌 TR을 호출해 화면에 필요한 필드만 정리한다."""
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from stock_bot.config import EnvironmentSpec, Market
+from stock_bot.config import Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError, response_format_error
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
@@ -49,6 +50,9 @@ class AccountService:
         # 순위·검색과 같은 이름과 거래소를 쓰려고 종목 목록에서 찾는다.
         self._listings = listings
         self._kiwoom = kiwoom
+        # 투자 환경 -> (확인에 쓴 토큰, 확인한 계좌번호). 어느 계좌를 조회할지는 토큰이 정하므로
+        # 같은 토큰을 쓰는 동안은 다시 확인하지 않는다.
+        self._verified: dict[Environment, tuple[str, str]] = {}
 
     async def fetch(self, spec: EnvironmentSpec) -> dict[str, Any]:
         account_no = await self._verified_account_no(spec)
@@ -74,6 +78,12 @@ class AccountService:
     async def _verified_account_no(self, spec: EnvironmentSpec) -> str:
         """토큰이 가리키는 계좌가 .env의 계좌번호와 같을 때만 진행한다."""
         expected = self._kiwoom.credentials(spec).account_no
+        # 확인 도중 토큰이 바뀌면 다음 요청이 새 토큰으로 한 번 더 확인한다.
+        token = await self._kiwoom.access_token(spec)
+        verified = self._verified.get(spec.environment)
+        if verified is not None and verified[0] == token:
+            log(logger, logging.INFO, "account_check_skipped", api_id="ka00001")
+            return verified[1]
         data = await self._kiwoom.call(spec, "ka00001", DOMESTIC_ACCOUNT_PATH, {})
         actual = required(data, "acctNo", "ka00001")
         secrets.add(str(actual))
@@ -84,13 +94,17 @@ class AccountService:
                 409,
                 {"account_no": mask_account_no(str(actual))},
             )
+        self._verified[spec.environment] = (token, str(actual))
         return str(actual)
 
     async def _domestic(self, spec: EnvironmentSpec) -> dict[str, Any]:
-        balance = await self._kiwoom.call(
-            spec, "kt00018", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+        # 서로 다른 TR은 호출 간격을 기다리지 않으므로 함께 보낸다.
+        balance, deposit = await asyncio.gather(
+            self._kiwoom.call(
+                spec, "kt00018", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+            ),
+            self._kiwoom.call(spec, "kt00001", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "3"}),
         )
-        deposit = await self._kiwoom.call(spec, "kt00001", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "3"})
         b = Reader(balance, "kt00018")
         d = Reader(deposit, "kt00001")
         return {
@@ -194,13 +208,14 @@ class AccountService:
             return {}
 
     async def _us(self, spec: EnvironmentSpec) -> dict[str, Any]:
-        balance = await self._kiwoom.call(
-            spec, "ust21070", US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}
+        # 서로 다른 TR은 호출 간격을 기다리지 않으므로 함께 보낸다.
+        balance, deposit, listings = await asyncio.gather(
+            self._kiwoom.call(spec, "ust21070", US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}),
+            self._kiwoom.call(spec, "ust21110", US_ACCOUNT_PATH, {}),
+            self._stock_listings(spec),
         )
-        deposit = await self._kiwoom.call(spec, "ust21110", US_ACCOUNT_PATH, {})
         b = Reader(balance, "ust21070")
         d = Reader(deposit, "ust21110")
-        listings = await self._stock_listings(spec)
         return {
             "currency": b.text("crnc_code"),
             "summary": {

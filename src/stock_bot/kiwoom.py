@@ -1,7 +1,8 @@
 """키움 REST API 클라이언트.
 
 투자 환경에 맞는 도메인·인증정보 선택, 접근 토큰 발급과 캐시, 공통 헤더, 연속조회,
-결과 코드 해석, 요청 로그를 이 모듈 안에서 처리한다. 호출하는 쪽은 TR과 요청 본문만 넘긴다.
+결과 코드 해석, 호출 간격 맞추기, 요청 로그를 이 모듈 안에서 처리한다.
+호출하는 쪽은 TR과 요청 본문만 넘긴다.
 """
 
 import asyncio
@@ -9,7 +10,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -29,6 +30,11 @@ TOKEN_EXPIRY_MARGIN = timedelta(minutes=5)
 CONTENT_TYPE = "application/json;charset=UTF-8"
 MAX_PAGES = 10
 _LOG_BODY_LIMIT = 200
+# 같은 인증정보로 같은 TR을 1초 안에 다시 부르면 호출 한도(1700)에 걸렸다.
+# 문서에는 한도 숫자가 없다.
+CALL_INTERVAL_SECONDS = 1.0
+# 이보다 오래 기다려야 하면 보내지 않고 호출 한도 오류로 돌려준다. 화면이 오래 멈춰 있지 않게 한다.
+MAX_PACING_WAIT_SECONDS = 5.0
 
 INVALID_TOKEN = 8005
 CREDENTIAL_MISMATCH = {8030, 8031}
@@ -41,6 +47,57 @@ _EMBEDDED_CODE = re.compile(r"\[(\d{4}):")
 class _Token:
     value: str
     expires_at: datetime
+
+
+class _Pacer:
+    """같은 (인증정보 묶음, TR)의 요청을 CALL_INTERVAL_SECONDS 간격으로 내보낸다.
+
+    요청은 줄에 들어올 때 보낼 시각을 예약하므로 먼저 온 요청이 먼저 나간다.
+    대기 한도는 이때 한 번만 판단한다. 연속조회 다음 페이지도 한도에 세어지므로 같은 줄에 선다.
+    """
+
+    def __init__(self, clock: Callable[[], float], sleep: Callable[[float], Awaitable[None]]):
+        self._clock = clock
+        self._sleep = sleep
+        self._last_sent: dict[tuple[str, str], float] = {}
+        self._next_slot: dict[tuple[str, str], float] = {}
+
+    async def wait(self, key: tuple[str, str]) -> None:
+        api_id = key[1]
+        start = self._clock()
+        slot = max(start, self._next_slot.get(key, start), self._earliest(key))
+        if slot - start > MAX_PACING_WAIT_SECONDS:
+            log(
+                logger,
+                logging.WARNING,
+                "kiwoom_pacing_rejected",
+                api_id=api_id,
+                wait_ms=round((slot - start) * 1000),
+            )
+            raise AppError(
+                "rate_limited",
+                "키움 API 호출 한도를 넘었습니다. 잠시 후 다시 시도하세요.",
+                429,
+                {"api_id": api_id},
+            )
+        self._next_slot[key] = slot + CALL_INTERVAL_SECONDS
+        waited = False
+        # 앞 요청이 예약보다 늦게 나갔으면 그 시각에서 다시 간격을 채운다.
+        while (delay := max(slot, self._earliest(key)) - self._clock()) > 0:
+            waited = True
+            await self._sleep(delay)
+        if waited:
+            log(
+                logger,
+                logging.INFO,
+                "kiwoom_pacing_wait",
+                api_id=api_id,
+                wait_ms=round((self._clock() - start) * 1000),
+            )
+        self._last_sent[key] = self._clock()
+
+    def _earliest(self, key: tuple[str, str]) -> float:
+        return self._last_sent.get(key, float("-inf")) + CALL_INTERVAL_SECONDS
 
 
 @dataclass(frozen=True)
@@ -67,9 +124,12 @@ class KiwoomClient:
         environ: Mapping[str, str],
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 10.0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._environ = environ
         self._http = httpx.AsyncClient(transport=transport, timeout=timeout)
+        self._pacer = _Pacer(clock, sleep)
         # 토큰은 인증정보 묶음별로 보관한다. 국내 실전과 미국 실전은 같은 앱 키를 쓰므로
         # 토큰도 공유해야 서로의 발급이 상대 토큰을 무효로 만들 여지가 없다.
         self._tokens: dict[str, _Token] = {}
@@ -247,6 +307,7 @@ class KiwoomClient:
         page_no: int,
     ) -> _Page:
         url = f"{spec.domain}{path}"
+        await self._pacer.wait((spec.credential_prefix, api_id))
         log(logger, logging.INFO, "kiwoom_request", api_id=api_id, target=url, page=page_no)
         started = time.perf_counter()
         try:
