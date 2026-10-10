@@ -1,5 +1,6 @@
 """계좌 확인: 키움 계좌 TR을 호출해 화면에 필요한 필드만 정리한다."""
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -97,10 +98,13 @@ class AccountService:
         return str(actual)
 
     async def _domestic(self, spec: EnvironmentSpec) -> dict[str, Any]:
-        balance = await self._kiwoom.call(
-            spec, "kt00018", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+        # 서로 다른 TR은 호출 간격을 기다리지 않으므로 함께 보낸다.
+        balance, deposit = await asyncio.gather(
+            self._kiwoom.call(
+                spec, "kt00018", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+            ),
+            self._kiwoom.call(spec, "kt00001", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "3"}),
         )
-        deposit = await self._kiwoom.call(spec, "kt00001", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "3"})
         b = Reader(balance, "kt00018")
         d = Reader(deposit, "kt00001")
         return {
@@ -204,13 +208,14 @@ class AccountService:
             return {}
 
     async def _us(self, spec: EnvironmentSpec) -> dict[str, Any]:
-        balance = await self._kiwoom.call(
-            spec, "ust21070", US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}
+        # 서로 다른 TR은 호출 간격을 기다리지 않으므로 함께 보낸다.
+        balance, deposit, listings = await asyncio.gather(
+            self._kiwoom.call(spec, "ust21070", US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}),
+            self._kiwoom.call(spec, "ust21110", US_ACCOUNT_PATH, {}),
+            self._stock_listings(spec),
         )
-        deposit = await self._kiwoom.call(spec, "ust21110", US_ACCOUNT_PATH, {})
         b = Reader(balance, "ust21070")
         d = Reader(deposit, "ust21110")
-        listings = await self._stock_listings(spec)
         return {
             "currency": b.text("crnc_code"),
             "summary": {

@@ -1,11 +1,15 @@
 import logging
+import threading
 
+import httpx
 import pytest
 
+from stock_bot.app import create_app
 from tests.fake_kiwoom import (
     FAKE_ENV,
     KT00001_REPLY,
     KT00018_REPLY,
+    ThreadedTransport,
     body_of,
     domestic_fake,
     kiwoom_error,
@@ -245,3 +249,45 @@ def test_eight_digit_account_number_still_detects_a_different_account(make_clien
 
     assert response.status_code == 409
     assert fake.calls("kt00018") == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("environment", "make_fake", "api_ids"),
+    [
+        ("domestic_paper", domestic_fake, {"kt00018", "kt00001"}),
+        ("us_paper", us_fake, {"ust21070", "ust21110", "usa10099"}),
+    ],
+)
+async def test_balance_deposit_and_listings_are_requested_at_the_same_time(
+    environment, make_fake, api_ids
+):
+    fake = make_fake()
+    state = {"active": 0, "max_active": 0}
+    lock = threading.Lock()
+    all_active = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("api-id") not in api_ids:
+            return fake(request)
+        with lock:
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+            if state["active"] == len(api_ids):
+                all_active.set()
+        all_active.wait(timeout=0.5)
+        with lock:
+            state["active"] -= 1
+        return fake(request)
+
+    app = create_app(
+        environ=FAKE_ENV, transport=ThreadedTransport(handler), static_dir=None, log_dir=None
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
+        response = await client.get(f"/api/environments/{environment}/account")
+
+    assert response.status_code == 200
+    assert state["max_active"] == len(api_ids)
