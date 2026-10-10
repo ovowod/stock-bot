@@ -2,7 +2,15 @@ import logging
 
 import pytest
 
-from tests.fake_kiwoom import FAKE_ENV, KT00018_REPLY, body_of, domestic_fake, us_fake
+from tests.fake_kiwoom import (
+    FAKE_ENV,
+    KT00001_REPLY,
+    KT00018_REPLY,
+    body_of,
+    domestic_fake,
+    kiwoom_error,
+    us_fake,
+)
 
 URL = "/api/environments/domestic_paper/account"
 
@@ -101,6 +109,73 @@ def test_token_is_reused_across_requests(make_client):
     client.get(URL)
 
     assert len(fake.token_requests()) == 1
+
+
+def test_account_number_is_checked_once_per_token(make_client):
+    fake = domestic_fake()
+    client = make_client(fake)
+
+    assert client.get(URL).status_code == 200
+    assert client.get(URL).status_code == 200
+
+    assert len(fake.calls("ka00001")) == 1
+
+
+def test_skipped_account_check_is_logged(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    client = make_client(domestic_fake())
+
+    client.get(URL)
+    client.get(URL)
+
+    assert [r.getMessage() for r in caplog.records].count("account_check_skipped") == 1
+
+
+def test_account_number_is_checked_again_after_the_token_changes(make_client):
+    fake = domestic_fake().reply(
+        "kt00018", KT00018_REPLY, kiwoom_error(8005, "Token이 유효하지 않습니다"), KT00018_REPLY
+    )
+    client = make_client(fake)
+
+    client.get(URL)
+    client.get(URL)  # 잔고 조회 중 토큰이 바뀐다.
+    client.get(URL)
+
+    assert len(fake.calls("ka00001")) == 2
+    assert fake.calls("ka00001")[1].headers["authorization"] == "Bearer token-2-XYZW9876"
+
+
+def test_token_changed_during_the_account_check_is_checked_again(make_client):
+    fake = domestic_fake().reply(
+        "ka00001", kiwoom_error(8005, "Token이 유효하지 않습니다"), {"acctNo": "8100000111"}
+    )
+    client = make_client(fake)
+
+    assert client.get(URL).status_code == 200
+    assert client.get(URL).status_code == 200
+
+    assert len(fake.calls("ka00001")) == 3
+
+
+def test_account_mismatch_is_checked_again_every_time(make_client):
+    fake = domestic_fake(account_no="9999999999")
+    client = make_client(fake)
+
+    client.get(URL)
+    client.get(URL)
+
+    assert len(fake.calls("ka00001")) == 2
+
+
+def test_environments_sharing_a_token_check_the_account_separately(make_client):
+    fake = us_fake("5012345611").reply("kt00018", KT00018_REPLY).reply("kt00001", KT00001_REPLY)
+    client = make_client(fake)
+
+    assert client.get("/api/environments/domestic_real/account").status_code == 200
+    assert client.get("/api/environments/us_real/account").status_code == 200
+
+    assert len(fake.token_requests()) == 1
+    assert len(fake.calls("ka00001")) == 2
 
 
 def test_account_mismatch_stops_before_balance_lookup(make_client):
