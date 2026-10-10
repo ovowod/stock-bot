@@ -52,8 +52,8 @@ class _Token:
 class _Pacer:
     """같은 (인증정보 묶음, TR)의 요청을 CALL_INTERVAL_SECONDS 간격으로 내보낸다.
 
-    요청은 줄에 들어올 때 보낼 시각을 예약하므로 먼저 온 요청이 먼저 나간다. 5초 한도는 이때 한 번만
-    판단한다. 차례가 와도 그사이 연속조회 페이지가 나갔으면 그 시각에서 다시 간격을 채운다.
+    요청은 줄에 들어올 때 보낼 시각을 예약하므로 먼저 온 요청이 먼저 나간다.
+    대기 한도는 이때 한 번만 판단한다. 연속조회 다음 페이지도 한도에 세어지므로 같은 줄에 선다.
     """
 
     def __init__(self, clock: Callable[[], float], sleep: Callable[[float], Awaitable[None]]):
@@ -82,6 +82,7 @@ class _Pacer:
             )
         self._next_slot[key] = slot + CALL_INTERVAL_SECONDS
         waited = False
+        # 앞 요청이 예약보다 늦게 나갔으면 그 시각에서 다시 간격을 채운다.
         while (delay := max(slot, self._earliest(key)) - self._clock()) > 0:
             waited = True
             await self._sleep(delay)
@@ -93,8 +94,6 @@ class _Pacer:
                 api_id=api_id,
                 wait_ms=round((self._clock() - start) * 1000),
             )
-
-    def sent(self, key: tuple[str, str]) -> None:
         self._last_sent[key] = self._clock()
 
     def _earliest(self, key: tuple[str, str]) -> float:
@@ -243,10 +242,8 @@ class KiwoomClient:
                 "next-key": next_key,
                 "Content-Type": CONTENT_TYPE,
             }
-            # 8005 뒤 다시 보내는 요청은 연속조회 페이지라도 새 요청으로 보고 간격을 지킨다.
-            paced = cont_yn != "Y" or attempt == 2
             try:
-                return await self._post(spec, api_id, path, body, headers, page_no, paced)
+                return await self._post(spec, api_id, path, body, headers, page_no)
             except _KiwoomResult as result:
                 if result.code != INVALID_TOKEN or attempt == 2:
                     raise _classify(result) from None
@@ -308,14 +305,9 @@ class KiwoomClient:
         body: dict[str, Any],
         headers: dict[str, str],
         page_no: int,
-        paced: bool = True,
     ) -> _Page:
-        """paced가 False면(연속조회 다음 페이지) 기다리지 않고 보내되, 보낸 시각은 기록한다."""
         url = f"{spec.domain}{path}"
-        key = (spec.credential_prefix, api_id)
-        if paced:
-            await self._pacer.wait(key)
-        self._pacer.sent(key)
+        await self._pacer.wait((spec.credential_prefix, api_id))
         log(logger, logging.INFO, "kiwoom_request", api_id=api_id, target=url, page=page_no)
         started = time.perf_counter()
         try:

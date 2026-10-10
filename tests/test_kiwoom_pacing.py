@@ -135,7 +135,8 @@ async def test_request_needing_more_than_five_seconds_is_rejected_without_sendin
 
 
 @pytest.mark.anyio
-async def test_continuation_page_is_not_delayed_but_counts_for_the_next_request():
+async def test_continuation_page_waits_like_any_request():
+    """모의 서버는 1페이지 0.4초 뒤에 보낸 다음 페이지를 1700으로 거부했다."""
     clock = FakeClock()
     fake = FakeKiwoom().reply(
         "kt00018",
@@ -144,51 +145,10 @@ async def test_continuation_page_is_not_delayed_but_counts_for_the_next_request(
     )
     client, sent = make(fake, clock)
 
-    await client.call(DOMESTIC_PAPER, "kt00018", PATH, {})
-    clock.now = 0.5
-    fake.replies["kt00018"] = [page_response({"rows": [3]})]
-    await client.call(DOMESTIC_PAPER, "kt00018", PATH, {})
+    data = await client.call(DOMESTIC_PAPER, "kt00018", PATH, {})
 
-    assert times(sent, "kt00018") == [0.0, 0.0, 1.0]
-
-
-@pytest.mark.anyio
-async def test_waiting_request_counts_from_a_continuation_page_sent_meanwhile():
-    """기다리는 도중 앞 조회의 다음 페이지가 나가면, 그 페이지 시각에서 1초 뒤에 나간다."""
-    clock = FakeClock()
-    fake = FakeKiwoom().reply(
-        "kt00018",
-        page_response({"rows": [1]}, cont_yn="Y", next_key="p2"),
-        page_response({"rows": [2]}),
-        page_response({"rows": [3]}),
-    )
-    client, sent = make(fake, clock)
-    first_page_released = asyncio.Event()
-
-    async def slow_first_page(response: httpx.Response) -> httpx.Response:
-        await first_page_released.wait()
-        return response
-
-    def handler(request: httpx.Request) -> httpx.Response | Awaitable[httpx.Response]:
-        is_first_page = request.headers.get("api-id") == "kt00018" and not fake.calls("kt00018")
-        response = fake(request)
-        return slow_first_page(response) if is_first_page else response
-
-    async def page_arrives_while_waiting() -> None:
-        # 기다리던 요청이 잠들자마자 0.9초에 첫 페이지 응답이 와서 다음 페이지가 나간다.
-        clock.now = 0.9
-        first_page_released.set()
-        for _ in range(10):
-            await asyncio.sleep(0)
-
-    client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    clock.on_sleep = page_arrives_while_waiting
-    await asyncio.gather(
-        client.call(DOMESTIC_PAPER, "kt00018", PATH, {}),
-        client.call(DOMESTIC_PAPER, "kt00018", PATH, {}),
-    )
-
-    assert times(sent, "kt00018") == [0.0, 0.9, 1.9]
+    assert data["rows"] == [1, 2]
+    assert times(sent, "kt00018") == [0.0, 1.0]
 
 
 @pytest.mark.anyio
@@ -210,8 +170,8 @@ async def test_retry_of_a_continuation_page_after_invalid_token_waits():
 
     await client.call(DOMESTIC_PAPER, "kt00018", PATH, {})
 
-    assert times(sent, "au10001") == [0.0, 5.0]
-    assert times(sent, "kt00018") == [5.0, 5.0, 6.0]
+    assert times(sent, "au10001") == [0.0, 6.0]
+    assert times(sent, "kt00018") == [5.0, 6.0, 7.0]
 
 
 @pytest.mark.anyio
