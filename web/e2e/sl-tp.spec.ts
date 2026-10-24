@@ -340,3 +340,86 @@ test("저장하는 동안에는 세션 추가·삭제·시각 편집이 막힌�
   await expect(page.getByText("SL / TP 설정을 저장했습니다")).toBeVisible();
   await expect(startInput(page, 1)).toBeEnabled();
 });
+
+const switchOf = (page: Page, n: number) => page.getByRole("switch", { name: `${n}번째 세션 켜기` });
+const takeProfit = (page: Page, n: number) => page.getByLabel(`${n}번째 세션 익절 기준(%)`);
+const stopLoss = (page: Page, n: number) => page.getByLabel(`${n}번째 세션 손절 기준(%)`);
+
+test("세션마다 켜고 익절·손절 기준을 정해 저장한다", async ({ page }, info) => {
+  const { saved } = await mockSlTp(page);
+  await openSlTp(page);
+
+  await addSession(page).click();
+  await addSession(page).click();
+  await expect(switchOf(page, 1)).toHaveAttribute("aria-checked", "false");
+  await expect(takeProfit(page, 1)).toHaveValue("");
+
+  await switchOf(page, 1).click();
+  await expect(switchOf(page, 1)).toHaveAttribute("aria-checked", "true");
+  await expect(sessionList(page)).toContainText("켜진 세션에는 익절 기준이나 손절 기준이 하나 이상 있어야 합니다.");
+  await expect(saveButton(page)).toBeDisabled();
+
+  await takeProfit(page, 1).fill("5");
+  await stopLoss(page, 1).fill("2.5");
+  await expect(sessionList(page).getByRole("listitem").first()).toContainText("+5%");
+  await expect(sessionList(page).getByRole("listitem").first()).toContainText("−2.5%");
+  // 꺼진 세션은 손절 기준만 정해도 된다.
+  await stopLoss(page, 2).fill("3");
+  await page.screenshot({ path: `screenshots/${info.project.name}-sl-tp-sessions.png`, fullPage: true });
+
+  await saveButton(page).click();
+  await expect(page.getByText("SL / TP 설정을 저장했습니다")).toBeVisible();
+  expect(saved[0].body.sessions).toEqual([
+    { start: "09:00", end: "10:00", enabled: true, take_profit: "5", stop_loss: "2.5" },
+    { start: "10:00", end: "11:00", enabled: false, take_profit: null, stop_loss: "3" },
+  ]);
+});
+
+test("잘못된 익절·손절 기준은 안내하고 저장을 막는다", async ({ page }) => {
+  await mockSlTp(page, { load: (environment) => ({ body: settings(environment, { sessions: [off("09:00", "10:00")] }) }) });
+  await openSlTp(page);
+  const item = sessionList(page).getByRole("listitem").first();
+
+  await takeProfit(page, 1).fill("1.234");
+  await expect(item).toContainText("익절 기준은 0.01~1000 사이, 소수점 둘째 자리까지의 숫자여야 합니다.");
+  await expect(saveButton(page)).toBeDisabled();
+  await takeProfit(page, 1).fill("1000");
+  await stopLoss(page, 1).fill("100");
+  await expect(item).toContainText("손절 기준은 0.01~99.99 사이, 소수점 둘째 자리까지의 숫자여야 합니다.");
+  await stopLoss(page, 1).fill("");
+  await expect(saveButton(page)).toBeEnabled();
+});
+
+test("실전투자에서는 스위치를 켤 수 없지만 시각과 기준은 저장한다", async ({ page }) => {
+  const { saved } = await mockSlTp(page);
+  await openSlTp(page);
+  await page.getByRole("radio", { name: "국내 실전" }).click();
+
+  await expect(page.getByText("실전투자에서는 SL/TP 세션을 켤 수 없습니다")).toBeVisible();
+  await addSession(page).click();
+  await expect(switchOf(page, 1)).toBeDisabled();
+  await expect(switchOf(page, 1)).toHaveAttribute("aria-checked", "false");
+  await takeProfit(page, 1).fill("5");
+  await saveButton(page).click();
+  await expect(page.getByText("SL / TP 설정을 저장했습니다")).toBeVisible();
+  expect(saved[0]).toEqual({
+    environment: "domestic_real",
+    body: { excluded: [], sessions: [{ start: "09:00", end: "10:00", enabled: false, take_profit: "5", stop_loss: null }] },
+  });
+});
+
+test("저장하는 동안에는 스위치와 기준 입력도 막힌다", async ({ page }) => {
+  await mockSlTp(page, {
+    save: (environment, body) => ({ body: { ...settings(environment), ...body }, delayMs: 1000 }),
+  });
+  await openSlTp(page);
+
+  await addSession(page).click();
+  await saveButton(page).click();
+  await expect(switchOf(page, 1)).toBeDisabled();
+  await expect(takeProfit(page, 1)).toBeDisabled();
+  await expect(stopLoss(page, 1)).toBeDisabled();
+  await expect(page.getByText("SL / TP 설정을 저장했습니다")).toBeVisible();
+  await expect(switchOf(page, 1)).toBeEnabled();
+  await expectNoHorizontalScroll(page);
+});

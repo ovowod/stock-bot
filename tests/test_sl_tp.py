@@ -252,3 +252,109 @@ def test_invalid_session_times_are_rejected(make_client, data_dir, environment, 
     assert response.json()["error"]["kind"] == "invalid_sl_tp_settings"
     assert response.json()["error"]["message"].startswith(message)
     assert not (data_dir / "sl-tp").exists()
+
+
+@pytest.mark.parametrize(
+    ("take_profit", "stop_loss", "enabled"),
+    [
+        ("5", "2.5", True),
+        ("0.01", "99.99", True),
+        ("1000", None, True),
+        (None, "3", True),
+        (None, None, False),
+    ],
+)
+def test_paper_sessions_save_switch_and_thresholds(make_client, take_profit, stop_loss, enabled):
+    client = make_client()
+    item = session("09:00", "10:00", enabled=enabled, take_profit=take_profit, stop_loss=stop_loss)
+
+    response = client.put(GET.format("domestic_paper"), json={"excluded": [], "sessions": [item]})
+
+    assert response.status_code == 200
+    assert client.get(GET.format("domestic_paper")).json()["sessions"] == [item]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"take_profit": "1.234"}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
+        ({"take_profit": "0"}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
+        ({"take_profit": "-1"}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
+        ({"take_profit": "1000.01"}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
+        ({"take_profit": 5}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
+        ({"take_profit": "abc"}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
+        ({"stop_loss": "100"}, "1번째 SL/TP 세션: 손절 기준은 0.01~99.99"),
+        ({"stop_loss": "0.001"}, "1번째 SL/TP 세션: 손절 기준은 0.01~99.99"),
+        ({"enabled": "yes"}, "1번째 SL/TP 세션: 켜짐 여부가 올바르지 않습니다."),
+        ({"enabled": True}, "1번째 SL/TP 세션: 켜진 세션에는 익절 기준이나 손절 기준"),
+    ],
+)
+def test_invalid_thresholds_are_rejected(make_client, data_dir, change, message):
+    response = make_client().put(
+        GET.format("domestic_paper"),
+        json={"excluded": [], "sessions": [session("09:00", "10:00", **change)]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"].startswith(message)
+    assert not (data_dir / "sl-tp").exists()
+
+
+def test_real_environment_refuses_enabled_sessions_and_keeps_the_file(make_client, data_dir):
+    client = make_client()
+    off = session("09:00", "10:00", take_profit="5")
+    saved = client.put(GET.format("domestic_real"), json={"excluded": [], "sessions": [off]})
+    assert saved.status_code == 200
+    before = (data_dir / "sl-tp" / "domestic_real.json").read_text()
+
+    response = client.put(
+        GET.format("domestic_real"),
+        json={"excluded": [SAMSUNG], "sessions": [{**off, "enabled": True}]},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["kind"] == "sl_tp_enable_not_allowed"
+    assert response.json()["error"]["message"] == "실전투자에서는 SL/TP 세션을 켤 수 없습니다."
+    assert (data_dir / "sl-tp" / "domestic_real.json").read_text() == before
+
+
+def test_invalid_input_is_reported_before_the_real_enable_rule(make_client):
+    response = make_client().put(
+        GET.format("us_real"),
+        json={"excluded": [], "sessions": [session("09:00", "10:00", enabled=True)]},
+    )
+
+    assert response.status_code == 400
+
+
+def test_real_file_with_an_enabled_session_is_unreadable(make_client, data_dir):
+    path = data_dir / "sl-tp" / "us_real.json"
+    path.parent.mkdir(parents=True)
+    content = json.dumps(
+        {
+            "version": 1,
+            "updated_at": None,
+            "excluded": [],
+            "sessions": [session("09:30", "10:00", enabled=True, take_profit="5")],
+        }
+    )
+    path.write_text(content)
+
+    response = make_client().get(GET.format("us_real"))
+
+    assert response.status_code == 500
+    assert response.json()["error"]["kind"] == "sl_tp_settings_unreadable"
+    assert path.read_text() == content
+
+
+def test_enabled_count_and_real_refusal_are_logged(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    client = make_client()
+    on = session("09:00", "10:00", enabled=True, stop_loss="3")
+
+    client.put(GET.format("domestic_paper"), json={"excluded": [], "sessions": [on]})
+    client.put(GET.format("domestic_real"), json={"excluded": [], "sessions": [on]})
+
+    events = {r.getMessage(): getattr(r, "fields", {}) for r in caplog.records}
+    assert events["sl_tp_settings_saved"]["enabled_count"] == 1
+    assert events["sl_tp_enable_refused"]["enabled_count"] == 1

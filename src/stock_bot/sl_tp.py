@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,10 @@ TIMEZONES = {Market.DOMESTIC: "Asia/Seoul", Market.US: "America/New_York"}
 REGULAR_HOURS = {Market.DOMESTIC: ("09:00", "15:30"), Market.US: ("09:30", "16:00")}
 US_EXCHANGES = ("NYSE", "NASDAQ", "AMEX")
 _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_PERCENT = re.compile(r"^\d+(\.\d{1,2})?$")
+# 익절·손절 기준(%)의 범위. 손절 기준은 양수로 두고 손실률을 뜻한다.
+TAKE_PROFIT_RANGE = (Decimal("0.01"), Decimal("1000"))
+STOP_LOSS_RANGE = (Decimal("0.01"), Decimal("99.99"))
 
 
 class SlTpSettingsStore:
@@ -46,6 +51,10 @@ class SlTpSettingsStore:
         except AppError as exc:
             log(logger, logging.WARNING, "sl_tp_settings_rejected", cause=exc.message)
             raise
+        # 매도 동작이 붙어도 실전 계좌가 갑자기 매도되지 않게, 실전에서는 켜 둘 수 없다.
+        if spec.is_real and _counts(settings)["enabled_count"]:
+            log(logger, logging.WARNING, "sl_tp_enable_refused", **_counts(settings))
+            raise _enable_not_allowed()
         settings["updated_at"] = datetime.now(UTC).isoformat(timespec="seconds")
         async with self._locks.setdefault(spec.environment, asyncio.Lock()):
             self._write(spec, settings)
@@ -64,6 +73,8 @@ class SlTpSettingsStore:
             if updated_at is not None and not isinstance(updated_at, str):
                 raise ValueError("updated_at이 문자열이 아닙니다")
             settings = _validate(data, spec.market)
+            if spec.is_real and _counts(settings)["enabled_count"]:
+                raise _enable_not_allowed()
         except (OSError, ValueError) as exc:
             cause = str(exc)
             raise _unreadable(path, cause) from exc
@@ -99,6 +110,10 @@ class SlTpSettingsStore:
             raise AppError(
                 "sl_tp_settings_write_failed", "SL / TP 설정을 저장하지 못했습니다.", 500
             ) from exc
+
+
+def _enable_not_allowed() -> AppError:
+    return AppError("sl_tp_enable_not_allowed", "실전투자에서는 SL/TP 세션을 켤 수 없습니다.", 403)
 
 
 def _unreadable(path: Path, cause: str) -> AppError:
@@ -193,13 +208,32 @@ def _validate_sessions(items: list[Any], market: Market) -> list[dict[str, Any]]
         if previous_end is not None and start < previous_end:
             raise _invalid(f"{where}: 시작 시각이 앞 세션의 종료 시각보다 이릅니다.")
         previous_end = end
-        if (
-            item.get("enabled") is not False
-            or item.get("take_profit") is not None
-            or item.get("stop_loss") is not None
-        ):
-            raise _invalid(f"{where}: 아직 켜거나 익절·손절 기준을 정할 수 없습니다.")
+        enabled = item.get("enabled")
+        if not isinstance(enabled, bool):
+            raise _invalid(f"{where}: 켜짐 여부가 올바르지 않습니다.")
+        take_profit = _percent(item.get("take_profit"), TAKE_PROFIT_RANGE, f"{where}: 익절 기준")
+        stop_loss = _percent(item.get("stop_loss"), STOP_LOSS_RANGE, f"{where}: 손절 기준")
+        if enabled and take_profit is None and stop_loss is None:
+            raise _invalid(
+                f"{where}: 켜진 세션에는 익절 기준이나 손절 기준이 하나 이상 있어야 합니다."
+            )
         result.append(
-            {"start": start, "end": end, "enabled": False, "take_profit": None, "stop_loss": None}
+            {
+                "start": start,
+                "end": end,
+                "enabled": enabled,
+                "take_profit": take_profit,
+                "stop_loss": stop_loss,
+            }
         )
     return result
+
+
+def _percent(value: Any, bounds: tuple[Decimal, Decimal], name: str) -> str | None:
+    """정하지 않았으면 None, 맞으면 받은 문자열을 그대로 돌려준다."""
+    if value is None:
+        return None
+    low, high = bounds
+    if not isinstance(value, str) or not _PERCENT.match(value) or not low <= Decimal(value) <= high:
+        raise _invalid(f"{name}은 {low}~{high} 사이, 소수점 둘째 자리까지의 숫자여야 합니다.")
+    return value

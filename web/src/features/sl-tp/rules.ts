@@ -8,6 +8,10 @@ export interface RegularHours {
 }
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+const PERCENT = /^\d+(\.\d{1,2})?$/;
+// 익절·손절 기준(%)의 범위. 손절 기준은 양수로 두고 손실률을 뜻한다.
+export const TAKE_PROFIT_RANGE = [0.01, 1000] as const;
+export const STOP_LOSS_RANGE = [0.01, 99.99] as const;
 
 export const TIMEZONE_NAMES: Record<string, string> = {
   "Asia/Seoul": "한국시간",
@@ -40,6 +44,19 @@ export function sessionErrors(sessions: SlTpSession[], hours: RegularHours): (st
       return `정규장(${hours.start}–${hours.end}) 안에서만 정할 수 있습니다.`;
     const previous = sessions[index - 1]?.end;
     if (previous !== undefined && start < previous) return "시작 시각이 앞 세션의 종료 시각보다 이릅니다.";
+    if (!validPercent(session.take_profit, TAKE_PROFIT_RANGE)) return rangeMessage("익절 기준", TAKE_PROFIT_RANGE);
+    if (!validPercent(session.stop_loss, STOP_LOSS_RANGE)) return rangeMessage("손절 기준", STOP_LOSS_RANGE);
+    if (session.enabled && session.take_profit === null && session.stop_loss === null)
+      return "켜진 세션에는 익절 기준이나 손절 기준이 하나 이상 있어야 합니다.";
     return null;
   });
 }
+
+/** 정하지 않은 기준(null)도 맞는 값이다. */
+export function validPercent(value: string | null, [low, high]: readonly [number, number]): boolean {
+  if (value === null) return true;
+  return PERCENT.test(value) && Number(value) >= low && Number(value) <= high;
+}
+
+const rangeMessage = (name: string, [low, high]: readonly [number, number]) =>
+  `${name}은 ${low}~${high} 사이, 소수점 둘째 자리까지의 숫자여야 합니다.`;

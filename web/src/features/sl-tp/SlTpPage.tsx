@@ -3,7 +3,7 @@ import type { EnvironmentValue, ExcludedStock, SlTpSession, SlTpSettings, StockS
 import { findEnvironment } from "../../environments";
 import { ErrorNotice, Panel } from "../account/parts";
 import { useStockSearch } from "../search/useStockSearch";
-import { nextSession, sessionErrors, TIMEZONE_NAMES } from "./rules";
+import { nextSession, sessionErrors, STOP_LOSS_RANGE, TAKE_PROFIT_RANGE, TIMEZONE_NAMES, validPercent } from "./rules";
 import { useSlTp } from "./useSlTp";
 
 export function SlTpPage({ environment }: { environment: EnvironmentValue }) {
@@ -202,6 +202,11 @@ function SessionsSection({
         정규장 {hours.start}–{hours.end} · {TIMEZONE_NAMES[settings.timezone] ?? settings.timezone}(
         {settings.timezone})
       </p>
+      {!settings.can_enable && (
+        <p className="mb-3 rounded-2xl bg-real-soft px-4 py-3 text-sm font-semibold text-real">
+          실전투자에서는 SL/TP 세션을 켤 수 없습니다
+        </p>
+      )}
       {sessions.length === 0 ? (
         <p className="py-6 text-center text-sm text-muted">SL/TP 세션이 없습니다</p>
       ) : (
@@ -211,8 +216,26 @@ function SessionsSection({
             const error = errors[index];
             return (
               <li key={index} className="rounded-2xl bg-canvas p-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="mr-1 text-[15px] font-bold">세션 {n}</span>
+                {/* 좁은 화면에서도 줄이 어긋나지 않게 제목·스위치, 시각, 기준을 한 줄씩 둔다. */}
+                <div className="flex items-center gap-3">
+                  <span className="text-[15px] font-bold">세션 {n}</span>
+                  <Switch
+                    label={`${n}번째 세션 켜기`}
+                    checked={session.enabled}
+                    disabled={disabled || !settings.can_enable}
+                    onChange={(enabled) => update(index, { enabled })}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`${n}번째 세션 삭제`}
+                    onClick={() => onChange(sessions.filter((_, i) => i !== index))}
+                    disabled={disabled}
+                    className="ml-auto rounded-xl p-2 text-muted hover:bg-line hover:text-ink disabled:cursor-not-allowed"
+                  >
+                    <Trash2 className="size-4" aria-hidden />
+                  </button>
+                </div>
+                <div className="mt-3 flex items-center gap-2">
                   <TimeInput
                     label={`${n}번째 세션 시작 시각`}
                     value={session.start}
@@ -228,16 +251,26 @@ function SessionsSection({
                     disabled={disabled}
                     onChange={(end) => update(index, { end })}
                   />
-                  <button
-                    type="button"
-                    aria-label={`${n}번째 세션 삭제`}
-                    onClick={() => onChange(sessions.filter((_, i) => i !== index))}
-                    disabled={disabled}
-                    className="ml-auto rounded-xl p-2 text-muted hover:bg-line hover:text-ink disabled:cursor-not-allowed"
-                  >
-                    <Trash2 className="size-4" aria-hidden />
-                  </button>
                 </div>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <PercentInput
+                    name="익절"
+                    sign="+"
+                    label={`${n}번째 세션 익절 기준(%)`}
+                    value={session.take_profit}
+                    disabled={disabled}
+                    onChange={(take_profit) => update(index, { take_profit })}
+                  />
+                  <PercentInput
+                    name="손절"
+                    sign="−"
+                    label={`${n}번째 세션 손절 기준(%)`}
+                    value={session.stop_loss}
+                    disabled={disabled}
+                    onChange={(stop_loss) => update(index, { stop_loss })}
+                  />
+                </div>
+                <Summary session={session} />
                 {error && <p className="mt-2 text-sm font-semibold text-real">{error}</p>}
               </li>
             );
@@ -283,7 +316,98 @@ function TimeInput({
       step={60}
       disabled={disabled}
       onChange={(event) => onChange(event.target.value)}
-      className="rounded-xl bg-surface px-3 py-2 text-[15px] font-semibold tabular-nums disabled:cursor-not-allowed disabled:text-muted"
+      className="min-w-0 flex-1 rounded-xl bg-surface px-3 py-2 text-[15px] font-semibold tabular-nums disabled:cursor-not-allowed disabled:text-muted"
     />
   );
+}
+
+function Switch({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <span className="flex items-center gap-2">
+      <button
+        type="button"
+        role="switch"
+        aria-label={label}
+        aria-checked={checked}
+        disabled={disabled}
+        onClick={() => onChange(!checked)}
+        className={`relative h-7 w-12 shrink-0 rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 ${
+          checked ? "bg-brand-600" : "bg-line"
+        }`}
+      >
+        <span
+          className={`absolute top-1 size-5 rounded-full bg-white shadow transition-all ${checked ? "left-6" : "left-1"}`}
+          aria-hidden
+        />
+      </button>
+      <span className={`text-sm font-semibold ${checked ? "text-brand-700" : "text-muted"}`}>
+        {checked ? "ON" : "OFF"}
+      </span>
+    </span>
+  );
+}
+
+function PercentInput({
+  name,
+  sign,
+  label,
+  value,
+  disabled,
+  onChange,
+}: {
+  name: string;
+  sign: string;
+  label: string;
+  value: string | null;
+  disabled: boolean;
+  onChange: (value: string | null) => void;
+}) {
+  return (
+    <label className="flex min-w-0 items-center gap-1 rounded-xl bg-surface px-3 py-2 text-sm">
+      <span className="shrink-0 font-semibold text-sub">{name}</span>
+      <span className="flex min-w-0 flex-1 items-center justify-end gap-1">
+        <span className="text-muted" aria-hidden>
+          {sign}
+        </span>
+        <input
+          type="text"
+          inputMode="decimal"
+          aria-label={label}
+          value={value ?? ""}
+          placeholder="없음"
+          maxLength={8}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value.trim() === "" ? null : event.target.value.trim())}
+          className="w-full min-w-0 bg-transparent text-right text-[15px] font-semibold tabular-nums outline-none placeholder:font-normal placeholder:text-muted disabled:cursor-not-allowed disabled:text-muted"
+        />
+        <span className="text-muted" aria-hidden>
+          %
+        </span>
+      </span>
+    </label>
+  );
+}
+
+/** 정한 기준을 부호와 함께 한 줄로 보여준다. 손절 기준 3은 −3%다. */
+function Summary({ session }: { session: SlTpSession }) {
+  const parts = [
+    session.take_profit !== null && validPercent(session.take_profit, TAKE_PROFIT_RANGE)
+      ? `익절 +${session.take_profit}% 이상`
+      : null,
+    session.stop_loss !== null && validPercent(session.stop_loss, STOP_LOSS_RANGE)
+      ? `손절 −${session.stop_loss}% 이하`
+      : null,
+  ].filter(Boolean);
+  if (parts.length === 0) return null;
+  return <p className="mt-2 text-sm text-sub">{parts.join(" · ")}</p>;
 }
