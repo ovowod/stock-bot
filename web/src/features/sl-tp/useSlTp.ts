@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, fetchSlTp, saveSlTp, type EnvironmentValue, type SlTpDraft, type SlTpSettings } from "../../api";
+import { useReportUnsavedChanges } from "../../unsavedChanges";
 import { useToast } from "../toast/Toasts";
 
 export type LoadState =
@@ -52,6 +53,7 @@ export function useSlTp(environment: EnvironmentValue) {
 
   const saved = state.status === "ready" ? state.saved : null;
   const dirty = saved !== null && JSON.stringify(draft) !== JSON.stringify(draftOf(saved));
+  useReportUnsavedChanges(dirty);
 
   const save = async () => {
     if (!dirty || saving) return;

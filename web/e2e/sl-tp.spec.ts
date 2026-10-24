@@ -423,3 +423,140 @@ test("저장하는 동안에는 스위치와 기준 입력도 막힌다", async 
   await expect(switchOf(page, 1)).toBeEnabled();
   await expectNoHorizontalScroll(page);
 });
+
+const LEAVE_MESSAGE = "저장하지 않은 변경이 사라집니다. 이동할까요?";
+
+/** 다음 확인 창의 문구를 기록하고 accept면 확인, 아니면 취소를 누른다. */
+function answerNextConfirm(page: Page, accept: boolean): string[] {
+  const messages: string[] = [];
+  page.once("dialog", (dialog) => {
+    messages.push(dialog.message());
+    void (accept ? dialog.accept() : dialog.dismiss());
+  });
+  return messages;
+}
+
+/** 확인 창이 뜨면 실패하게 한다. */
+function failOnDialog(page: Page): string[] {
+  const messages: string[] = [];
+  page.on("dialog", (dialog) => {
+    messages.push(dialog.message());
+    void dialog.dismiss();
+  });
+  return messages;
+}
+
+async function makeChange(page: Page) {
+  await addSession(page).click();
+  await expect(page.getByText("저장하지 않은 변경")).toBeVisible();
+}
+
+const beforeUnloadBlocked = (page: Page) =>
+  page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+
+async function clickMenu(page: Page, name: string) {
+  const menu = page.getByRole("button", { name: "메뉴 열기" });
+  if (await menu.isVisible()) await menu.click();
+  await page.getByRole("button", { name, exact: true }).filter({ visible: true }).click();
+}
+
+test("저장하지 않은 변경이 있으면 투자 환경을 바꾸기 전에 묻는다", async ({ page }) => {
+  const { loads } = await mockSlTp(page);
+  await openSlTp(page);
+  await makeChange(page);
+
+  let asked = answerNextConfirm(page, false);
+  await page.getByRole("radio", { name: "미국 모의" }).click();
+  await expect.poll(() => asked).toEqual([LEAVE_MESSAGE]);
+  await expect(page.getByRole("radio", { name: "국내 모의" })).toHaveAttribute("aria-checked", "true");
+  await expect(startInput(page, 1)).toHaveValue("09:00");
+
+  asked = answerNextConfirm(page, true);
+  await page.getByRole("radio", { name: "미국 모의" }).click();
+  await expect(page.getByRole("radio", { name: "미국 모의" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByText("SL/TP 세션이 없습니다")).toBeVisible();
+  expect(asked).toEqual([LEAVE_MESSAGE]);
+  expect(loads).toEqual(["domestic_paper", "us_paper"]);
+});
+
+test("저장하지 않은 변경이 있으면 다른 메뉴로 가기 전에 묻는다", async ({ page }) => {
+  await mockSlTp(page);
+  await openSlTp(page);
+  await makeChange(page);
+
+  answerNextConfirm(page, false);
+  await clickMenu(page, "계좌 확인");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "SL / TP" })).toBeVisible();
+  await expect(startInput(page, 1)).toHaveValue("09:00");
+
+  answerNextConfirm(page, true);
+  await clickMenu(page, "계좌 확인");
+  await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
+});
+
+test("저장하지 않은 변경이 있으면 로그아웃 전에 묻는다", async ({ page }) => {
+  await mockSlTp(page);
+  const auth = await openDashboard(page);
+  await selectSlTpMenu(page);
+  await makeChange(page);
+  // 대시보드를 열 때 이전 로그인 세션을 끝내는 요청이 이미 한 번 나간다.
+  const before = auth.logoutRequests();
+
+  answerNextConfirm(page, false);
+  await clickMenu(page, "로그아웃");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "SL / TP" })).toBeVisible();
+  expect(auth.logoutRequests()).toBe(before);
+
+  answerNextConfirm(page, true);
+  await clickMenu(page, "로그아웃");
+  await expect(page.getByLabel("비밀번호")).toBeVisible();
+  expect(auth.logoutRequests()).toBe(before + 1);
+});
+
+test("새로고침·탭 닫기는 변경이 있을 때만 브라우저가 경고한다", async ({ page }) => {
+  await mockSlTp(page);
+  await openSlTp(page);
+
+  expect(await beforeUnloadBlocked(page)).toBe(false);
+  await makeChange(page);
+  await expect.poll(() => beforeUnloadBlocked(page)).toBe(true);
+  await saveButton(page).click();
+  await expect(page.getByText("SL / TP 설정을 저장했습니다")).toBeVisible();
+  await expect.poll(() => beforeUnloadBlocked(page)).toBe(false);
+});
+
+test("변경이 없거나 저장한 뒤에는 묻지 않고 이동한다", async ({ page }) => {
+  await mockSlTp(page);
+  const asked = failOnDialog(page);
+  await openSlTp(page);
+
+  await page.getByRole("radio", { name: "미국 모의" }).click();
+  await expect(page.getByText("정규장 09:30–16:00 · 뉴욕시간(America/New_York)")).toBeVisible();
+  await makeChange(page);
+  await saveButton(page).click();
+  await expect(page.getByText("SL / TP 설정을 저장했습니다")).toBeVisible();
+  await clickMenu(page, "계좌 확인");
+  await expect(page.getByRole("heading", { name: "계좌 확인" })).toBeVisible();
+  expect(asked).toEqual([]);
+});
+
+test("로그인이 만료되면 묻지 않고 저장하지 않은 입력을 버린다", async ({ page }) => {
+  await mockSlTp(page, {
+    save: () => ({ status: 401, body: { error: { kind: "unauthorized", message: "로그인이 필요합니다." } } }),
+  });
+  const asked = failOnDialog(page);
+  await openSlTp(page);
+  await makeChange(page);
+
+  await saveButton(page).click();
+  await expect(page.getByLabel("비밀번호")).toBeVisible();
+  await expect(page.getByText("로그인이 만료되었습니다. 다시 로그인하세요.")).toBeVisible();
+  await expect.poll(() => beforeUnloadBlocked(page)).toBe(false);
+  expect(asked).toEqual([]);
+});
