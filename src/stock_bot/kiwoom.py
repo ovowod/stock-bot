@@ -30,8 +30,9 @@ TOKEN_EXPIRY_MARGIN = timedelta(minutes=5)
 CONTENT_TYPE = "application/json;charset=UTF-8"
 MAX_PAGES = 10
 _LOG_BODY_LIMIT = 200
-# 키움 공식 기준(openapi.kiwoom.com/intro "API 호출 횟수 제한")의 모의투자 한도: TR 1개당 1초 1회.
-CALL_INTERVAL_SECONDS = 1.0
+# 키움 공식 기준(openapi.kiwoom.com/intro "API 호출 횟수 제한")의 한도는 "1초당"이지만
+# 모의 서버가 1.002초 간격을 1700으로 거부한 적이 있어 0.2초 여유를 둔다.
+CALL_INTERVAL_SECONDS = 1.2
 # 이보다 오래 기다려야 하면 보내지 않고 호출 한도 오류로 돌려준다. 화면이 오래 멈춰 있지 않게 한다.
 MAX_PACING_WAIT_SECONDS = 5.0
 
@@ -41,6 +42,18 @@ RATE_LIMITED = {1700, 1701, 1702}
 # 실제 모의 서버는 return_code=5와 함께 메시지 안에 "[1700:...]"처럼 문서의 오류 코드를 넣어 보냈다.
 _EMBEDDED_CODE = re.compile(r"\[(\d{4}):")
 
+# 키움 문서 "주문" 메뉴의 TR. 나머지는 실전 한도에서 조회로 센다.
+ORDER_TR_IDS = frozenset({"kt10000", "kt10001", "kt10003", "ust20000", "ust20001", "ust20003"})
+# 실전 묶음별 1초당 한도: (일반, 피크타임). 피크타임 한도는 미국만 있다.
+REAL_CALL_LIMITS: dict[str, tuple[int, int | None]] = {
+    "domestic_order": (5, None),
+    "domestic_inquiry": (5, None),
+    "us_order": (10, 3),
+    "us_inquiry": (5, 3),
+}
+# 미국 실전 피크타임: 매일 한국시간 09:00:00~09:59:59.
+PEAK_HOUR = 9
+
 
 @dataclass(frozen=True)
 class _Token:
@@ -48,30 +61,77 @@ class _Token:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class _Unit:
+    """호출 한도를 함께 세는 단위. name은 로그의 pacing_unit이다."""
+
+    key: tuple[str, str]
+    name: str
+    limit: int
+    peak_limit: int | None = None
+
+    def limit_at(self, at: datetime) -> int:
+        return self.peak_limit if self.is_peak(at) and self.peak_limit else self.limit
+
+    def is_peak(self, at: datetime) -> bool:
+        return self.peak_limit is not None and at.hour == PEAK_HOUR
+
+
+def _pacing_unit(spec: EnvironmentSpec, api_id: str) -> _Unit:
+    """모의투자와 토큰 발급은 TR별 1회, 실전은 (TR의 시장, 요청 구분) 묶음으로 센다."""
+    if not spec.is_real or api_id == "au10001":
+        return _Unit((spec.credential_prefix, api_id), "tr", 1)
+    # 미국 계좌 확인이 부르는 ka00001처럼 투자 환경이 아니라 TR로 시장을 정한다.
+    market = "us" if api_id.startswith(("ust", "usa")) else "domestic"
+    name = f"{market}_{'order' if api_id in ORDER_TR_IDS else 'inquiry'}"
+    return _Unit((spec.credential_prefix, name), name, *REAL_CALL_LIMITS[name])
+
+
+@dataclass(eq=False)
+class _Slot:
+    """한 요청이 보내기로 예약한 시각. 보낸 뒤에는 실제로 보낸 시각이 된다.
+
+    시각이 같은 자리도 서로 다른 요청이므로 목록에서 객체 자체로 찾는다(eq=False).
+    """
+
+    at: float
+    sent: bool = False
+
+
 class _Pacer:
-    """같은 (인증정보 묶음, TR)의 요청을 CALL_INTERVAL_SECONDS 간격으로 내보낸다.
+    """단위마다 최근 CALL_INTERVAL_SECONDS 동안 보낸 요청이 한도를 넘지 않게 내보낸다.
 
     요청은 줄에 들어올 때 보낼 시각을 예약하므로 먼저 온 요청이 먼저 나간다.
     대기 한도는 이때 한 번만 판단한다. 연속조회 다음 페이지도 한도에 세어지므로 같은 줄에 선다.
+    한도는 보낼 시각의 한국시간으로 정하므로 줄 서 있던 요청도 피크타임이 되면 낮은 한도를 따른다.
     """
 
-    def __init__(self, clock: Callable[[], float], sleep: Callable[[float], Awaitable[None]]):
+    def __init__(
+        self,
+        clock: Callable[[], float],
+        sleep: Callable[[float], Awaitable[None]],
+        kst_now: Callable[[], datetime],
+    ):
         self._clock = clock
         self._sleep = sleep
-        self._last_sent: dict[tuple[str, str], float] = {}
-        self._next_slot: dict[tuple[str, str], float] = {}
+        self._kst_now = kst_now
+        self._slots: dict[tuple[str, str], list[_Slot]] = {}
 
-    async def wait(self, key: tuple[str, str]) -> None:
-        api_id = key[1]
+    async def wait(self, unit: _Unit, api_id: str) -> None:
         start = self._clock()
-        slot = max(start, self._next_slot.get(key, start), self._earliest(key))
-        if slot - start > MAX_PACING_WAIT_SECONDS:
+        slots = self._slots.setdefault(unit.key, [])
+        # 기준 시간이 지난 기록은 더 이상 한도에 세어지지 않는다.
+        while slots and slots[0].sent and slots[0].at + CALL_INTERVAL_SECONDS <= start:
+            slots.pop(0)
+        at = self._earliest(unit, slots, start)
+        if at - start > MAX_PACING_WAIT_SECONDS:
             log(
                 logger,
                 logging.WARNING,
                 "kiwoom_pacing_rejected",
                 api_id=api_id,
-                wait_ms=round((slot - start) * 1000),
+                wait_ms=round((at - start) * 1000),
+                **self._unit_fields(unit, start, at),
             )
             raise AppError(
                 "rate_limited",
@@ -79,24 +139,57 @@ class _Pacer:
                 429,
                 {"api_id": api_id},
             )
-        self._next_slot[key] = slot + CALL_INTERVAL_SECONDS
+        slot = _Slot(at)
+        slots.append(slot)
         waited = False
-        # 앞 요청이 예약보다 늦게 나갔으면 그 시각에서 다시 간격을 채운다.
-        while (delay := max(slot, self._earliest(key)) - self._clock()) > 0:
-            waited = True
-            await self._sleep(delay)
+        try:
+            # 앞 요청이 예약보다 늦게 나갔거나 그사이 한도가 낮아졌으면 다시 간격을 채운다.
+            while True:
+                slot.at = self._earliest_for(unit, slot)
+                if (delay := slot.at - self._clock()) <= 0:
+                    break
+                waited = True
+                await self._sleep(delay)
+        except BaseException:
+            # 기다리다 취소된 요청은 보내지 않으므로 자리를 비운다.
+            slots.remove(slot)
+            raise
+        slot.at, slot.sent = self._clock(), True
         if waited:
             log(
                 logger,
                 logging.INFO,
                 "kiwoom_pacing_wait",
                 api_id=api_id,
-                wait_ms=round((self._clock() - start) * 1000),
+                wait_ms=round((slot.at - start) * 1000),
+                **self._unit_fields(unit, start, slot.at),
             )
-        self._last_sent[key] = self._clock()
 
-    def _earliest(self, key: tuple[str, str]) -> float:
-        return self._last_sent.get(key, float("-inf")) + CALL_INTERVAL_SECONDS
+    def _earliest_for(self, unit: _Unit, slot: _Slot) -> float:
+        slots = self._slots[unit.key]
+        return self._earliest(unit, slots[: slots.index(slot)], max(slot.at, self._clock()))
+
+    def _earliest(self, unit: _Unit, before: list[_Slot], start: float) -> float:
+        """앞 요청(before) 뒤에, start 이후 한도에 자리가 나는 가장 이른 시각."""
+        at = max(start, before[-1].at) if before else start
+        while True:
+            kst = self._kst(at)
+            limit = unit.limit_at(kst)
+            if len(before) < limit or (ready := before[-limit].at + CALL_INTERVAL_SECONDS) <= at:
+                return at
+            if unit.is_peak(kst):
+                # 피크타임이 끝나면 한도가 올라가므로 그 시각에 자리가 날 수 있다.
+                peak_end = kst.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                ready = min(ready, at + (peak_end - kst).total_seconds())
+            at = ready
+
+    def _kst(self, at: float) -> datetime:
+        return self._kst_now() + timedelta(seconds=at - self._clock())
+
+    def _unit_fields(self, unit: _Unit, start: float, at: float) -> dict[str, Any]:
+        """줄에 들어온 시각이나 보낼 시각이 피크타임이면 피크타임 한도를 쓴 것으로 본다."""
+        peak = unit.is_peak(self._kst(start)) or unit.is_peak(self._kst(at))
+        return {"pacing_unit": unit.name} | ({"peak": True} if peak else {})
 
 
 @dataclass(frozen=True)
@@ -125,10 +218,11 @@ class KiwoomClient:
         timeout: float = 10.0,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        kst_now: Callable[[], datetime] = lambda: datetime.now(KST),
     ) -> None:
         self._environ = environ
         self._http = httpx.AsyncClient(transport=transport, timeout=timeout)
-        self._pacer = _Pacer(clock, sleep)
+        self._pacer = _Pacer(clock, sleep, kst_now)
         # 토큰은 인증정보 묶음별로 보관한다. 국내 실전과 미국 실전은 같은 앱 키를 쓰므로
         # 토큰도 공유해야 서로의 발급이 상대 토큰을 무효로 만들 여지가 없다.
         self._tokens: dict[str, _Token] = {}
@@ -306,7 +400,7 @@ class KiwoomClient:
         page_no: int,
     ) -> _Page:
         url = f"{spec.domain}{path}"
-        await self._pacer.wait((spec.credential_prefix, api_id))
+        await self._pacer.wait(_pacing_unit(spec, api_id), api_id)
         log(logger, logging.INFO, "kiwoom_request", api_id=api_id, target=url, page=page_no)
         started = time.perf_counter()
         try:
