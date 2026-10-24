@@ -1,5 +1,6 @@
 from collections.abc import Callable, Iterator
 from datetime import date
+from pathlib import Path
 
 import httpx
 import pytest
@@ -17,7 +18,13 @@ def _unexpected(request: httpx.Request) -> httpx.Response:
 
 
 @pytest.fixture
-def make_client() -> Iterator[Callable[..., TestClient]]:
+def data_dir(tmp_path: Path) -> Path:
+    """설정 파일을 저장할 폴더. 테스트마다 비어 있는 임시 폴더다."""
+    return tmp_path / "data"
+
+
+@pytest.fixture
+def make_client(data_dir: Path) -> Iterator[Callable[..., TestClient]]:
     clients: list[TestClient] = []
 
     def factory(
@@ -30,6 +37,7 @@ def make_client() -> Iterator[Callable[..., TestClient]]:
             transport=httpx.MockTransport(handler),
             static_dir=None,
             log_dir=None,
+            data_dir=data_dir,
             today=today,
         )
         client = TestClient(app)

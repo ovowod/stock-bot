@@ -12,6 +12,7 @@ from stock_bot.errors import AppError
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE = PROJECT_ROOT / ".env"
 LOG_DIR = PROJECT_ROOT / "logs"
+DATA_DIR = PROJECT_ROOT / "data"
 
 REAL_DOMAIN = "https://api.kiwoom.com"
 PAPER_DOMAIN = "https://mockapi.kiwoom.com"

@@ -5,6 +5,7 @@ import {
   Search,
   ShieldAlert,
   Sparkles,
+  Target,
   Trophy,
   Wallet,
   X,
@@ -17,6 +18,7 @@ import { AccountPage } from "./features/account/AccountPage";
 import { useLogout } from "./features/auth/AuthGate";
 import { OrderPanelProvider } from "./features/order/OrderPanel";
 import { RankingPage } from "./features/ranking/RankingPage";
+import { SlTpPage } from "./features/sl-tp/SlTpPage";
 import { StockSearchPage } from "./features/search/StockSearchPage";
 
 interface Feature {
@@ -59,6 +61,17 @@ const GROUPS: FeatureGroup[] = [
         label: "순위",
         icon: Trophy,
         render: (environment) => <RankingPage key={environment} environment={environment} />,
+      },
+    ],
+  },
+  {
+    title: "자동매매",
+    features: [
+      {
+        id: "sl-tp",
+        label: "SL / TP",
+        icon: Target,
+        render: (environment) => <SlTpPage key={environment} environment={environment} />,
       },
     ],
   },
