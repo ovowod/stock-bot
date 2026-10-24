@@ -248,3 +248,95 @@ test("투자 환경을 바꾸면 그 환경의 설정을 새로 불러온다", a
   await expect(excludedList(page)).toContainText("삼성전자");
   expect(loads).toEqual(["domestic_paper", "domestic_real"]);
 });
+
+const sessionList = (page: Page) => page.getByRole("list", { name: "SL/TP 세션 목록" });
+const addSession = (page: Page) => page.getByRole("button", { name: "세션 추가" });
+const startInput = (page: Page, n: number) => page.getByLabel(`${n}번째 세션 시작 시각`);
+const endInput = (page: Page, n: number) => page.getByLabel(`${n}번째 세션 종료 시각`);
+const off = (start: string, end: string) => ({ start, end, enabled: false, take_profit: null, stop_loss: null });
+
+test("SL/TP 세션을 정규장 안에서 이어 붙여 추가·삭제하고 저장한다", async ({ page }) => {
+  const { saved } = await mockSlTp(page);
+  await openSlTp(page);
+
+  await expect(page.getByText("SL/TP 세션이 없습니다")).toBeVisible();
+  await expect(page.getByText("정규장 09:00–15:30 · 한국시간(Asia/Seoul)")).toBeVisible();
+
+  await addSession(page).click();
+  await expect(startInput(page, 1)).toHaveValue("09:00");
+  await expect(endInput(page, 1)).toHaveValue("10:00");
+  await addSession(page).click();
+  await expect(startInput(page, 2)).toHaveValue("10:00");
+  await expect(endInput(page, 2)).toHaveValue("11:00");
+
+  await endInput(page, 2).fill("15:00");
+  await addSession(page).click();
+  // 정규장 끝을 넘지 않게 자른다.
+  await expect(startInput(page, 3)).toHaveValue("15:00");
+  await expect(endInput(page, 3)).toHaveValue("15:30");
+  await expect(addSession(page)).toBeDisabled();
+  await expect(page.getByText("정규장 끝까지 SL/TP 세션이 있습니다")).toBeVisible();
+
+  await sessionList(page).getByRole("button", { name: "2번째 세션 삭제" }).click();
+  await expect(sessionList(page).getByRole("listitem")).toHaveCount(2);
+  await expect(startInput(page, 2)).toHaveValue("15:00");
+
+  await saveButton(page).click();
+  await expect(page.getByText("SL / TP 설정을 저장했습니다")).toBeVisible();
+  expect(saved[0].body.sessions).toEqual([off("09:00", "10:00"), off("15:00", "15:30")]);
+});
+
+test("세션 시각이 잘못되면 그 세션에 안내하고 저장을 막는다", async ({ page }) => {
+  await mockSlTp(page, {
+    load: (environment) => ({ body: settings(environment, { sessions: [off("09:00", "10:00"), off("10:00", "11:00")] }) }),
+  });
+  await openSlTp(page);
+  const items = sessionList(page).getByRole("listitem");
+
+  await startInput(page, 2).fill("09:30");
+  await expect(items.nth(1)).toContainText("시작 시각이 앞 세션의 종료 시각보다 이릅니다");
+  await expect(saveButton(page)).toBeDisabled();
+
+  await startInput(page, 2).fill("10:00");
+  await endInput(page, 2).fill("10:00");
+  await expect(items.nth(1)).toContainText("시작 시각이 종료 시각보다 빨라야 합니다");
+
+  await endInput(page, 2).fill("15:40");
+  await expect(items.nth(1)).toContainText("정규장(09:00–15:30) 안에서만 정할 수 있습니다");
+  await expect(saveButton(page)).toBeDisabled();
+
+  // 맞닿은 세션은 허용한다.
+  await endInput(page, 2).fill("15:30");
+  await expect(items.nth(1)).not.toContainText("정규장");
+  await expect(saveButton(page)).toBeEnabled();
+});
+
+test("미국 환경은 뉴욕시간 정규장으로 세션을 만든다", async ({ page }) => {
+  await mockSlTp(page);
+  await openSlTp(page);
+  await page.getByRole("radio", { name: "미국 모의" }).click();
+
+  await expect(page.getByText("정규장 09:30–16:00 · 뉴욕시간(America/New_York)")).toBeVisible();
+  await addSession(page).click();
+  await expect(startInput(page, 1)).toHaveValue("09:30");
+  await expect(endInput(page, 1)).toHaveValue("10:30");
+  await startInput(page, 1).fill("09:29");
+  await expect(sessionList(page)).toContainText("정규장(09:30–16:00) 안에서만 정할 수 있습니다");
+  await expectNoHorizontalScroll(page);
+});
+
+test("저장하는 동안에는 세션 추가·삭제·시각 편집이 막힌다", async ({ page }) => {
+  await mockSlTp(page, {
+    save: (environment, body) => ({ body: { ...settings(environment), ...body }, delayMs: 1000 }),
+  });
+  await openSlTp(page);
+
+  await addSession(page).click();
+  await saveButton(page).click();
+  await expect(page.getByRole("button", { name: "저장 중" })).toBeDisabled();
+  await expect(addSession(page)).toBeDisabled();
+  await expect(startInput(page, 1)).toBeDisabled();
+  await expect(sessionList(page).getByRole("button", { name: "1번째 세션 삭제" })).toBeDisabled();
+  await expect(page.getByText("SL / TP 설정을 저장했습니다")).toBeVisible();
+  await expect(startInput(page, 1)).toBeEnabled();
+});

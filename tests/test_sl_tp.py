@@ -184,3 +184,71 @@ def test_save_and_rejection_are_logged_with_counts(make_client, caplog):
     assert events["sl_tp_settings_saved"]["enabled_count"] == 0
     assert "2번째 제외종목" in events["sl_tp_settings_rejected"]["cause"]
     assert "삼성전자" not in str(events["sl_tp_settings_saved"])
+
+
+def session(start: str, end: str, **extra):
+    return {
+        "start": start,
+        "end": end,
+        "enabled": False,
+        "take_profit": None,
+        "stop_loss": None,
+        **extra,
+    }
+
+
+@pytest.mark.parametrize(
+    ("environment", "start", "end"),
+    [("domestic_paper", "09:00", "15:30"), ("us_paper", "09:30", "16:00")],
+)
+def test_session_may_span_the_whole_regular_hours(make_client, environment, start, end):
+    client = make_client()
+
+    response = client.put(
+        GET.format(environment), json={"excluded": [], "sessions": [session(start, end)]}
+    )
+
+    assert response.status_code == 200
+    assert client.get(GET.format(environment)).json()["sessions"] == [session(start, end)]
+
+
+def test_sessions_may_touch_and_keep_their_order(make_client):
+    sessions = [session("09:00", "10:00"), session("10:00", "11:00"), session("13:00", "15:30")]
+
+    response = make_client().put(
+        GET.format("domestic_paper"), json={"excluded": [], "sessions": sessions}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["sessions"] == sessions
+
+
+@pytest.mark.parametrize(
+    ("environment", "sessions", "message"),
+    [
+        ("domestic_paper", [session("08:59", "10:00")], "1번째 SL/TP 세션: 정규장(09:00–15:30)"),
+        ("domestic_paper", [session("15:00", "15:31")], "1번째 SL/TP 세션: 정규장(09:00–15:30)"),
+        ("us_paper", [session("09:29", "10:00")], "1번째 SL/TP 세션: 정규장(09:30–16:00)"),
+        ("us_paper", [session("15:00", "16:01")], "1번째 SL/TP 세션: 정규장(09:30–16:00)"),
+        ("domestic_paper", [session("10:00", "10:00")], "1번째 SL/TP 세션: 시작 시각이 종료"),
+        ("domestic_paper", [session("11:00", "10:00")], "1번째 SL/TP 세션: 시작 시각이 종료"),
+        (
+            "domestic_paper",
+            [session("09:00", "10:30"), session("10:00", "11:00")],
+            "2번째 SL/TP 세션: 시작 시각이 앞 세션의 종료 시각보다 이릅니다.",
+        ),
+        ("domestic_paper", [session("9:00", "10:00")], "1번째 SL/TP 세션: 시각은 HH:MM"),
+        ("domestic_paper", [session("09:60", "10:00")], "1번째 SL/TP 세션: 시각은 HH:MM"),
+        ("domestic_paper", [session("09:00", None)], "1번째 SL/TP 세션: 시각은 HH:MM"),
+        ("domestic_paper", ["09:00"], "1번째 SL/TP 세션: 형식이 올바르지 않습니다."),
+    ],
+)
+def test_invalid_session_times_are_rejected(make_client, data_dir, environment, sessions, message):
+    response = make_client().put(
+        GET.format(environment), json={"excluded": [], "sessions": sessions}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["kind"] == "invalid_sl_tp_settings"
+    assert response.json()["error"]["message"].startswith(message)
+    assert not (data_dir / "sl-tp").exists()

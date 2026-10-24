@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ TIMEZONES = {Market.DOMESTIC: "Asia/Seoul", Market.US: "America/New_York"}
 # 정규장. 휴장일·단축 거래일은 다루지 않는다(spec의 Out of Scope).
 REGULAR_HOURS = {Market.DOMESTIC: ("09:00", "15:30"), Market.US: ("09:30", "16:00")}
 US_EXCHANGES = ("NYSE", "NASDAQ", "AMEX")
+_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 class SlTpSettingsStore:
@@ -140,9 +142,10 @@ def _validate(payload: Any, market: Market) -> dict[str, Any]:
         raise _invalid("제외종목 형식이 올바르지 않습니다.")
     if not isinstance(sessions, list):
         raise _invalid("SL/TP 세션 형식이 올바르지 않습니다.")
-    if sessions:
-        raise _invalid("SL/TP 세션은 아직 저장할 수 없습니다.")
-    return {"excluded": _validate_excluded(excluded, market), "sessions": []}
+    return {
+        "excluded": _validate_excluded(excluded, market),
+        "sessions": _validate_sessions(sessions, market),
+    }
 
 
 def _validate_excluded(items: list[Any], market: Market) -> list[dict[str, Any]]:
@@ -165,4 +168,38 @@ def _validate_excluded(items: list[Any], market: Market) -> list[dict[str, Any]]
             raise _invalid(f"{where}: 이미 추가된 종목입니다({code}).")
         seen.add(code)
         result.append({"code": code, "name": name, "exchange": exchange})
+    return result
+
+
+def _validate_sessions(items: list[Any], market: Market) -> list[dict[str, Any]]:
+    """HH:MM은 문자열 비교가 시각 비교와 같다. 시작 시각은 포함하고 종료 시각은 빼므로
+    앞 세션의 종료와 다음 세션의 시작이 같아도 겹치지 않는다."""
+    opens, closes = REGULAR_HOURS[market]
+    result: list[dict[str, Any]] = []
+    previous_end: str | None = None
+    for index, item in enumerate(items, start=1):
+        where = f"{index}번째 SL/TP 세션"
+        if not isinstance(item, dict):
+            raise _invalid(f"{where}: 형식이 올바르지 않습니다.")
+        start, end = item.get("start"), item.get("end")
+        if not (isinstance(start, str) and _TIME.match(start)) or not (
+            isinstance(end, str) and _TIME.match(end)
+        ):
+            raise _invalid(f"{where}: 시각은 HH:MM 형식이어야 합니다.")
+        if start >= end:
+            raise _invalid(f"{where}: 시작 시각이 종료 시각보다 빨라야 합니다.")
+        if start < opens or end > closes:
+            raise _invalid(f"{where}: 정규장({opens}–{closes}) 안에서만 정할 수 있습니다.")
+        if previous_end is not None and start < previous_end:
+            raise _invalid(f"{where}: 시작 시각이 앞 세션의 종료 시각보다 이릅니다.")
+        previous_end = end
+        if (
+            item.get("enabled") is not False
+            or item.get("take_profit") is not None
+            or item.get("stop_loss") is not None
+        ):
+            raise _invalid(f"{where}: 아직 켜거나 익절·손절 기준을 정할 수 없습니다.")
+        result.append(
+            {"start": start, "end": end, "enabled": False, "take_profit": None, "stop_loss": None}
+        )
     return result

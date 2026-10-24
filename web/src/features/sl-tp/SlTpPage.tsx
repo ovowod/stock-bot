@@ -1,13 +1,16 @@
-import { Info, LoaderCircle, Search, X } from "lucide-react";
-import type { EnvironmentValue, ExcludedStock, StockSearchItem } from "../../api";
+import { Info, LoaderCircle, Plus, Search, Trash2, X } from "lucide-react";
+import type { EnvironmentValue, ExcludedStock, SlTpSession, SlTpSettings, StockSearchItem } from "../../api";
 import { findEnvironment } from "../../environments";
 import { ErrorNotice, Panel } from "../account/parts";
 import { useStockSearch } from "../search/useStockSearch";
+import { nextSession, sessionErrors, TIMEZONE_NAMES } from "./rules";
 import { useSlTp } from "./useSlTp";
 
 export function SlTpPage({ environment }: { environment: EnvironmentValue }) {
   const env = findEnvironment(environment);
   const { state, draft, setDraft, dirty, saving, save, retry } = useSlTp(environment);
+  const errors = state.status === "ready" ? sessionErrors(draft.sessions, state.saved.regular_hours) : [];
+  const invalid = errors.some((error) => error !== null);
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -44,12 +47,19 @@ export function SlTpPage({ environment }: { environment: EnvironmentValue }) {
             disabled={saving}
             onChange={(excluded) => setDraft((current) => ({ ...current, excluded }))}
           />
+          <SessionsSection
+            settings={state.saved}
+            sessions={draft.sessions}
+            errors={errors}
+            disabled={saving}
+            onChange={(sessions) => setDraft((current) => ({ ...current, sessions }))}
+          />
           <div className="sticky bottom-4 flex items-center justify-end gap-3 rounded-3xl bg-surface p-4 shadow-[0_2px_12px_rgba(0,0,0,0.08)]">
             {dirty && <p className="mr-auto text-sm font-semibold text-real">저장하지 않은 변경</p>}
             <button
               type="button"
               onClick={() => void save()}
-              disabled={!dirty || saving}
+              disabled={!dirty || invalid || saving}
               className="rounded-2xl bg-brand-600 px-6 py-3 text-[15px] font-bold text-white transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-line disabled:text-muted"
             >
               {saving ? "저장 중" : "저장"}
@@ -165,5 +175,115 @@ function ExcludedSection({
         </ul>
       )}
     </Panel>
+  );
+}
+
+function SessionsSection({
+  settings,
+  sessions,
+  errors,
+  disabled,
+  onChange,
+}: {
+  settings: SlTpSettings;
+  sessions: SlTpSession[];
+  errors: (string | null)[];
+  disabled: boolean;
+  onChange: (sessions: SlTpSession[]) => void;
+}) {
+  const hours = settings.regular_hours;
+  const next = nextSession(sessions, hours);
+  const update = (index: number, change: Partial<SlTpSession>) =>
+    onChange(sessions.map((session, i) => (i === index ? { ...session, ...change } : session)));
+
+  return (
+    <Panel title="SL/TP 세션" label="SL/TP 세션">
+      <p className="-mt-1 mb-3 text-sm text-muted">
+        정규장 {hours.start}–{hours.end} · {TIMEZONE_NAMES[settings.timezone] ?? settings.timezone}(
+        {settings.timezone})
+      </p>
+      {sessions.length === 0 ? (
+        <p className="py-6 text-center text-sm text-muted">SL/TP 세션이 없습니다</p>
+      ) : (
+        <ul aria-label="SL/TP 세션 목록" className="space-y-3">
+          {sessions.map((session, index) => {
+            const n = index + 1;
+            const error = errors[index];
+            return (
+              <li key={index} className="rounded-2xl bg-canvas p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="mr-1 text-[15px] font-bold">세션 {n}</span>
+                  <TimeInput
+                    label={`${n}번째 세션 시작 시각`}
+                    value={session.start}
+                    hours={hours}
+                    disabled={disabled}
+                    onChange={(start) => update(index, { start })}
+                  />
+                  <span className="text-muted">~</span>
+                  <TimeInput
+                    label={`${n}번째 세션 종료 시각`}
+                    value={session.end}
+                    hours={hours}
+                    disabled={disabled}
+                    onChange={(end) => update(index, { end })}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`${n}번째 세션 삭제`}
+                    onClick={() => onChange(sessions.filter((_, i) => i !== index))}
+                    disabled={disabled}
+                    className="ml-auto rounded-xl p-2 text-muted hover:bg-line hover:text-ink disabled:cursor-not-allowed"
+                  >
+                    <Trash2 className="size-4" aria-hidden />
+                  </button>
+                </div>
+                {error && <p className="mt-2 text-sm font-semibold text-real">{error}</p>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={() => next && onChange([...sessions, next])}
+          disabled={!next || disabled}
+          className="inline-flex items-center gap-1.5 rounded-xl bg-brand-50 px-4 py-2.5 text-sm font-semibold text-brand-700 hover:bg-brand-100 disabled:cursor-not-allowed disabled:bg-canvas disabled:text-muted"
+        >
+          <Plus className="size-4" aria-hidden />
+          세션 추가
+        </button>
+        {!next && <p className="text-sm text-muted">정규장 끝까지 SL/TP 세션이 있습니다</p>}
+      </div>
+    </Panel>
+  );
+}
+
+function TimeInput({
+  label,
+  value,
+  hours,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  hours: { start: string; end: string };
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <input
+      type="time"
+      aria-label={label}
+      value={value}
+      min={hours.start}
+      max={hours.end}
+      step={60}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.value)}
+      className="rounded-xl bg-surface px-3 py-2 text-[15px] font-semibold tabular-nums disabled:cursor-not-allowed disabled:text-muted"
+    />
   );
 }
