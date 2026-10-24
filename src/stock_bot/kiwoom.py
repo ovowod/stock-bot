@@ -30,8 +30,7 @@ TOKEN_EXPIRY_MARGIN = timedelta(minutes=5)
 CONTENT_TYPE = "application/json;charset=UTF-8"
 MAX_PAGES = 10
 _LOG_BODY_LIMIT = 200
-# 같은 인증정보로 같은 TR을 1초 안에 다시 부르면 호출 한도(1700)에 걸렸다.
-# 문서에는 한도 숫자가 없다.
+# 키움 공식 기준(openapi.kiwoom.com/intro "API 호출 횟수 제한")의 모의투자 한도: TR 1개당 1초 1회.
 CALL_INTERVAL_SECONDS = 1.0
 # 이보다 오래 기다려야 하면 보내지 않고 호출 한도 오류로 돌려준다. 화면이 오래 멈춰 있지 않게 한다.
 MAX_PACING_WAIT_SECONDS = 5.0
