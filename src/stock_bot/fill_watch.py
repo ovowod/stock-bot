@@ -20,7 +20,7 @@ from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import FIELD_VALUE_LIMIT, DiscordNotifier, Embed, EmbedField
 from stock_bot.reader import Reader
-from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
+from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub
 
 logger = logging.getLogger("stock_bot.fill_watch")
 
@@ -50,8 +50,6 @@ WATCHES: tuple[Watch, ...] = (
 # 실시간 항목별로 체결을 뜻하는 주문상태(913). 접수·확인·취소·거부 등은 알리지 않는다.
 # F5의 체결완료는 2026-10-08 모의 서버에서 확인했고, 부분체결은 키움 가이드 설명을 따른다.
 FILL_STATUSES = {"00": {"체결"}, "F5": {"부분체결", "체결완료"}}
-# 공유 연결에서 체결 감시가 쓰는 그룹 번호. 기능마다 따로 쓴다.
-GROUP_NO = "1"
 
 
 def _connection_spec(watch: Watch) -> EnvironmentSpec:
@@ -109,7 +107,8 @@ class FillWatcher:
 
     def _watch(self, watch: Watch) -> None:
         # 끊긴 동안의 체결은 보충하지 않는다. 공유 연결이 다시 연결해 등록만 한다.
-        subscription = Subscription(GROUP_NO, [""], list(watch))
+        # 주문체결은 계좌 단위 항목이라 SL / TP와 함께 받는다.
+        types = list(watch)
         delay = REGISTER_RETRY_INITIAL_SECONDS
         retry: asyncio.Task[None] | None = None
 
@@ -145,20 +144,20 @@ class FillWatcher:
                 )
                 if retry is not None:
                     retry.cancel()
-                retry = self._retry(channel.subscribe, subscription, delay)
+                retry = self._retry(channel.share, types, delay)
                 delay = min(delay * 2, REGISTER_RETRY_MAX_SECONDS)
 
         channel = self._hub.channel(_connection_spec(watch), "fill_watch", "체결 감시", on_event)
-        channel.subscribe(subscription)
+        channel.share(types)
 
     def _retry(
-        self, subscribe: Callable[[Subscription], None], subscription: Subscription, delay: float
+        self, share: Callable[[list[str]], None], types: list[str], delay: float
     ) -> asyncio.Task[None]:
         """밀려나 멈춘 연결이면 다시 구독해도 연결을 열지 않는다."""
 
         async def later() -> None:
             await asyncio.sleep(delay)
-            subscribe(subscription)
+            share(types)
 
         task = asyncio.create_task(later())
         self._retries.add(task)

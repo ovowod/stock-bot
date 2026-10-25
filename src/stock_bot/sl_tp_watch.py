@@ -18,10 +18,17 @@ from zoneinfo import ZoneInfo
 from stock_bot.auto_sell import AutoSellGuard
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
+from stock_bot.fill_watch import FILL_STATUSES
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.order import OrderService
-from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
+from stock_bot.realtime import (
+    SHARED_GROUP_NO,
+    EventKind,
+    RealtimeEvent,
+    RealtimeHub,
+    Subscription,
+)
 from stock_bot.sl_tp import TIMEZONES, SlTpSettingsStore
 
 logger = logging.getLogger("stock_bot.sl_tp_watch")
@@ -30,12 +37,19 @@ logger = logging.getLogger("stock_bot.sl_tp_watch")
 WATCHED = (ENVIRONMENTS[Environment.DOMESTIC_PAPER],)
 # 시세 실시간 항목. 0B는 국내 주식체결이다.
 QUOTE_TYPES = {Market.DOMESTIC: "0B"}
+# 내 계좌 체결 실시간 항목(00 국내 주문체결). 체결을 뜻하는 주문상태는 체결 알림과 같다.
+# 체결되면 매입가·보유수량이 바뀌므로 보유종목을 다시 읽는다.
+FILL_TYPES = {Market.DOMESTIC: "00"}
 # 장구분(290)의 정규장 값. 국내 2는 장중이다. 장전·장후 시간외 체결은 판정하지 않는다.
 REGULAR_MARKET = {Market.DOMESTIC: "2"}
-# 공유 연결에서 SL / TP가 쓰는 그룹 번호. 체결 감시는 1을 쓴다.
+# 공유 연결에서 SL / TP의 시세 구독이 쓰는 그룹 번호.
+# 주문체결은 공유 연결이 SHARED_GROUP_NO(1)로 한 번만 등록해 체결 감시와 함께 받는다.
 GROUP_NO = "2"
 # 지금 켜진 SL/TP 세션을 다시 계산하는 간격. 설정을 저장할 때도 다시 계산한다.
 SESSION_CHECK_SECONDS = 1.0
+# 보유종목 읽기가 실패하면 이 간격으로 다시 읽는다. 실패가 이어지면 두 배씩 늘린다.
+HOLDINGS_RETRY_INITIAL_SECONDS = 1.0
+HOLDINGS_RETRY_MAX_SECONDS = 60.0
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 
@@ -62,6 +76,15 @@ class _Run:
     # 이 실행을 시작한 시각. 그보다 먼저 받은 시세는 앞 실행의 것이다(껐다 켠 경우 포함).
     started_at: datetime
     triggered: set[str] = field(default_factory=set)
+    # 지금 쓰는 보유종목을 읽을 때의 연결 번호. 다른 번호로 다시 연결되면
+    # 끊긴 동안의 체결을 반영하려고 다시 읽는다.
+    connection: int | None = None
+    # 보유종목 다시 읽기 작업과, 읽는 동안 새로 온 계기(아직 반영하지 못한 이유들).
+    refresh: asyncio.Task[None] | None = None
+    pending: list[str] = field(default_factory=list)
+    # 보유종목 읽기가 처음 실패한 시각. 한 번이라도 성공하면 지운다.
+    # 06의 판정 중단 알림(5분)이 이 시각을 쓴다. 지금은 로그에만 남는다.
+    failed_since: datetime | None = None
 
     def covers(self, found: tuple[date, _Session] | None) -> bool:
         """그 날짜·세션이 이 실행의 것인가. 기준이 바뀌어도 같은 시간 범위면 같은 실행이다.
@@ -135,9 +158,12 @@ class _Watch:
         # 종목코드 -> 매입가. 현금잔고이고 매입가를 읽을 수 있는 종목만 담는다. 제외종목도 담는다.
         self._holdings: dict[str, Decimal] = {}
         self._holdings_ready = False
-        self._connection: int | None = None
-        self._connected = False
+        # 지금 구독한 시세 종목. 실행이 바뀌면 None으로 되돌려 다시 등록한다.
+        self._subscribed: list[str] | None = None
+        # 연결이 LOGIN까지 되면 깨운다. 보유종목은 연결이 있을 때 읽어야 그 뒤 체결을 놓치지 않는다.
+        self._wake = asyncio.Event()
         self._rejected = False
+        self._fills_rejected = False
         # 같은 이유의 건너뜀·잘못된 체결가 로그를 반복해 남기지 않으려고
         # 종목마다 마지막 이유를 둔다.
         self._skips: dict[str, str] = {}
@@ -241,41 +267,119 @@ class _Watch:
             run.session = found[1]
             return
         if run is not None:
-            log(logger, logging.INFO, "sl_tp_session_ended", **self._run_fields(run))
-            self._run = None
-            self._holdings_ready = False
+            self._end_run(run)
         if found is None:
             if run is not None:
+                self._subscribed = None
                 self._channel.subscribe(None)
+                self._channel.share(None)
             return
         day, session = found
         self._runs += 1
-        self._run = _Run(self._runs, day, session, self._owner.now())
+        new = _Run(self._runs, day, session, self._owner.now())
+        new.connection = self._channel.connection
+        self._run = new
+        self._subscribed = None
         log(
             logger,
             logging.INFO,
             "sl_tp_session_started",
-            **self._run_fields(self._run),
+            **self._run_fields(new),
             previous_run=None if run is None else run.number,
         )
-        self._spawn(self._load_holdings(self._run))
+        if self._channel.shared != self._fill_types() or self._fills_rejected:
+            # 새로 함께 받으면 지금 등록 결과를 받는다. 거부됐던 등록은 여기서 다시 시도한다.
+            self._channel.share(self._fill_types())
+        self._request_refresh(new, "session_started")
 
-    async def _load_holdings(self, run: _Run) -> None:
-        try:
-            rows = await self._owner.positions(self.spec)
-        except AppError as exc:
-            log(
-                logger,
-                logging.WARNING,
-                "sl_tp_holdings_failed",
-                run=run.number,
-                kind=exc.kind,
-                cause=exc.message,
-            )
+    def _fill_types(self) -> list[str]:
+        return [FILL_TYPES[self.spec.market]]
+
+    def _end_run(self, run: _Run) -> None:
+        log(logger, logging.INFO, "sl_tp_session_ended", **self._run_fields(run))
+        self._run = None
+        self._holdings_ready = False
+        if run.refresh is not None and not run.refresh.done():
+            # 켜진 세션이 끝나면 다시 읽기와 재시도를 멈춘다. 실패 기록은 실행과 함께 사라진다.
+            run.refresh.cancel()
+            if run.failed_since is not None:
+                log(logger, logging.INFO, "sl_tp_holdings_retry_stopped", run=run.number)
+
+    def _request_refresh(self, run: _Run, reason: str) -> None:
+        """보유종목을 다시 읽는다.
+
+        새 결과가 반영될 때까지 판정하지 않는다. 옛 매입가로 판정하지 않기 위해서다.
+
+        읽는 중에 다시 오면 끝난 뒤 한 번 더 읽는다. 짧은 시간에 여러 번 와도 한 번으로 합친다.
+        """
+        if self._holdings_ready:
+            log(logger, logging.INFO, "sl_tp_judging_paused", run=run.number, reason=reason)
+        self._holdings_ready = False
+        run.pending.append(reason)
+        if run.refresh is None or run.refresh.done():
+            run.refresh = self._spawn(self._refresh(run))
+
+    async def _refresh(self, run: _Run) -> None:
+        delay = HOLDINGS_RETRY_INITIAL_SECONDS
+        while True:
+            # 연결이 없으면 읽지 않고 기다린다. 읽은 뒤 연결되면 그사이 체결을 놓친다.
+            while self._channel.connection is None:
+                if run is not self._run or self._is_stopped():
+                    return
+                self._wake.clear()
+                await self._wake.wait()
+            if run is not self._run or self._is_stopped():
+                return
+            # 여기까지 온 계기는 이번 조회가 반영한다.
+            reasons, run.pending = run.pending, []
+            connection = self._channel.connection
+            try:
+                rows = await self._owner.positions(self.spec)
+            except AppError as exc:
+                if run.failed_since is None:
+                    run.failed_since = self._owner.now()
+                run.pending = reasons + run.pending
+                log(
+                    logger,
+                    logging.WARNING,
+                    "sl_tp_holdings_failed",
+                    run=run.number,
+                    reasons=reasons,
+                    kind=exc.kind,
+                    cause=exc.message,
+                    failed_since=run.failed_since.isoformat(),
+                    wait_seconds=delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, HOLDINGS_RETRY_MAX_SECONDS)
+                continue
+            if run.failed_since is not None:
+                log(
+                    logger,
+                    logging.INFO,
+                    "sl_tp_holdings_recovered",
+                    run=run.number,
+                    failed_since=run.failed_since.isoformat(),
+                )
+                run.failed_since = None
+            if run is not self._run or self._is_stopped():
+                log(logger, logging.INFO, "sl_tp_holdings_discarded", run=run.number, reason="run")
+                return
+            if self._channel.connection != connection or run.pending:
+                # 조회하는 동안 다시 연결됐거나 체결이 더 왔다. 이 결과는 쓰지 않고 한 번 더 읽는다.
+                log(
+                    logger,
+                    logging.INFO,
+                    "sl_tp_holdings_discarded",
+                    run=run.number,
+                    reason="newer_trigger" if run.pending else "connection",
+                )
+                continue
+            run.connection = connection
+            self._use_holdings(run, rows, reasons)
             return
-        if run is not self._run or self._is_stopped():
-            log(logger, logging.INFO, "sl_tp_holdings_discarded", run=run.number)
-            return
+
+    def _use_holdings(self, run: _Run, rows: list[dict[str, Any]], reasons: list[str]) -> None:
         holdings: dict[str, Decimal] = {}
         counts = {"credit": 0, "no_purchase_price": 0, "duplicate": 0}
         duplicated: set[str] = set()
@@ -293,6 +397,7 @@ class _Watch:
                 counts["duplicate"] += 1
             else:
                 holdings[code] = price
+        removed = sorted(self._holdings.keys() - holdings.keys())
         self._holdings = holdings
         self._holdings_ready = True
         log(
@@ -300,17 +405,27 @@ class _Watch:
             logging.INFO,
             "sl_tp_holdings_refreshed",
             run=run.number,
+            reasons=reasons,
             count=len(holdings),
             excluded=len(holdings.keys() & self._excluded),
+            removed=removed,
             **counts,
         )
+        log(logger, logging.INFO, "sl_tp_judging_resumed", run=run.number)
         self._subscribe()
 
     def _watched(self) -> list[str]:
         return sorted(code for code in self._holdings if code not in self._excluded)
 
     def _subscribe(self) -> None:
+        """감시 대상이 바뀌었을 때만 구독을 다시 낸다. 실행이 새로 시작되면 늘 다시 낸다."""
         codes = self._watched()
+        if codes == self._subscribed:
+            return
+        self._subscribed = codes
+        if self._fills_rejected:
+            # 거부됐던 주문체결 등록은 보유종목 변경으로 구독을 다시 맞출 때도 다시 시도한다.
+            self._channel.share(self._fill_types())
         log(logger, logging.INFO, "sl_tp_subscription_changed", codes=codes)
         if not codes:
             self._channel.subscribe(None)
@@ -321,22 +436,68 @@ class _Watch:
 
     async def _on_event(self, event: RealtimeEvent) -> None:
         environment_var.set(self.spec.environment.value)
+        run = self._run
         if event.kind is EventKind.CONNECTED:
-            self._connection = event.connection
-            self._connected = True
+            self._wake.set()
+            if run is not None and run.connection is not None:
+                if run.connection != event.connection:
+                    # 지금 보유종목을 읽은 뒤 끊긴 적이 있다. 끊긴 동안 놓친 체결이 있을 수 있다.
+                    self._request_refresh(run, "reconnected")
         elif event.kind is EventKind.DISCONNECTED:
-            self._connected = False
+            if run is not None:
+                log(
+                    logger,
+                    logging.INFO,
+                    "sl_tp_judging_paused",
+                    run=run.number,
+                    reason="disconnected",
+                )
         elif event.kind is EventKind.REGISTERED:
-            self._rejected = False
+            if event.group == SHARED_GROUP_NO:
+                self._fills_rejected = False
+            else:
+                self._rejected = False
         elif event.kind is EventKind.REJECTED:
-            self._rejected = True
-            log(logger, logging.WARNING, "sl_tp_subscription_rejected", **event.detail)
+            if event.group == SHARED_GROUP_NO:
+                # 체결을 받지 못하면 바뀐 매입가를 모른 채 판정하게 되므로 판정도 멈춘다.
+                self._fills_rejected = True
+            else:
+                self._rejected = True
+            log(
+                logger,
+                logging.WARNING,
+                "sl_tp_subscription_rejected",
+                group=event.group,
+                **event.detail,
+            )
         elif event.kind is EventKind.STOPPED:
             self._stopped = True
+            self._wake.set()
             log(logger, logging.ERROR, "sl_tp_watch_stopped", reason="session_replaced")
         elif event.kind is EventKind.REAL:
             for item in event.items:
-                self._judge(item, event)
+                if item.get("type") == FILL_TYPES[self.spec.market]:
+                    self._on_fill(item, event)
+                else:
+                    self._judge(item, event)
+
+    def _on_fill(self, item: dict[str, Any], event: RealtimeEvent) -> None:
+        """내 계좌 체결(앱 밖 MTS·HTS 주문 포함). 매입가·보유수량이 바뀌었으니 다시 읽는다."""
+        run = self._run
+        values = item.get("values")
+        values = values if isinstance(values, dict) else {}
+        status = values.get("913")
+        if run is None:
+            reason = "outside_session"
+        elif event.connection != self._channel.connection:
+            reason = "old_connection"
+        elif status not in FILL_STATUSES[FILL_TYPES[self.spec.market]]:
+            reason = "not_a_fill"
+        else:
+            log(logger, logging.INFO, "sl_tp_fill_seen", run=run.number, code=values.get("9001"))
+            self._request_refresh(run, "fill")
+            return
+        log(logger, logging.DEBUG, "sl_tp_fill_ignored", reason=reason, status=status)
 
     def _judge(self, item: dict[str, Any], event: RealtimeEvent) -> None:
         code = str(item.get("item") or "").strip()
@@ -344,7 +505,8 @@ class _Watch:
         values = values if isinstance(values, dict) else {}
         log(logger, logging.DEBUG, "sl_tp_quote_received", code=code, price=values.get("10"))
         run = self._run
-        if event.connection != self._connection:
+        if event.connection != self._channel.connection:
+            # 끊긴 뒤 큐에 남아 있던 시세나 재연결 전 연결의 시세는 판정하지 않는다.
             log(logger, logging.DEBUG, "sl_tp_quote_dropped", code=code, reason="old_connection")
             return
         if run is None:
@@ -401,10 +563,10 @@ class _Watch:
     def _skip_reason(self, run: _Run, code: str, values: dict[str, Any]) -> str | None:
         if self._is_stopped():
             return "stopped"
-        if not self._connected:
-            return "disconnected"
         if self._rejected:
             return "subscription_rejected"
+        if self._fills_rejected:
+            return "fills_subscription_rejected"
         if not self._holdings_ready:
             return "holdings_pending"
         if str(values.get("290", "")).strip() != REGULAR_MARKET[self.spec.market]:
@@ -507,10 +669,11 @@ class _Watch:
             )
         return reason is None
 
-    def _spawn(self, work: Awaitable[None]) -> None:
+    def _spawn(self, work: Awaitable[None]) -> asyncio.Task[None]:
         task = asyncio.ensure_future(work)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
 
     @staticmethod
     def _run_fields(run: _Run) -> dict[str, Any]:

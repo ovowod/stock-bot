@@ -98,7 +98,8 @@ async def test_session_start_subscribes_and_session_end_removes(data_dir, caplog
         # 구독이 하나도 남지 않으면 연결을 닫는다.
         await wait_until(lambda: connection.closed)
 
-    assert connection.requests("REMOVE")[0]["grp_no"] == "2"
+    # 시세(그룹 2)와 세션 동안 함께 받던 주문체결(그룹 1)을 모두 해지한다.
+    assert {m["grp_no"] for m in connection.requests("REMOVE")} == {"1", "2"}
     assert "sl_tp_session_ended" in messages(caplog)
 
 
@@ -449,13 +450,10 @@ async def test_holdings_read_by_an_old_run_are_not_used(data_dir, caplog):
         await save(app, session())
         connection = await watching(realtime)
         gate.open.set()
-        await wait_until(lambda: "sl_tp_holdings_discarded" in messages(caplog))
         await settle()
 
-    # 첫 실행의 조회 결과(005930)는 쓰지 않았다.
+    # 첫 실행의 조회는 세션을 끌 때 멈췄고, 그 결과(005930)는 쓰지 않았다.
     assert [m["data"][0]["item"] for m in quote_regs(connection)] == [["000660"]]
-    discarded = next(r for r in caplog.records if r.getMessage() == "sl_tp_holdings_discarded")
-    assert discarded.fields["run"] == 1
 
 
 async def test_unreadable_settings_answer_no_until_a_valid_save(data_dir, caplog):
