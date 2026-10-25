@@ -191,6 +191,23 @@ class AccountService:
         log(logger, logging.INFO, "holding_checked", api_id=api_id, **result)
         return result
 
+    async def positions(self, spec: EnvironmentSpec) -> list[dict[str, Any]]:
+        """SL / TP가 지켜볼 보유종목 줄. 매입가를 읽지 못한 칸은 None이다(국내만)."""
+        data = await self._kiwoom.call(
+            spec, "kt00018", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+        )
+        rows = [
+            {
+                "code": _strip_prefix(row.text("stk_cd")),
+                "purchase_price": row.number("pur_pric"),
+                # 현금 매도(kt10001)로 팔 수 있는 현금잔고(crd_tp=00)만 SL / TP가 다룬다.
+                "credit": row.text("crd_tp") != "00",
+            }
+            for row in Reader(data, "kt00018").rows("acnt_evlt_remn_indv_tot", _HoldingReader)
+        ]
+        log(logger, logging.INFO, "positions_fetched", api_id="kt00018", count=len(rows))
+        return rows
+
     async def _stock_listings(self, spec: EnvironmentSpec) -> dict[str, dict[str, Any]]:
         """종목 목록을 받지 못해도 계좌 확인은 계속하고, 잔고 TR의 이름·거래소를 쓴다."""
         if self._listings is None:

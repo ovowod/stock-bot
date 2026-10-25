@@ -4,15 +4,17 @@
 매도는 보내기 직전에 잔고를 다시 확인한다.
 주문 취소는 국내 kt10003·미국 ust20003이고, 보내기 직전에 미체결을 다시 확인한다.
 주문은 중복될 수 있으므로 키움 호출을 자동으로 다시 보내지 않는다.
+자동 매도는 같은 매도 잠금 안에서 잔고를 다시 읽고 매도 가능 수량 전량을 시장가로 판다.
 """
 
 import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from stock_bot.config import Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError, response_format_error
@@ -61,6 +63,24 @@ HoldingLookup = Callable[[EnvironmentSpec, str], Awaitable[dict[str, Any]]]
 OpenOrderLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 # 취소가 접수되면 (투자 환경, 취소한 미체결 주문, 접수 응답)으로 부른다. 기다리지 않는다.
 CancelListener = Callable[[EnvironmentSpec, dict[str, Any], dict[str, Any]], None]
+
+
+AutoSellOutcome = Literal["skipped", "cancelled", "accepted", "rejected", "unknown"]
+
+
+@dataclass(frozen=True)
+class AutoSellResult:
+    """자동 매도 결과.
+
+    보내지 않은 것: skipped(매도 가능 수량 0), cancelled(보내기 전 취소).
+    보낸 것: accepted(주문번호 받음), rejected(키움 오류, 잔고 확인 실패 포함),
+    unknown(접수 여부 모름).
+    """
+
+    outcome: AutoSellOutcome
+    quantity: int | None = None
+    order_no: str | None = None
+    cause: str | None = None
 
 
 class OrderService:
@@ -117,6 +137,55 @@ class OrderService:
         async with lock:
             order = await self._check_open_order(spec, cancel)
             return await self._send_cancel(spec, cancel, order)
+
+    async def sell_all_at_market(
+        self,
+        spec: EnvironmentSpec,
+        code: str,
+        exchange: str,
+        order_key: str,
+        ready: Callable[[], bool],
+    ) -> AutoSellResult:
+        """자동 매도: 잔고를 다시 읽어 매도 가능 수량 전량을 시장가로 한 번만 보낸다.
+
+        ready는 키움에 보내기 직전에 부른다. False면 보내지 않는다.
+        이미 키움에 보낸 주문은 취소하지 않는다.
+        """
+        fields = {"order_key": order_key, "code": code}
+        if spec.is_real:
+            log(logger, logging.WARNING, "order_blocked_real", **fields)
+            return AutoSellResult("cancelled", cause="real_trading")
+        log(logger, logging.INFO, "auto_sell_requested", **fields)
+        # 수동 매도와 같은 잠금이라, 잔고 확인부터 주문 응답까지
+        # 같은 매도 가능 수량을 함께 쓰지 않는다.
+        lock = self._sell_locks.setdefault((spec.environment, code), asyncio.Lock())
+        async with lock:
+            try:
+                quantity = await self._sellable(spec, code, order_key)
+            except AppError as error:
+                return AutoSellResult("rejected", cause=error.message)
+            if quantity <= 0:
+                log(logger, logging.INFO, "auto_sell_skipped", **fields, reason="no_sellable")
+                return AutoSellResult("skipped", quantity=0)
+            order = {
+                "order_key": order_key,
+                "side": "sell",
+                "code": code,
+                "exchange": exchange,
+                "order_type": "market",
+                "quantity": str(quantity),
+                "price": "",
+            }
+            try:
+                result = await self._send(spec, order, ready)
+            except AppError as error:
+                if error.kind == "cancelled_before_send":
+                    log(logger, logging.INFO, "auto_sell_cancelled", **fields)
+                    return AutoSellResult("cancelled", quantity=quantity)
+                if error.kind == "order_result_unknown":
+                    return AutoSellResult("unknown", quantity=quantity, cause=error.message)
+                return AutoSellResult("rejected", quantity=quantity, cause=error.message)
+            return AutoSellResult("accepted", quantity=quantity, order_no=result["order_no"])
 
     def _claim_key(self, spec: EnvironmentSpec, order_key: str) -> None:
         """처음 받은 주문 키만 통과시킨다. 처리 중이거나 이미 처리한 키는 409다."""
@@ -273,16 +342,19 @@ class OrderService:
                 )
         return result
 
-    async def _check_sellable(self, spec: EnvironmentSpec, order: dict[str, str]) -> None:
-        """매도 주문 직전에 잔고를 다시 조회한다. 확인하지 못하거나 넘치면 주문을 보내지 않는다."""
+    async def _sellable(self, spec: EnvironmentSpec, code: str, order_key: str) -> int:
+        """매도 직전에 잔고를 다시 조회해 매도 가능 수량을 돌려준다.
+
+        확인하지 못하면 sellable_check_failed 오류다.
+        """
         try:
-            holding = await self._holding(spec, order["code"])
+            holding = await self._holding(spec, code)
         except AppError as error:
             log(
                 logger,
                 logging.WARNING,
                 "sellable_check_failed",
-                order_key=order["order_key"],
+                order_key=order_key,
                 kind=error.kind,
                 cause=error.message,
             )
@@ -293,16 +365,21 @@ class OrderService:
                 502,
                 {"api_id": error.detail.get("api_id")},
             ) from error
-        sellable = holding["sellable_quantity"]
+        sellable: int = holding["sellable_quantity"]
         log(
             logger,
             logging.INFO,
             "sellable_checked",
-            order_key=order["order_key"],
-            code=order["code"],
+            order_key=order_key,
+            code=code,
             quantity=holding["quantity"],
             sellable_quantity=sellable,
         )
+        return sellable
+
+    async def _check_sellable(self, spec: EnvironmentSpec, order: dict[str, str]) -> None:
+        """매도 주문 직전에 잔고를 다시 조회한다. 확인하지 못하거나 넘치면 주문을 보내지 않는다."""
+        sellable = await self._sellable(spec, order["code"], order["order_key"])
         if int(order["quantity"]) > sellable:
             log(
                 logger,
@@ -319,7 +396,12 @@ class OrderService:
                 {"sellable_quantity": sellable},
             )
 
-    async def _send(self, spec: EnvironmentSpec, order: dict[str, str]) -> dict[str, Any]:
+    async def _send(
+        self,
+        spec: EnvironmentSpec,
+        order: dict[str, str],
+        ready: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         """주문 TR을 한 번만 호출하고 결과를 분류한다."""
         api_id = ORDER_API_IDS[spec.market][order["side"]]
         trde_tp = TRADE_TYPES[spec.market][order["order_type"]]
@@ -346,7 +428,7 @@ class OrderService:
                 # 매도 TR(ust20001)에만 있는 칸. STOP 주문만 쓰므로 지정가·시장가는 빈 값이다.
                 body["stop_pric"] = ""
         _, order_no = await self._call_order(
-            spec, api_id, path, body, order["order_key"], UNKNOWN_RESULT_MESSAGE
+            spec, api_id, path, body, order["order_key"], UNKNOWN_RESULT_MESSAGE, ready
         )
         log(logger, logging.INFO, "order_accepted", order_key=order["order_key"], order_no=order_no)
         return {
@@ -363,14 +445,17 @@ class OrderService:
         body: dict[str, str],
         order_key: str,
         unknown_message: str,
+        ready: Callable[[], bool] | None = None,
     ) -> tuple[dict[str, Any], str]:
         """주문류 TR을 한 번만 호출하고 결과를 분류한다. 응답과 새 주문번호를 돌려준다."""
         try:
-            data = await self._kiwoom.call_once(spec, api_id, path, body)
+            data = await self._kiwoom.call_once(spec, api_id, path, body, ready)
             order_no = Reader(data, api_id).text("ord_no")
             if not order_no:
                 raise response_format_error(api_id, "ord_no 값이 비어 있습니다.")
         except AppError as error:
+            if error.kind == "cancelled_before_send":
+                raise
             if error.kind in UNKNOWN_RESULT_KINDS:
                 log(
                     logger,

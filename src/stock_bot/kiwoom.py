@@ -282,11 +282,18 @@ class KiwoomClient:
         return page.data
 
     async def call_once(
-        self, spec: EnvironmentSpec, api_id: str, path: str, body: dict[str, Any]
+        self,
+        spec: EnvironmentSpec,
+        api_id: str,
+        path: str,
+        body: dict[str, Any],
+        ready: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """주문처럼 다시 보내면 안 되는 TR을 한 번만 호출한다.
 
         토큰 무효(8005)도 재시도하지 않는다. 다음 호출이 새 토큰을 받도록 그 토큰만 버린다.
+        ready를 주면 토큰 발급과 호출 한도 대기가 모두 끝난 뒤 보내기 바로 앞에서 부른다.
+        False면 보내지 않고 cancelled_before_send 오류를 낸다.
         """
         token = await self._token(spec)
         headers = {
@@ -295,7 +302,7 @@ class KiwoomClient:
             "Content-Type": CONTENT_TYPE,
         }
         try:
-            page = await self._post(spec, api_id, path, body, headers, 1)
+            page = await self._post(spec, api_id, path, body, headers, 1, ready)
         except _KiwoomResult as result:
             if result.code == INVALID_TOKEN:
                 await self._discard_token(spec, token)
@@ -398,9 +405,19 @@ class KiwoomClient:
         body: dict[str, Any],
         headers: dict[str, str],
         page_no: int,
+        ready: Callable[[], bool] | None = None,
     ) -> _Page:
         url = f"{spec.domain}{path}"
         await self._pacer.wait(_pacing_unit(spec, api_id), api_id)
+        if ready is not None and not ready():
+            # 호출 한도 자리는 이미 썼지만 보내지 않았다. 한도를 넘길 일은 없으므로 되돌리지 않는다.
+            log(logger, logging.WARNING, "kiwoom_request_cancelled", api_id=api_id, target=url)
+            raise AppError(
+                "cancelled_before_send",
+                "보내기 직전 확인에서 요청을 보내지 않았습니다.",
+                409,
+                {"api_id": api_id},
+            )
         log(logger, logging.INFO, "kiwoom_request", api_id=api_id, target=url, page=page_no)
         started = time.perf_counter()
         try:

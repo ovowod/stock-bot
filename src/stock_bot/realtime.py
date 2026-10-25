@@ -107,6 +107,14 @@ class Channel:
         self.version += 1
         self._link.changed()
 
+    @property
+    def stopped(self) -> bool:
+        """연결이 밀려나거나 서버가 꺼져 멈췄다.
+
+        STOPPED 이벤트가 큐에서 처리되기 전에도 바로 안다.
+        """
+        return self._link.stopped
+
     def put(self, event: RealtimeEvent) -> None:
         self._queue.put_nowait(event)
 
@@ -194,20 +202,20 @@ class _Link:
         self._changed = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._connection_no = 0
-        self._stopped = False
+        self.stopped = False
 
     def changed(self) -> None:
         """구독이 바뀌었다. 구독이 하나라도 생기면 그때 연결을 연다."""
         self._changed.set()
         if (
             self._task is None
-            and not self._stopped
+            and not self.stopped
             and any(c.subscription is not None for c in self.channels)
         ):
             self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
-        self._stopped = True
+        self.stopped = True
         tasks = [self._task] if self._task else []
         for task in tasks:
             task.cancel()
@@ -235,7 +243,7 @@ class _Link:
         except _SessionReplaced as replaced:
             # 같은 앱 키로 서버가 둘 떠 있으면 다시 연결할 때마다 서로를 끊어낸다.
             # 나중에 연결한 쪽이 지켜보도록 이 서버는 멈추고, 조용히 끊기지 않게 알린다.
-            self._stopped = True
+            self.stopped = True
             stopped = [c for c in self.channels if c.subscription is not None]
             log(
                 logger,

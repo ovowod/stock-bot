@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from stock_bot.account import AccountService
 from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
+from stock_bot.auto_sell import AutoSellGuard
 from stock_bot.config import (
     DATA_DIR,
     ENVIRONMENTS,
@@ -41,6 +42,7 @@ from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
 from stock_bot.realtime import RealtimeConnect, RealtimeHub, connect_websocket
 from stock_bot.sl_tp import SlTpSettingsStore
+from stock_bot.sl_tp_watch import SlTpWatcher
 from stock_bot.stock_search import StockSearchService, today_kst
 
 logger = logging.getLogger("stock_bot.api")
@@ -98,18 +100,22 @@ def create_app(
         lambda spec: open_orders.orders(spec, listing_required=True),
         on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
     )
-    realtime = RealtimeHub(
-        kiwoom, notifier, realtime_connect or connect_websocket, now or (lambda: datetime.now(UTC))
-    )
+    now = now or (lambda: datetime.now(UTC))
+    realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
     fills = FillWatcher(kiwoom, notifier, realtime)
     sl_tp = SlTpSettingsStore(data_dir / "sl-tp")
+    sl_tp_watch = SlTpWatcher(
+        kiwoom, sl_tp, accounts.positions, orders, AutoSellGuard(), realtime, now
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         fills.start()
+        sl_tp_watch.start()
         try:
             yield
         finally:
+            await sl_tp_watch.stop()
             await fills.stop()
             await realtime.stop()
 
