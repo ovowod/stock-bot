@@ -57,7 +57,7 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     static_dir: Path | None = WEB_DIST,
     log_dir: Path | None = LOG_DIR,
-    data_dir: Path = DATA_DIR,
+    data_dir: Path | None = None,
     today: Callable[[], date] | None = None,
     clock: Callable[[], float] | None = None,
     notifier: DiscordNotifier | None = None,
@@ -103,7 +103,7 @@ def create_app(
     now = now or (lambda: datetime.now(UTC))
     realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
     fills = FillWatcher(kiwoom, notifier, realtime)
-    sl_tp = SlTpSettingsStore(data_dir / "sl-tp")
+    sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
     sl_tp_watch = SlTpWatcher(
         kiwoom, sl_tp, accounts.positions, orders, AutoSellGuard(), realtime, now
     )

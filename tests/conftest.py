@@ -6,6 +6,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from stock_bot import app as app_module
 from stock_bot import kiwoom
 from stock_bot.app import create_app
 from tests.fake_kiwoom import FAKE_ENV
@@ -49,6 +50,12 @@ def make_client(data_dir: Path) -> Iterator[Callable[..., TestClient]]:
     yield factory
     for client in clients:
         client.close()
+
+
+@pytest.fixture(autouse=True)
+def isolated_data_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """data_dir를 넘기지 않은 테스트도 프로젝트의 data/(실제 SL / TP 설정)를 읽지 않게 한다."""
+    monkeypatch.setattr(app_module, "DATA_DIR", tmp_path / "default-data")
 
 
 @pytest.fixture(autouse=True)
