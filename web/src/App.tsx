@@ -120,7 +120,7 @@ export default function App() {
   }, [drawerOpen]);
 
   return (
-    <div className="flex min-h-dvh flex-col">
+    <div className="flex h-dvh flex-col">
       <header className="sticky top-0 z-30 bg-surface/90 backdrop-blur">
         <div className="flex h-14 items-center gap-2.5 px-4 md:h-16 md:px-6">
           <button
@@ -156,7 +156,7 @@ export default function App() {
         )}
       </header>
 
-      <div className="flex flex-1">
+      <div className="flex min-h-0 flex-1">
         <aside className="hidden w-60 shrink-0 flex-col bg-surface md:flex">
           <Navigation activeId={feature.id} onSelect={selectFeature} />
           <LogoutButton confirmLeave={confirmLeave} />
@@ -193,7 +193,7 @@ export default function App() {
           </div>
         )}
 
-        <main className="min-w-0 flex-1 px-4 py-6 md:px-8 md:py-8">
+        <main className="min-w-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8">
           <ReportUnsavedChanges.Provider value={setUnsaved}>
             <OrderPanelProvider key={environment} environment={environment}>
               {feature.render(environment)}
@@ -242,7 +242,7 @@ function EnvironmentSwitch({
 
 function Navigation({ activeId, onSelect }: { activeId: string; onSelect: (id: string) => void }) {
   return (
-    <nav className="flex flex-col gap-5 p-3 pt-4" aria-label="기능">
+    <nav className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-3 pt-4" aria-label="기능">
       {GROUPS.map((group) => (
         <div key={group.title} role="group" aria-label={group.title} className="flex flex-col gap-1">
           <p className="px-3.5 pb-1 text-xs font-semibold tracking-wide text-muted">{group.title}</p>
@@ -273,7 +273,7 @@ function Navigation({ activeId, onSelect }: { activeId: string; onSelect: (id: s
 function LogoutButton({ confirmLeave }: { confirmLeave: () => boolean }) {
   const logout = useLogout();
   return (
-    <div className="px-3 pb-4">
+    <div className="mx-3 border-t border-line pt-3 pb-4">
       <button
         type="button"
         onClick={() => confirmLeave() && logout()}
