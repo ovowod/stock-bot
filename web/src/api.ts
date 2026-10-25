@@ -398,6 +398,63 @@ export function fetchRanking(
   return getJson<Ranking>(`/api/environments/${environment}/rankings/${kind}?${query}`, signal);
 }
 
+export interface ExcludedStock {
+  code: string;
+  name: string;
+  /** 국내는 null, 미국은 NYSE·NASDAQ·AMEX. */
+  exchange: string | null;
+}
+
+export interface SlTpSession {
+  /** HH:MM. 시작 시각은 포함하고 종료 시각은 뺀다. */
+  start: string;
+  end: string;
+  enabled: boolean;
+  /** 소수점 둘째 자리까지의 양수 문자열. 정하지 않으면 null. */
+  take_profit: string | null;
+  stop_loss: string | null;
+}
+
+export interface SlTpDraft {
+  excluded: ExcludedStock[];
+  sessions: SlTpSession[];
+}
+
+/** 정규장. HH:MM, 그 시장의 시간대 기준. */
+export interface RegularHours {
+  start: string;
+  end: string;
+}
+
+export interface SlTpSettings extends SlTpDraft {
+  environment: EnvironmentValue;
+  market: "domestic" | "us";
+  timezone: string;
+  regular_hours: RegularHours;
+  /** 실전투자는 false. SL/TP 세션을 켤 수 없다. */
+  can_enable: boolean;
+  updated_at: string | null;
+}
+
+export function fetchSlTp(environment: EnvironmentValue, signal: AbortSignal): Promise<SlTpSettings> {
+  return getJson<SlTpSettings>(`/api/environments/${environment}/sl-tp`, signal);
+}
+
+export async function saveSlTp(environment: EnvironmentValue, draft: SlTpDraft): Promise<SlTpSettings> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/environments/${environment}/sl-tp`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    });
+  } catch {
+    throw networkError();
+  }
+  if (!response.ok) throw await responseError(response);
+  return (await response.json()) as SlTpSettings;
+}
+
 async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
   let response: Response;
   try {

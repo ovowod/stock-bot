@@ -5,6 +5,7 @@ import {
   Search,
   ShieldAlert,
   Sparkles,
+  Target,
   Trophy,
   Wallet,
   X,
@@ -17,7 +18,9 @@ import { AccountPage } from "./features/account/AccountPage";
 import { useLogout } from "./features/auth/AuthGate";
 import { OrderPanelProvider } from "./features/order/OrderPanel";
 import { RankingPage } from "./features/ranking/RankingPage";
+import { SlTpPage } from "./features/sl-tp/SlTpPage";
 import { StockSearchPage } from "./features/search/StockSearchPage";
+import { LEAVE_MESSAGE, ReportUnsavedChanges } from "./unsavedChanges";
 
 interface Feature {
   id: string;
@@ -62,6 +65,17 @@ const GROUPS: FeatureGroup[] = [
       },
     ],
   },
+  {
+    title: "자동매매",
+    features: [
+      {
+        id: "sl-tp",
+        label: "SL / TP",
+        icon: Target,
+        render: (environment) => <SlTpPage key={environment} environment={environment} />,
+      },
+    ],
+  },
 ];
 
 const FEATURES = GROUPS.flatMap((group) => group.features);
@@ -70,10 +84,33 @@ export default function App() {
   const [environment, setEnvironment] = useState<EnvironmentValue>(loadEnvironment);
   const [featureId, setFeatureId] = useState(FEATURES[0].id);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [unsaved, setUnsaved] = useState(false);
   const current = findEnvironment(environment);
   const feature = FEATURES.find((f) => f.id === featureId) ?? FEATURES[0];
 
+  /**
+   * 사용자가 화면을 떠나려 할 때 저장하지 않은 변경이 있으면 묻는다.
+   * 로그인 만료는 사용자가 떠나는 것이 아니므로 묻지 않는다(AuthGate가 화면을 바로 닫는다).
+   */
+  const confirmLeave = () => !unsaved || window.confirm(LEAVE_MESSAGE);
+  const selectFeature = (id: string) => {
+    if (id === featureId) return true;
+    if (!confirmLeave()) return false;
+    setFeatureId(id);
+    return true;
+  };
+  const selectEnvironment = (value: EnvironmentValue) => {
+    if (value !== environment && confirmLeave()) setEnvironment(value);
+  };
+
   useEffect(() => saveEnvironment(environment), [environment]);
+
+  useEffect(() => {
+    if (!unsaved) return;
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [unsaved]);
 
   useEffect(() => {
     if (!drawerOpen) return;
@@ -105,11 +142,11 @@ export default function App() {
             </span>
           )}
           <div className="ml-auto hidden md:block">
-            <EnvironmentSwitch value={environment} onChange={setEnvironment} />
+            <EnvironmentSwitch value={environment} onChange={selectEnvironment} />
           </div>
         </div>
         <div className="px-4 pb-3 md:hidden">
-          <EnvironmentSwitch value={environment} onChange={setEnvironment} />
+          <EnvironmentSwitch value={environment} onChange={selectEnvironment} />
         </div>
         {current.isReal && (
           <p className="flex items-center gap-2 bg-real-soft px-4 py-2 text-[13px] font-semibold text-real md:px-6">
@@ -121,8 +158,8 @@ export default function App() {
 
       <div className="flex flex-1">
         <aside className="hidden w-60 shrink-0 flex-col bg-surface md:flex">
-          <Navigation activeId={feature.id} onSelect={setFeatureId} />
-          <LogoutButton />
+          <Navigation activeId={feature.id} onSelect={selectFeature} />
+          <LogoutButton confirmLeave={confirmLeave} />
         </aside>
 
         {drawerOpen && (
@@ -148,19 +185,20 @@ export default function App() {
               <Navigation
                 activeId={feature.id}
                 onSelect={(id) => {
-                  setFeatureId(id);
-                  setDrawerOpen(false);
+                  if (selectFeature(id)) setDrawerOpen(false);
                 }}
               />
-              <LogoutButton />
+              <LogoutButton confirmLeave={confirmLeave} />
             </div>
           </div>
         )}
 
         <main className="min-w-0 flex-1 px-4 py-6 md:px-8 md:py-8">
-          <OrderPanelProvider key={environment} environment={environment}>
-            {feature.render(environment)}
-          </OrderPanelProvider>
+          <ReportUnsavedChanges.Provider value={setUnsaved}>
+            <OrderPanelProvider key={environment} environment={environment}>
+              {feature.render(environment)}
+            </OrderPanelProvider>
+          </ReportUnsavedChanges.Provider>
         </main>
       </div>
     </div>
@@ -232,13 +270,13 @@ function Navigation({ activeId, onSelect }: { activeId: string; onSelect: (id: s
   );
 }
 
-function LogoutButton() {
+function LogoutButton({ confirmLeave }: { confirmLeave: () => boolean }) {
   const logout = useLogout();
   return (
     <div className="px-3 pb-4">
       <button
         type="button"
-        onClick={logout}
+        onClick={() => confirmLeave() && logout()}
         className="flex w-full items-center gap-3 rounded-2xl px-3.5 py-3 text-[15px] font-semibold text-sub transition hover:bg-canvas"
       >
         <LogOut className="size-5" aria-hidden />

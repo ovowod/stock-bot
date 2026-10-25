@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from stock_bot.account import AccountService
 from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
 from stock_bot.config import (
+    DATA_DIR,
     ENVIRONMENTS,
     LOG_DIR,
     PROJECT_ROOT,
@@ -38,6 +39,7 @@ from stock_bot.open_order import OpenOrderService
 from stock_bot.order import OrderService
 from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
+from stock_bot.sl_tp import SlTpSettingsStore
 from stock_bot.stock_search import StockSearchService, today_kst
 
 logger = logging.getLogger("stock_bot.api")
@@ -52,6 +54,7 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     static_dir: Path | None = WEB_DIST,
     log_dir: Path | None = LOG_DIR,
+    data_dir: Path = DATA_DIR,
     today: Callable[[], date] | None = None,
     clock: Callable[[], float] | None = None,
     notifier: DiscordNotifier | None = None,
@@ -93,6 +96,7 @@ def create_app(
         on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
     )
     fills = FillWatcher(kiwoom, notifier, realtime_connect or connect_websocket)
+    sl_tp = SlTpSettingsStore(data_dir / "sl-tp")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -113,7 +117,8 @@ def create_app(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         path = request.url.path
-        if request.method == "POST" and not _same_origin(request):
+        # 조회가 아닌 요청(POST·PUT 등)은 다른 사이트에서 온 것이면 받지 않는다.
+        if request.method not in ("GET", "HEAD") and not _same_origin(request):
             log(
                 logger,
                 logging.WARNING,
@@ -312,6 +317,22 @@ def create_app(
         except ValueError:
             payload = None
         return await orders.cancel(spec, payload)
+
+    @app.get("/api/environments/{environment}/sl-tp")
+    async def get_sl_tp(environment: str) -> dict[str, Any]:
+        spec = parse_environment(environment)
+        environment_var.set(spec.environment.value)
+        return sl_tp.read(spec)
+
+    @app.put("/api/environments/{environment}/sl-tp")
+    async def put_sl_tp(environment: str, request: Request) -> dict[str, Any]:
+        spec = parse_environment(environment)
+        environment_var.set(spec.environment.value)
+        try:
+            payload = await request.json()
+        except ValueError:
+            payload = None
+        return await sl_tp.save(spec, payload)
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

@@ -13,3 +13,6 @@ wheels/
 
 # Logs
 logs/
+
+# SL / TP 설정 등 서버가 저장하는 데이터
+data/
