@@ -22,6 +22,7 @@ from stock_bot.fill_watch import FILL_STATUSES
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.order import OrderService
+from stock_bot.quote import US_EXCHANGE_CODES
 from stock_bot.realtime import (
     SHARED_GROUP_NO,
     EventKind,
@@ -33,15 +34,17 @@ from stock_bot.sl_tp import TIMEZONES, SlTpSettingsStore
 
 logger = logging.getLogger("stock_bot.sl_tp_watch")
 
-# 지켜볼 투자 환경. 실전은 넣지 않는다. 미국 모의는 05 티켓에서 더한다.
-WATCHED = (ENVIRONMENTS[Environment.DOMESTIC_PAPER],)
-# 시세 실시간 항목. 0B는 국내 주식체결이다.
-QUOTE_TYPES = {Market.DOMESTIC: "0B"}
-# 내 계좌 체결 실시간 항목(00 국내 주문체결). 체결을 뜻하는 주문상태는 체결 알림과 같다.
+# 지켜볼 투자 환경. 실전은 넣지 않는다. 국내 모의와 미국 모의는 인증정보·연결·설정이 따로다.
+WATCHED = (ENVIRONMENTS[Environment.DOMESTIC_PAPER], ENVIRONMENTS[Environment.US_PAPER])
+# 시세 실시간 항목. 0B는 국내 주식체결, FE는 미국주식 실시간 체결가다.
+QUOTE_TYPES = {Market.DOMESTIC: "0B", Market.US: "FE"}
+# 내 계좌 체결 실시간 항목(00 국내 주문체결, F5 미국 실시간 체결).
+# 체결을 뜻하는 주문상태는 체결 알림과 같다.
 # 체결되면 매입가·보유수량이 바뀌므로 보유종목을 다시 읽는다.
-FILL_TYPES = {Market.DOMESTIC: "00"}
-# 장구분(290)의 정규장 값. 국내 2는 장중이다. 장전·장후 시간외 체결은 판정하지 않는다.
-REGULAR_MARKET = {Market.DOMESTIC: "2"}
+FILL_TYPES = {Market.DOMESTIC: "00", Market.US: "F5"}
+# 장구분(290)의 정규장 값. 국내 2는 장중, 미국 0은 정규장이다.
+# 국내 장전·장후 시간외, 미국 프리마켓·애프터마켓·주간거래 체결은 판정하지 않는다.
+REGULAR_MARKET = {Market.DOMESTIC: "2", Market.US: "0"}
 # 공유 연결에서 SL / TP의 시세 구독이 쓰는 그룹 번호.
 # 주문체결은 공유 연결이 SHARED_GROUP_NO(1)로 한 번만 등록해 체결 감시와 함께 받는다.
 GROUP_NO = "2"
@@ -52,6 +55,13 @@ HOLDINGS_RETRY_INITIAL_SECONDS = 1.0
 HOLDINGS_RETRY_MAX_SECONDS = 60.0
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
+
+
+@dataclass(frozen=True)
+class _Holding:
+    purchase_price: Decimal
+    # 미국 종목의 거래소(NYSE·NASDAQ·AMEX). 국내는 None이다.
+    exchange: str | None
 
 
 @dataclass(frozen=True)
@@ -155,8 +165,9 @@ class _Watch:
         self._excluded: set[str] = set()
         self._run: _Run | None = None
         self._runs = 0
-        # 종목코드 -> 매입가. 현금잔고이고 매입가를 읽을 수 있는 종목만 담는다. 제외종목도 담는다.
-        self._holdings: dict[str, Decimal] = {}
+        # 종목코드 -> 매입가·거래소. 현금잔고이고 매입가를 읽을 수 있으며, 미국은 거래소를 아는
+        # 종목만 담는다. 제외종목도 담는다.
+        self._holdings: dict[str, _Holding] = {}
         self._holdings_ready = False
         # 지금 구독한 시세 종목. 실행이 바뀌면 None으로 되돌려 다시 등록한다.
         self._subscribed: list[str] | None = None
@@ -380,23 +391,29 @@ class _Watch:
             return
 
     def _use_holdings(self, run: _Run, rows: list[dict[str, Any]], reasons: list[str]) -> None:
-        holdings: dict[str, Decimal] = {}
-        counts = {"credit": 0, "no_purchase_price": 0, "duplicate": 0}
+        holdings: dict[str, _Holding] = {}
+        counts = {"credit": 0, "no_purchase_price": 0, "duplicate": 0, "unknown_exchange": 0}
         duplicated: set[str] = set()
+        unknown_exchange: list[str] = []
         for row in rows:
-            code, price = row["code"], row["purchase_price"]
+            code, price, exchange = row["code"], row["purchase_price"], row["exchange"]
             if row["credit"]:
                 # 현금 매도 주문으로 신용 보유분을 팔려다 실패하지 않게 다루지 않는다.
                 counts["credit"] += 1
             elif price is None or price <= 0:
                 counts["no_purchase_price"] += 1
+            elif self.spec.market is Market.US and exchange not in US_EXCHANGE_CODES:
+                # 종목 목록에서 거래소를 찾지 못한 종목은 다루지 않는다.
+                # 거래소 없이 주문을 보내다 실패하지 않기 위해서다.
+                counts["unknown_exchange"] += 1
+                unknown_exchange.append(code)
             elif code in holdings or code in duplicated:
                 # 같은 종목의 현금잔고가 여러 줄이면 어느 매입가인지 모른다.
                 duplicated.add(code)
                 holdings.pop(code, None)
                 counts["duplicate"] += 1
             else:
-                holdings[code] = price
+                holdings[code] = _Holding(price, exchange)
         removed = sorted(self._holdings.keys() - holdings.keys())
         self._holdings = holdings
         self._holdings_ready = True
@@ -409,6 +426,7 @@ class _Watch:
             count=len(holdings),
             excluded=len(holdings.keys() & self._excluded),
             removed=removed,
+            unknown_exchange_codes=unknown_exchange,
             **counts,
         )
         log(logger, logging.INFO, "sl_tp_judging_resumed", run=run.number)
@@ -431,8 +449,19 @@ class _Watch:
             self._channel.subscribe(None)
             return
         self._channel.subscribe(
-            Subscription(GROUP_NO, codes, [QUOTE_TYPES[self.spec.market]], refresh="0")
+            Subscription(
+                GROUP_NO, self._quote_items(codes), [QUOTE_TYPES[self.spec.market]], refresh="0"
+            )
         )
+
+    def _quote_items(self, codes: list[str]) -> list[Any]:
+        """국내는 접두어 없는 종목코드, 미국은 {티커, 거래소 코드} 객체로 등록한다."""
+        if self.spec.market is Market.DOMESTIC:
+            return list(codes)
+        return [
+            {"jmcode": code, "stex_tp": US_EXCHANGE_CODES[self._holdings[code].exchange or ""]}
+            for code in codes
+        ]
 
     async def _on_event(self, event: RealtimeEvent) -> None:
         environment_var.set(self.spec.environment.value)
@@ -526,7 +555,8 @@ class _Watch:
         if price is None:
             return
         self._skips.pop(code, None)
-        purchase = self._holdings[code]
+        holding = self._holdings[code]
+        purchase = holding.purchase_price
         rate = (price - purchase) / purchase * 100
         session = run.session
         if session.take_profit is not None and rate >= session.take_profit:
@@ -556,7 +586,7 @@ class _Watch:
                 log(logger, logging.INFO, "auto_sell_skipped", code=code, reason="in_progress")
                 return
             # 시세 처리는 주문 결과를 기다리지 않는다.
-            self._spawn(self._sell(run, code, request_id))
+            self._spawn(self._sell(run, code, holding.exchange or "", request_id))
         finally:
             request_id_var.reset(token)
 
@@ -603,13 +633,14 @@ class _Watch:
             )
         return None
 
-    async def _sell(self, run: _Run, code: str, request_id: str) -> None:
+    async def _sell(self, run: _Run, code: str, exchange: str, request_id: str) -> None:
+        """exchange는 판정 때 읽은 미국 거래소다. 국내는 빈 값이다."""
         environment = self.spec.environment
         try:
             result = await self._owner.orders.sell_all_at_market(
                 self.spec,
                 code,
-                exchange="",
+                exchange=exchange,
                 order_key=f"sl-tp-{request_id}",
                 ready=lambda: self._may_send(run, code),
             )

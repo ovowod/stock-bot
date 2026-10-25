@@ -192,20 +192,49 @@ class AccountService:
         return result
 
     async def positions(self, spec: EnvironmentSpec) -> list[dict[str, Any]]:
-        """SL / TP가 지켜볼 보유종목 줄. 매입가를 읽지 못한 칸은 None이다(국내만)."""
-        data = await self._kiwoom.call(
-            spec, "kt00018", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
-        )
-        rows = [
-            {
-                "code": _strip_prefix(row.text("stk_cd")),
-                "purchase_price": row.number("pur_pric"),
-                # 현금 매도(kt10001)로 팔 수 있는 현금잔고(crd_tp=00)만 SL / TP가 다룬다.
-                "credit": row.text("crd_tp") != "00",
-            }
-            for row in Reader(data, "kt00018").rows("acnt_evlt_remn_indv_tot", _HoldingReader)
-        ]
-        log(logger, logging.INFO, "positions_fetched", api_id="kt00018", count=len(rows))
+        """SL / TP가 지켜볼 보유종목 줄. 매입가를 읽지 못한 칸은 None이다.
+
+        미국은 종목 목록의 거래소를 붙이고, 목록에 없으면 None이다.
+        종목 목록을 받지 못하면 오류다. 거래소 없이 모든 종목을 조용히 빼지 않게 한다.
+        """
+        if spec.market is Market.DOMESTIC:
+            data = await self._kiwoom.call(
+                spec, "kt00018", DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+            )
+            rows = [
+                {
+                    "code": _strip_prefix(row.text("stk_cd")),
+                    "purchase_price": row.number("pur_pric"),
+                    # 현금 매도(kt10001)로 팔 수 있는 현금잔고(crd_tp=00)만 SL / TP가 다룬다.
+                    "credit": row.text("crd_tp") != "00",
+                    "exchange": None,
+                }
+                for row in Reader(data, "kt00018").rows("acnt_evlt_remn_indv_tot", _HoldingReader)
+            ]
+            api_id = "kt00018"
+        else:
+            if self._listings is None:
+                raise AppError(
+                    "stock_list_unavailable",
+                    "종목 목록이 없어 미국 종목의 거래소를 정하지 못했습니다.",
+                    503,
+                )
+            balance, listings = await asyncio.gather(
+                self._kiwoom.call(spec, "ust21070", US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}),
+                self._listings(spec),
+            )
+            rows = [
+                {
+                    "code": row.text("stk_cd"),
+                    # 2026-10-25 모의 계좌 25종목에서 매입금액 ÷ 보유수량과 같음을 확인했다.
+                    "purchase_price": row.number("frgn_stk_book_uv"),
+                    "credit": False,
+                    "exchange": listings.get(row.text("stk_cd"), {}).get("exchange"),
+                }
+                for row in Reader(balance, "ust21070").rows("result_list", _HoldingReader)
+            ]
+            api_id = "ust21070"
+        log(logger, logging.INFO, "positions_fetched", api_id=api_id, count=len(rows))
         return rows
 
     async def _stock_listings(self, spec: EnvironmentSpec) -> dict[str, dict[str, Any]]:
