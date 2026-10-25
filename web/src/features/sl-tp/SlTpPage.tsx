@@ -36,7 +36,9 @@ export function SlTpPage({ environment }: { environment: EnvironmentValue }) {
             전량을 시장가로 매도합니다. 제외종목은 매도하지 않습니다.
           </span>
         </p>
-        <p className="pl-6 font-semibold">자동매도는 아직 동작하지 않습니다. 지금은 설정만 저장됩니다.</p>
+        <p className="pl-6 font-semibold">
+          이 화면을 닫아도 서버가 켜져 있으면 동작합니다. 서버와 키움의 연결이 끊긴 동안에는 판정하지 않습니다.
+        </p>
       </div>
 
       {state.status === "loading" && (

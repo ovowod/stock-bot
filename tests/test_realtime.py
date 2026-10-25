@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from stock_bot import realtime as realtime_module
+from stock_bot.auto_sell import AutoSellGuard
 from stock_bot.config import ENVIRONMENTS, Environment
 from stock_bot.fill_watch import FillWatcher
 from stock_bot.kiwoom import KiwoomClient
@@ -189,7 +190,7 @@ async def test_slow_fill_lookup_does_not_delay_another_features_events():
     client = KiwoomClient(DOMESTIC_PAPER_ENV, transport=httpx.MockTransport(slow_kiwoom))
     notifier = DiscordNotifier(DISCORD_ENV, transport=httpx.MockTransport(discord))
     hub = RealtimeHub(client, notifier, realtime, Clock())
-    fills = FillWatcher(client, notifier, hub)
+    fills = FillWatcher(client, notifier, hub, AutoSellGuard())
     quotes = Recorder()
     try:
         fills.start()

@@ -10,7 +10,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -21,7 +21,8 @@ from stock_bot.errors import AppError
 from stock_bot.fill_watch import FILL_STATUSES
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
-from stock_bot.order import OrderService
+from stock_bot.notification import DiscordNotifier, Embed, EmbedField
+from stock_bot.order import AutoSellResult, OrderService
 from stock_bot.quote import US_EXCHANGE_CODES
 from stock_bot.realtime import (
     SHARED_GROUP_NO,
@@ -31,6 +32,14 @@ from stock_bot.realtime import (
     Subscription,
 )
 from stock_bot.sl_tp import TIMEZONES, SlTpSettingsStore
+from stock_bot.sl_tp_alerts import (
+    AutoSellTrigger,
+    accepted_embed,
+    failed_embed,
+    local_time,
+    stopped_embed,
+    unknown_embed,
+)
 
 logger = logging.getLogger("stock_bot.sl_tp_watch")
 
@@ -53,12 +62,17 @@ SESSION_CHECK_SECONDS = 1.0
 # 보유종목 읽기가 실패하면 이 간격으로 다시 읽는다. 실패가 이어지면 두 배씩 늘린다.
 HOLDINGS_RETRY_INITIAL_SECONDS = 1.0
 HOLDINGS_RETRY_MAX_SECONDS = 60.0
+# 보유종목 읽기가 첫 실패부터 이만큼 계속 실패하면 판정 중단 알림을 한 번 보낸다.
+HOLDINGS_ALERT_AFTER = timedelta(minutes=5)
+# 자동 매도 결과 알림. 매도를 보내지 않은 결과(건너뜀·보내기 전 취소)는 알리지 않는다.
+RESULT_EMBEDS = {"accepted": accepted_embed, "rejected": failed_embed, "unknown": unknown_embed}
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 
 
 @dataclass(frozen=True)
 class _Holding:
+    name: str
     purchase_price: Decimal
     # 미국 종목의 거래소(NYSE·NASDAQ·AMEX). 국내는 None이다.
     exchange: str | None
@@ -93,8 +107,10 @@ class _Run:
     refresh: asyncio.Task[None] | None = None
     pending: list[str] = field(default_factory=list)
     # 보유종목 읽기가 처음 실패한 시각. 한 번이라도 성공하면 지운다.
-    # 06의 판정 중단 알림(5분)이 이 시각을 쓴다. 지금은 로그에만 남는다.
+    # 판정 중단 알림(5분)이 이 시각을 쓴다. 알렸으면 성공하거나 실행이 끝날 때까지
+    # 다시 알리지 않는다.
     failed_since: datetime | None = None
+    failure_alerted: bool = False
 
     def covers(self, found: tuple[date, _Session] | None) -> bool:
         """그 날짜·세션이 이 실행의 것인가. 기준이 바뀌어도 같은 시간 범위면 같은 실행이다.
@@ -113,9 +129,12 @@ class SlTpWatcher:
         orders: OrderService,
         guard: AutoSellGuard,
         hub: RealtimeHub,
+        notifier: DiscordNotifier,
         now: Callable[[], datetime],
     ) -> None:
         self.kiwoom = kiwoom
+        # Discord가 꺼져 있어도 자동 매도는 동작한다. 알림만 보내지 않는다.
+        self.notifier = notifier
         self.settings = settings
         self.positions = positions
         self.orders = orders
@@ -175,6 +194,9 @@ class _Watch:
         self._wake = asyncio.Event()
         self._rejected = False
         self._fills_rejected = False
+        # 판정 중단을 알린 구독 거부의 그룹.
+        # 등록에 성공하거나 새 세션 실행이 시작되면 다시 알릴 수 있다.
+        self._rejection_alerted: set[str | None] = set()
         # 같은 이유의 건너뜀·잘못된 체결가 로그를 반복해 남기지 않으려고
         # 종목마다 마지막 이유를 둔다.
         self._skips: dict[str, str] = {}
@@ -190,6 +212,14 @@ class _Watch:
             # 깨진 설정을 빈 설정이나 옛 설정으로 착각해 동작하지 않는다.
             self._settings_broken = True
             log(logger, logging.ERROR, "sl_tp_watch_stopped", reason=exc.kind, cause=exc.message)
+            self._alert(
+                "settings_unreadable",
+                stopped_embed(
+                    self.spec,
+                    "SL / TP 설정 파일을 읽지 못해 이 환경의 SL / TP를 멈췄습니다. "
+                    "SL / TP 화면에서 설정을 다시 저장하면 그때부터 동작합니다.",
+                ),
+            )
             return
         self._apply(settings)
         self._refresh_run()
@@ -291,6 +321,8 @@ class _Watch:
         new.connection = self._channel.connection
         self._run = new
         self._subscribed = None
+        # 새 세션에서 같은 거부가 다시 나면 다시 알린다.
+        self._rejection_alerted.clear()
         log(
             logger,
             logging.INFO,
@@ -361,6 +393,22 @@ class _Watch:
                     failed_since=run.failed_since.isoformat(),
                     wait_seconds=delay,
                 )
+                if (
+                    not run.failure_alerted
+                    and self._owner.now() - run.failed_since >= HOLDINGS_ALERT_AFTER
+                ):
+                    run.failure_alerted = True
+                    self._alert(
+                        "holdings_failing",
+                        stopped_embed(
+                            self.spec,
+                            f"보유종목을 {_minutes(HOLDINGS_ALERT_AFTER)}분 넘게 읽지 못해 "
+                            "판정을 멈췄습니다. "
+                            "계속 다시 읽고, 성공하면 판정을 이어 갑니다.",
+                            EmbedField("첫 실패", local_time(self.spec, run.failed_since)),
+                            EmbedField("원인", exc.message),
+                        ),
+                    )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, HOLDINGS_RETRY_MAX_SECONDS)
                 continue
@@ -373,6 +421,7 @@ class _Watch:
                     failed_since=run.failed_since.isoformat(),
                 )
                 run.failed_since = None
+                run.failure_alerted = False
             if run is not self._run or self._is_stopped():
                 log(logger, logging.INFO, "sl_tp_holdings_discarded", run=run.number, reason="run")
                 return
@@ -413,7 +462,7 @@ class _Watch:
                 holdings.pop(code, None)
                 counts["duplicate"] += 1
             else:
-                holdings[code] = _Holding(price, exchange)
+                holdings[code] = _Holding(row["name"], price, exchange)
         removed = sorted(self._holdings.keys() - holdings.keys())
         self._holdings = holdings
         self._holdings_ready = True
@@ -482,16 +531,12 @@ class _Watch:
                     reason="disconnected",
                 )
         elif event.kind is EventKind.REGISTERED:
+            self._rejection_alerted.discard(event.group)
             if event.group == SHARED_GROUP_NO:
                 self._fills_rejected = False
             else:
                 self._rejected = False
         elif event.kind is EventKind.REJECTED:
-            if event.group == SHARED_GROUP_NO:
-                # 체결을 받지 못하면 바뀐 매입가를 모른 채 판정하게 되므로 판정도 멈춘다.
-                self._fills_rejected = True
-            else:
-                self._rejected = True
             log(
                 logger,
                 logging.WARNING,
@@ -499,6 +544,27 @@ class _Watch:
                 group=event.group,
                 **event.detail,
             )
+            if event.group == SHARED_GROUP_NO:
+                # 체결을 받지 못하면 바뀐 매입가를 모른 채 판정하게 되므로 판정도 멈춘다.
+                self._fills_rejected = True
+                what = (
+                    "주문체결 실시간 등록이 거부되어 판정을 멈췄습니다. "
+                    "체결을 받지 못하면 바뀐 매입가를 알 수 없습니다."
+                )
+            else:
+                self._rejected = True
+                what = "실시간 시세 구독이 거부되어 판정을 멈췄습니다."
+            if event.group not in self._rejection_alerted:
+                # 거부가 이어지는 동안은 한 번만 알린다.
+                self._rejection_alerted.add(event.group)
+                self._alert(
+                    "subscription_rejected",
+                    stopped_embed(
+                        self.spec,
+                        f"{what} 다음 세션 시작이나 감시 종목이 바뀔 때 다시 시도합니다.",
+                        EmbedField("원인", str(event.detail.get("return_msg") or "확인 불가")),
+                    ),
+                )
         elif event.kind is EventKind.STOPPED:
             self._stopped = True
             self._wake.set()
@@ -567,6 +633,17 @@ class _Watch:
             return
         # 결과와 상관없이 이번 세션 실행에서는 다시 판정하지 않는다.
         run.triggered.add(code)
+        fired = AutoSellTrigger(
+            code,
+            holding.name,
+            holding.exchange,
+            trigger,
+            price,
+            purchase,
+            rate,
+            threshold,
+            run.session.span,
+        )
         request_id = uuid.uuid4().hex[:12]
         token = request_id_var.set(request_id)
         try:
@@ -586,7 +663,7 @@ class _Watch:
                 log(logger, logging.INFO, "auto_sell_skipped", code=code, reason="in_progress")
                 return
             # 시세 처리는 주문 결과를 기다리지 않는다.
-            self._spawn(self._sell(run, code, holding.exchange or "", request_id))
+            self._spawn(self._sell(run, fired, request_id))
         finally:
             request_id_var.reset(token)
 
@@ -633,17 +710,21 @@ class _Watch:
             )
         return None
 
-    async def _sell(self, run: _Run, code: str, exchange: str, request_id: str) -> None:
-        """exchange는 판정 때 읽은 미국 거래소다. 국내는 빈 값이다."""
+    async def _sell(self, run: _Run, trigger: AutoSellTrigger, request_id: str) -> None:
+        """트리거 때 읽은 거래소로 판다. 국내는 거래소가 없어 빈 값으로 보낸다."""
         environment = self.spec.environment
+        code = trigger.code
         try:
             result = await self._owner.orders.sell_all_at_market(
                 self.spec,
                 code,
-                exchange=exchange,
+                exchange=trigger.exchange or "",
                 order_key=f"sl-tp-{request_id}",
                 ready=lambda: self._may_send(run, code),
             )
+            if result.outcome == "accepted" and result.order_no:
+                # 공통 장치를 놓기 전에 기억해야, 결과를 기다리던 체결 알림이 이 주문번호를 찾는다.
+                self._owner.guard.remember(environment, result.order_no, request_id)
         except asyncio.CancelledError:
             # 서버가 꺼지면 기다리지 않는다. 키움에 이미 보냈는지는 모른다.
             log(
@@ -663,11 +744,10 @@ class _Watch:
                     "fields": {"code": code, "run": run.number, "error_type": type(exc).__name__}
                 },
             )
-            return
+            # 어디서 멈췄는지 모르므로 키움에 이미 보냈을 수 있다. 결과 확인 불가로 알린다.
+            result = AutoSellResult("unknown", cause=type(exc).__name__)
         finally:
             self._owner.guard.release(environment, code)
-        if result.outcome == "accepted" and result.order_no:
-            self._owner.guard.remember(environment, result.order_no, request_id)
         log(
             logger,
             logging.INFO if result.outcome in ("accepted", "skipped") else logging.WARNING,
@@ -679,6 +759,21 @@ class _Watch:
             order_no=result.order_no,
             cause=result.cause,
         )
+        embed = RESULT_EMBEDS.get(result.outcome)
+        if embed is not None:
+            sent = await self._owner.notifier.send(
+                embed=embed(self.spec, trigger, result), spec=self.spec
+            )
+            log(logger, logging.INFO, "sl_tp_notified", kind=result.outcome, code=code, sent=sent)
+
+    def _alert(self, reason: str, embed: Embed) -> None:
+        """판정 중단 알림. 판정·이벤트 처리가 기다리지 않게 따로 보낸다."""
+
+        async def send() -> None:
+            sent = await self._owner.notifier.send(embed=embed, spec=self.spec)
+            log(logger, logging.INFO, "sl_tp_stop_notified", reason=reason, sent=sent)
+
+        self._spawn(send())
 
     def _may_send(self, run: _Run, code: str) -> bool:
         """키움에 보내기 직전 확인.
@@ -721,3 +816,7 @@ def _unreadable_price(raw: Any) -> str | None:
     except InvalidOperation:
         return "not_a_number"
     return None if price.is_finite() and price > 0 else "not_positive"
+
+
+def _minutes(span: timedelta) -> int:
+    return int(span.total_seconds() // 60)

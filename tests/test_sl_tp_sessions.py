@@ -497,7 +497,8 @@ async def test_rejected_quote_subscription_pauses_only_sl_tp(data_dir, caplog):
         await wait_until(lambda: "sl_tp_subscription_rejected" in messages(caplog))
         connection.push(quote())
         connection.push(fill_event())
-        await discord.wait_for(1)
+        # 구독 거부의 판정 중단 알림과 체결 알림.
+        await discord.wait_for(2)
         await settle()
         assert kiwoom.calls("kt10001") == []
         # 구독 종목이 바뀔 때 다시 시도한다.
@@ -507,7 +508,9 @@ async def test_rejected_quote_subscription_pauses_only_sl_tp(data_dir, caplog):
         await wait_until(lambda: len(kiwoom.calls("kt10001")) == 1)
 
     assert quote_regs(connection)[1]["data"][0]["item"] == ["005930"]
-    assert discord.payloads[0]["embeds"][0]["title"] == "체결 · 매수"
+    titles = [p["embeds"][0]["title"] for p in discord.payloads]
+    assert titles.count("SL / TP 판정 중단") == 1
+    assert "체결 · 매수" in titles
 
 
 async def test_rejected_quote_subscription_is_tried_again_when_the_next_session_starts(

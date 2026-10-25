@@ -204,6 +204,7 @@ class AccountService:
             rows = [
                 {
                     "code": _strip_prefix(row.text("stk_cd")),
+                    "name": row.text("stk_nm"),
                     "purchase_price": row.number("pur_pric"),
                     # 현금 매도(kt10001)로 팔 수 있는 현금잔고(crd_tp=00)만 SL / TP가 다룬다.
                     "credit": row.text("crd_tp") != "00",
@@ -226,6 +227,9 @@ class AccountService:
             rows = [
                 {
                     "code": row.text("stk_cd"),
+                    # 화면과 같은 이름을 쓰도록 종목 목록의 이름을 먼저 쓴다.
+                    "name": listings.get(row.text("stk_cd"), {}).get("name")
+                    or row.text("frgn_stk_nm"),
                     # 2026-10-25 모의 계좌 25종목에서 매입금액 ÷ 보유수량과 같음을 확인했다.
                     "purchase_price": row.number("frgn_stk_book_uv"),
                     "credit": False,

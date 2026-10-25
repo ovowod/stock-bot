@@ -102,10 +102,12 @@ def create_app(
     )
     now = now or (lambda: datetime.now(UTC))
     realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
-    fills = FillWatcher(kiwoom, notifier, realtime)
+    # 자동 매도 공통 장치. 체결 알림이 자동 매도의 체결을 알아보는 데도 쓴다.
+    guard = AutoSellGuard()
+    fills = FillWatcher(kiwoom, notifier, realtime, guard)
     sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
     sl_tp_watch = SlTpWatcher(
-        kiwoom, sl_tp, accounts.positions, orders, AutoSellGuard(), realtime, now
+        kiwoom, sl_tp, accounts.positions, orders, guard, realtime, notifier, now
     )
     sl_tp.on_saved = sl_tp_watch.settings_saved
 

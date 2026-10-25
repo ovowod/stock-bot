@@ -2,8 +2,7 @@
 
 import asyncio
 import json
-import logging
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,7 +17,6 @@ from stock_bot import kiwoom as kiwoom_module
 from stock_bot.app import create_app
 from stock_bot.config import ENVIRONMENTS, Environment
 from stock_bot.kiwoom import KiwoomClient
-from stock_bot.logging_setup import JsonFormatter
 from stock_bot.notification import DiscordNotifier
 from stock_bot.order import OrderService
 from tests.fake_kiwoom import (
@@ -697,27 +695,6 @@ async def test_auto_sell_shares_the_connection_with_fill_watch(data_dir):
 
     assert len(realtime.connections) == 1
     assert {m["grp_no"] for m in connection.requests("REG")} == {"1", "2"}
-
-
-class JsonLines(logging.Handler):
-    """로그를 남기는 그 자리에서 JSON 한 줄로 만든다. 요청 ID는 그때의 context에서 읽힌다."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setFormatter(JsonFormatter())
-        self.lines: list[dict[str, Any]] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.lines.append(json.loads(self.format(record)))
-
-
-@pytest.fixture
-def json_logs() -> Iterator[JsonLines]:
-    handler = JsonLines()
-    root = logging.getLogger("stock_bot")
-    root.addHandler(handler)
-    yield handler
-    root.removeHandler(handler)
 
 
 async def test_trigger_order_and_result_logs_share_one_request_id(data_dir, json_logs):

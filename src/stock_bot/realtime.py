@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -84,6 +85,8 @@ class RealtimeEvent:
     detail: dict[str, Any] = field(default_factory=dict)
     # REGISTERED·REJECTED가 어느 그룹의 등록 결과인지. 함께 받는 항목은 SHARED_GROUP_NO다.
     group: str | None = None
+    # 받은 때의 경과 시간 시계(time.monotonic). 큐에서 기다린 시간까지 재는 데 쓴다.
+    received_clock: float = field(default_factory=time.monotonic)
 
 
 EventHandler = Callable[[RealtimeEvent], Awaitable[None]]
@@ -200,11 +203,12 @@ class RealtimeHub:
         self._links.clear()
 
     async def _notify_replaced(self, link: _Link, features: list[str]) -> None:
+        # 그 연결로 동작하던 기능을 모두 적는다. 체결 감시만 있으면 "체결 감시 중단"이다.
         stopped = "·".join(features) or "실시간 감시"
         await self._notifier.send(
             f"[{link.labels}]",
             embed=Embed(
-                title="체결 감시 중단",
+                title=f"{stopped} 중단",
                 description=(
                     f"다른 곳에서 같은 앱 키로 접속해 이 서버의 {stopped}를 멈춥니다. "
                     "다시 지켜보려면 이 서버를 재시작하세요."

@@ -128,7 +128,12 @@ test("자동매매 → SL / TP에서 안내 문구와 빈 설정을 보여준다
 
   expect(loads).toEqual(["domestic_paper"]);
   await expect(page.getByText("평균 매입가 대비 수익률이 익절 기준 이상이거나 손절 기준 이하가 되면")).toBeVisible();
-  await expect(page.getByText("자동매도는 아직 동작하지 않습니다. 지금은 설정만 저장됩니다.")).toBeVisible();
+  await expect(
+    page.getByText(
+      "이 화면을 닫아도 서버가 켜져 있으면 동작합니다. 서버와 키움의 연결이 끊긴 동안에는 판정하지 않습니다.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByText("아직 동작하지 않습니다")).toHaveCount(0);
   await expect(page.getByText("제외종목이 없습니다")).toBeVisible();
   await expect(page.getByText("모든 SL/TP 세션에 똑같이 적용됩니다")).toBeVisible();
   await expect(saveButton(page)).toBeDisabled();

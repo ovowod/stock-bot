@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
@@ -10,6 +11,7 @@ from stock_bot import app as app_module
 from stock_bot import kiwoom
 from stock_bot.app import create_app
 from tests.fake_kiwoom import FAKE_ENV
+from tests.log_capture import JsonLines
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -67,3 +69,12 @@ def no_call_interval(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture
+def json_logs() -> Iterator[JsonLines]:
+    handler = JsonLines()
+    root = logging.getLogger("stock_bot")
+    root.addHandler(handler)
+    yield handler
+    root.removeHandler(handler)
