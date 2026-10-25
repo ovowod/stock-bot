@@ -420,11 +420,17 @@ export interface SlTpDraft {
   sessions: SlTpSession[];
 }
 
+/** 정규장. HH:MM, 그 시장의 시간대 기준. */
+export interface RegularHours {
+  start: string;
+  end: string;
+}
+
 export interface SlTpSettings extends SlTpDraft {
   environment: EnvironmentValue;
   market: "domestic" | "us";
   timezone: string;
-  regular_hours: { start: string; end: string };
+  regular_hours: RegularHours;
   /** 실전투자는 false. SL/TP 세션을 켤 수 없다. */
   can_enable: boolean;
   updated_at: string | null;

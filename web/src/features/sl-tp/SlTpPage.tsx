@@ -1,16 +1,25 @@
 import { Info, LoaderCircle, Plus, Search, Trash2, X } from "lucide-react";
-import type { EnvironmentValue, ExcludedStock, SlTpSession, SlTpSettings, StockSearchItem } from "../../api";
+import type { EnvironmentValue, ExcludedStock, RegularHours, SlTpSession, SlTpSettings, StockSearchItem } from "../../api";
 import { findEnvironment } from "../../environments";
 import { ErrorNotice, Panel } from "../account/parts";
 import { useStockSearch } from "../search/useStockSearch";
-import { nextSession, sessionErrors, STOP_LOSS_RANGE, TAKE_PROFIT_RANGE, TIMEZONE_NAMES, validPercent } from "./rules";
+import {
+  hasErrors,
+  nextSession,
+  sessionErrors,
+  STOP_LOSS_RANGE,
+  TAKE_PROFIT_RANGE,
+  TIMEZONE_NAMES,
+  validPercent,
+  type SessionErrors,
+} from "./rules";
 import { useSlTp } from "./useSlTp";
 
 export function SlTpPage({ environment }: { environment: EnvironmentValue }) {
   const env = findEnvironment(environment);
   const { state, draft, setDraft, dirty, saving, save, retry } = useSlTp(environment);
   const errors = state.status === "ready" ? sessionErrors(draft.sessions, state.saved.regular_hours) : [];
-  const invalid = errors.some((error) => error !== null);
+  const invalid = hasErrors(errors);
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -187,7 +196,7 @@ function SessionsSection({
 }: {
   settings: SlTpSettings;
   sessions: SlTpSession[];
-  errors: (string | null)[];
+  errors: SessionErrors[];
   disabled: boolean;
   onChange: (sessions: SlTpSession[]) => void;
 }) {
@@ -214,6 +223,8 @@ function SessionsSection({
           {sessions.map((session, index) => {
             const n = index + 1;
             const error = errors[index];
+            // 안내를 그 칸의 설명(aria-describedby)으로 이어, 화면 낭독기도 칸과 함께 읽는다.
+            const ids = { time: `sl-tp-${n}-time`, takeProfit: `sl-tp-${n}-take-profit`, stopLoss: `sl-tp-${n}-stop-loss` };
             return (
               <li key={index} className="rounded-2xl bg-canvas p-4">
                 {/* 좁은 화면에서도 줄이 어긋나지 않게 제목·스위치, 시각, 기준을 한 줄씩 둔다. */}
@@ -240,6 +251,7 @@ function SessionsSection({
                     label={`${n}번째 세션 시작 시각`}
                     value={session.start}
                     hours={hours}
+                    describedBy={error.time ? ids.time : undefined}
                     disabled={disabled}
                     onChange={(start) => update(index, { start })}
                   />
@@ -248,30 +260,40 @@ function SessionsSection({
                     label={`${n}번째 세션 종료 시각`}
                     value={session.end}
                     hours={hours}
+                    describedBy={error.time ? ids.time : undefined}
                     disabled={disabled}
                     onChange={(end) => update(index, { end })}
                   />
                 </div>
+                <FieldError id={ids.time} message={error.time} />
                 <div className="mt-2 grid grid-cols-2 gap-2">
-                  <PercentInput
-                    name="익절"
-                    sign="+"
-                    label={`${n}번째 세션 익절 기준(%)`}
-                    value={session.take_profit}
-                    disabled={disabled}
-                    onChange={(take_profit) => update(index, { take_profit })}
-                  />
-                  <PercentInput
-                    name="손절"
-                    sign="−"
-                    label={`${n}번째 세션 손절 기준(%)`}
-                    value={session.stop_loss}
-                    disabled={disabled}
-                    onChange={(stop_loss) => update(index, { stop_loss })}
-                  />
+                  <div className="min-w-0">
+                    <PercentInput
+                      name="익절"
+                      sign="+"
+                      label={`${n}번째 세션 익절 기준(%)`}
+                      value={session.take_profit}
+                      describedBy={error.takeProfit ? ids.takeProfit : undefined}
+                      disabled={disabled}
+                      onChange={(take_profit) => update(index, { take_profit })}
+                    />
+                    <FieldError id={ids.takeProfit} message={error.takeProfit} />
+                  </div>
+                  <div className="min-w-0">
+                    <PercentInput
+                      name="손절"
+                      sign="−"
+                      label={`${n}번째 세션 손절 기준(%)`}
+                      value={session.stop_loss}
+                      describedBy={error.stopLoss ? ids.stopLoss : undefined}
+                      disabled={disabled}
+                      onChange={(stop_loss) => update(index, { stop_loss })}
+                    />
+                    <FieldError id={ids.stopLoss} message={error.stopLoss} />
+                  </div>
                 </div>
+                <FieldError message={error.criteria} />
                 <Summary session={session} />
-                {error && <p className="mt-2 text-sm font-semibold text-real">{error}</p>}
               </li>
             );
           })}
@@ -297,12 +319,14 @@ function TimeInput({
   label,
   value,
   hours,
+  describedBy,
   disabled,
   onChange,
 }: {
   label: string;
   value: string;
-  hours: { start: string; end: string };
+  hours: RegularHours;
+  describedBy: string | undefined;
   disabled: boolean;
   onChange: (value: string) => void;
 }) {
@@ -310,6 +334,7 @@ function TimeInput({
     <input
       type="time"
       aria-label={label}
+      aria-describedby={describedBy}
       value={value}
       min={hours.start}
       max={hours.end}
@@ -362,6 +387,7 @@ function PercentInput({
   sign,
   label,
   value,
+  describedBy,
   disabled,
   onChange,
 }: {
@@ -369,6 +395,7 @@ function PercentInput({
   sign: string;
   label: string;
   value: string | null;
+  describedBy: string | undefined;
   disabled: boolean;
   onChange: (value: string | null) => void;
 }) {
@@ -383,6 +410,7 @@ function PercentInput({
           type="text"
           inputMode="decimal"
           aria-label={label}
+          aria-describedby={describedBy}
           value={value ?? ""}
           placeholder="없음"
           maxLength={8}
@@ -395,6 +423,15 @@ function PercentInput({
         </span>
       </span>
     </label>
+  );
+}
+
+function FieldError({ id, message }: { id?: string; message: string | null }) {
+  if (!message) return null;
+  return (
+    <p id={id} className="mt-1.5 text-sm font-semibold text-real">
+      {message}
+    </p>
   );
 }
 

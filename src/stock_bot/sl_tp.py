@@ -3,7 +3,6 @@
 매도 동작은 아직 없다. 설정을 읽고, 검사하고, 저장하기만 한다.
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -14,7 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from stock_bot.config import Environment, EnvironmentSpec, Market
+from stock_bot.config import EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.logging_setup import log
 
@@ -25,8 +24,9 @@ TIMEZONES = {Market.DOMESTIC: "Asia/Seoul", Market.US: "America/New_York"}
 # 정규장. 휴장일·단축 거래일은 다루지 않는다(spec의 Out of Scope).
 REGULAR_HOURS = {Market.DOMESTIC: ("09:00", "15:30"), Market.US: ("09:30", "16:00")}
 US_EXCHANGES = ("NYSE", "NASDAQ", "AMEX")
-_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
-_PERCENT = re.compile(r"^\d+(\.\d{1,2})?$")
+# fullmatch로 검사한다. "$"는 끝의 줄바꿈 앞에서도 맞고, \d는 아라비아 숫자 등도 받는다.
+_TIME = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
+_PERCENT = re.compile(r"[0-9]+(\.[0-9]{1,2})?")
 # 익절·손절 기준(%)의 범위. 손절 기준은 양수로 두고 손실률을 뜻한다.
 TAKE_PROFIT_RANGE = (Decimal("0.01"), Decimal("1000"))
 STOP_LOSS_RANGE = (Decimal("0.01"), Decimal("99.99"))
@@ -35,7 +35,6 @@ STOP_LOSS_RANGE = (Decimal("0.01"), Decimal("99.99"))
 class SlTpSettingsStore:
     def __init__(self, directory: Path) -> None:
         self._directory = directory
-        self._locks: dict[Environment, asyncio.Lock] = {}
 
     def _path(self, spec: EnvironmentSpec) -> Path:
         return self._directory / f"{spec.environment.value}.json"
@@ -49,16 +48,23 @@ class SlTpSettingsStore:
         try:
             settings = _validate(payload, spec.market)
         except AppError as exc:
-            log(logger, logging.WARNING, "sl_tp_settings_rejected", cause=exc.message)
+            log(
+                logger,
+                logging.WARNING,
+                "sl_tp_settings_rejected",
+                cause=exc.message,
+                **_payload_counts(payload),
+            )
             raise
+        counts = _counts(settings)
         # 매도 동작이 붙어도 실전 계좌가 갑자기 매도되지 않게, 실전에서는 켜 둘 수 없다.
-        if spec.is_real and _counts(settings)["enabled_count"]:
-            log(logger, logging.WARNING, "sl_tp_enable_refused", **_counts(settings))
+        if spec.is_real and counts["enabled_count"]:
+            log(logger, logging.WARNING, "sl_tp_enable_refused", **counts)
             raise _enable_not_allowed()
         settings["updated_at"] = datetime.now(UTC).isoformat(timespec="seconds")
-        async with self._locks.setdefault(spec.environment, asyncio.Lock()):
-            self._write(spec, settings)
-        log(logger, logging.INFO, "sl_tp_settings_saved", **_counts(settings))
+        # 쓰기는 await 없이 끝나므로 같은 환경의 저장이 서로 섞이지 않는다.
+        self._write(spec, settings)
+        log(logger, logging.INFO, "sl_tp_settings_saved", **counts)
         return _response(spec, settings)
 
     def _load(self, spec: EnvironmentSpec) -> dict[str, Any]:
@@ -75,11 +81,19 @@ class SlTpSettingsStore:
             settings = _validate(data, spec.market)
             if spec.is_real and _counts(settings)["enabled_count"]:
                 raise _enable_not_allowed()
-        except (OSError, ValueError) as exc:
-            cause = str(exc)
-            raise _unreadable(path, cause) from exc
-        except AppError as exc:
-            raise _unreadable(path, exc.message) from exc
+        except (OSError, ValueError, AppError) as exc:
+            cause = exc.message if isinstance(exc, AppError) else str(exc)
+            log(
+                logger,
+                logging.ERROR,
+                "sl_tp_settings_unreadable",
+                path=str(path),
+                error_type=type(exc).__name__,
+                cause=cause,
+            )
+            raise AppError(
+                "sl_tp_settings_unreadable", "SL / TP 설정 파일을 읽지 못했습니다.", 500
+            ) from exc
         settings["updated_at"] = updated_at
         return settings
 
@@ -116,11 +130,6 @@ def _enable_not_allowed() -> AppError:
     return AppError("sl_tp_enable_not_allowed", "실전투자에서는 SL/TP 세션을 켤 수 없습니다.", 403)
 
 
-def _unreadable(path: Path, cause: str) -> AppError:
-    log(logger, logging.ERROR, "sl_tp_settings_unreadable", path=str(path), cause=cause)
-    return AppError("sl_tp_settings_unreadable", "SL / TP 설정 파일을 읽지 못했습니다.", 500)
-
-
 def _response(spec: EnvironmentSpec, settings: dict[str, Any]) -> dict[str, Any]:
     start, end = REGULAR_HOURS[spec.market]
     return {
@@ -141,6 +150,17 @@ def _counts(settings: dict[str, Any]) -> dict[str, int]:
         "session_count": len(settings["sessions"]),
         "enabled_count": sum(1 for session in settings["sessions"] if session["enabled"]),
     }
+
+
+def _payload_counts(payload: Any) -> dict[str, int]:
+    """검사를 통과하지 못한 요청도 로그에서 크기를 가늠할 수 있게 목록 길이만 센다."""
+    counts: dict[str, int] = {}
+    if isinstance(payload, dict):
+        if isinstance(payload.get("excluded"), list):
+            counts["excluded_count"] = len(payload["excluded"])
+        if isinstance(payload.get("sessions"), list):
+            counts["session_count"] = len(payload["sessions"])
+    return counts
 
 
 def _invalid(message: str) -> AppError:
@@ -197,8 +217,8 @@ def _validate_sessions(items: list[Any], market: Market) -> list[dict[str, Any]]
         if not isinstance(item, dict):
             raise _invalid(f"{where}: 형식이 올바르지 않습니다.")
         start, end = item.get("start"), item.get("end")
-        if not (isinstance(start, str) and _TIME.match(start)) or not (
-            isinstance(end, str) and _TIME.match(end)
+        if not (isinstance(start, str) and _TIME.fullmatch(start)) or not (
+            isinstance(end, str) and _TIME.fullmatch(end)
         ):
             raise _invalid(f"{where}: 시각은 HH:MM 형식이어야 합니다.")
         if start >= end:
@@ -234,6 +254,10 @@ def _percent(value: Any, bounds: tuple[Decimal, Decimal], name: str) -> str | No
     if value is None:
         return None
     low, high = bounds
-    if not isinstance(value, str) or not _PERCENT.match(value) or not low <= Decimal(value) <= high:
+    if (
+        not isinstance(value, str)
+        or not _PERCENT.fullmatch(value)
+        or not low <= Decimal(value) <= high
+    ):
         raise _invalid(f"{name}은 {low}~{high} 사이, 소수점 둘째 자리까지의 숫자여야 합니다.")
     return value

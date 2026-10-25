@@ -375,17 +375,25 @@ test("세션마다 켜고 익절·손절 기준을 정해 저장한다", async (
   ]);
 });
 
-test("잘못된 익절·손절 기준은 안내하고 저장을 막는다", async ({ page }) => {
+test("잘못된 익절·손절 기준은 그 칸에 안내하고 저장을 막는다", async ({ page }) => {
   await mockSlTp(page, { load: (environment) => ({ body: settings(environment, { sessions: [off("09:00", "10:00")] }) }) });
   await openSlTp(page);
-  const item = sessionList(page).getByRole("listitem").first();
+  const takeProfitError = "익절 기준은 0.01~1000 사이, 소수점 둘째 자리까지의 숫자여야 합니다.";
+  const stopLossError = "손절 기준은 0.01~99.99 사이, 소수점 둘째 자리까지의 숫자여야 합니다.";
 
   await takeProfit(page, 1).fill("1.234");
-  await expect(item).toContainText("익절 기준은 0.01~1000 사이, 소수점 둘째 자리까지의 숫자여야 합니다.");
+  await expect(takeProfit(page, 1)).toHaveAccessibleDescription(takeProfitError);
   await expect(saveButton(page)).toBeDisabled();
+  // 시각과 기준이 함께 틀리면 둘 다 보인다.
+  await endInput(page, 1).fill("08:30");
+  await expect(startInput(page, 1)).toHaveAccessibleDescription("시작 시각이 종료 시각보다 빨라야 합니다.");
+  await expect(takeProfit(page, 1)).toHaveAccessibleDescription(takeProfitError);
+  await endInput(page, 1).fill("10:00");
+
   await takeProfit(page, 1).fill("1000");
+  await expect(takeProfit(page, 1)).toHaveAccessibleDescription("");
   await stopLoss(page, 1).fill("100");
-  await expect(item).toContainText("손절 기준은 0.01~99.99 사이, 소수점 둘째 자리까지의 숫자여야 합니다.");
+  await expect(stopLoss(page, 1)).toHaveAccessibleDescription(stopLossError);
   await stopLoss(page, 1).fill("");
   await expect(saveButton(page)).toBeEnabled();
 });
@@ -558,5 +566,6 @@ test("로그인이 만료되면 묻지 않고 저장하지 않은 입력을 버�
   await expect(page.getByLabel("비밀번호")).toBeVisible();
   await expect(page.getByText("로그인이 만료되었습니다. 다시 로그인하세요.")).toBeVisible();
   await expect.poll(() => beforeUnloadBlocked(page)).toBe(false);
+  await expect(page.getByText("SL / TP 설정을 저장하지 못했습니다")).toBeHidden();
   expect(asked).toEqual([]);
 });

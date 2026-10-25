@@ -11,7 +11,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { EnvironmentValue } from "./api";
 import { ENVIRONMENTS, findEnvironment, loadEnvironment, saveEnvironment } from "./environments";
 import { AccountPage } from "./features/account/AccountPage";
@@ -87,7 +87,6 @@ export default function App() {
   const [unsaved, setUnsaved] = useState(false);
   const current = findEnvironment(environment);
   const feature = FEATURES.find((f) => f.id === featureId) ?? FEATURES[0];
-  const reportUnsaved = useCallback((dirty: boolean) => setUnsaved(dirty), []);
 
   /**
    * 사용자가 화면을 떠나려 할 때 저장하지 않은 변경이 있으면 묻는다.
@@ -195,7 +194,7 @@ export default function App() {
         )}
 
         <main className="min-w-0 flex-1 px-4 py-6 md:px-8 md:py-8">
-          <ReportUnsavedChanges.Provider value={reportUnsaved}>
+          <ReportUnsavedChanges.Provider value={setUnsaved}>
             <OrderPanelProvider key={environment} environment={environment}>
               {feature.render(environment)}
             </OrderPanelProvider>

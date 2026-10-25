@@ -109,6 +109,19 @@ def test_broken_file_is_reported_and_left_untouched(make_client, data_dir):
     assert path.read_text() == "{not json"
 
 
+def test_unreadable_file_is_logged_with_error_type(make_client, data_dir, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    path = data_dir / "sl-tp" / "domestic_paper.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+
+    make_client().get(GET.format("domestic_paper"))
+
+    events = {r.getMessage(): getattr(r, "fields", {}) for r in caplog.records}
+    assert events["sl_tp_settings_unreadable"]["error_type"] == "JSONDecodeError"
+    assert events["sl_tp_settings_unreadable"]["path"].endswith("domestic_paper.json")
+
+
 def test_file_breaking_the_rules_is_unreadable(make_client, data_dir):
     path = data_dir / "sl-tp" / "domestic_paper.json"
     path.parent.mkdir(parents=True)
@@ -183,6 +196,8 @@ def test_save_and_rejection_are_logged_with_counts(make_client, caplog):
     assert events["sl_tp_settings_saved"]["excluded_count"] == 1
     assert events["sl_tp_settings_saved"]["enabled_count"] == 0
     assert "2번째 제외종목" in events["sl_tp_settings_rejected"]["cause"]
+    assert events["sl_tp_settings_rejected"]["excluded_count"] == 2
+    assert events["sl_tp_settings_rejected"]["session_count"] == 0
     assert "삼성전자" not in str(events["sl_tp_settings_saved"])
 
 
@@ -240,6 +255,8 @@ def test_sessions_may_touch_and_keep_their_order(make_client):
         ("domestic_paper", [session("9:00", "10:00")], "1번째 SL/TP 세션: 시각은 HH:MM"),
         ("domestic_paper", [session("09:60", "10:00")], "1번째 SL/TP 세션: 시각은 HH:MM"),
         ("domestic_paper", [session("09:00", None)], "1번째 SL/TP 세션: 시각은 HH:MM"),
+        ("domestic_paper", [session("09:00\n", "10:00")], "1번째 SL/TP 세션: 시각은 HH:MM"),
+        ("domestic_paper", [session("０9:00", "10:00")], "1번째 SL/TP 세션: 시각은 HH:MM"),
         ("domestic_paper", ["09:00"], "1번째 SL/TP 세션: 형식이 올바르지 않습니다."),
     ],
 )
@@ -283,6 +300,8 @@ def test_paper_sessions_save_switch_and_thresholds(make_client, take_profit, sto
         ({"take_profit": "1000.01"}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
         ({"take_profit": 5}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
         ({"take_profit": "abc"}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
+        ({"take_profit": "5\n"}, "1번째 SL/TP 세션: 익절 기준은 0.01~1000"),
+        ({"stop_loss": "٥"}, "1번째 SL/TP 세션: 손절 기준은 0.01~99.99"),
         ({"stop_loss": "100"}, "1번째 SL/TP 세션: 손절 기준은 0.01~99.99"),
         ({"stop_loss": "0.001"}, "1번째 SL/TP 세션: 손절 기준은 0.01~99.99"),
         ({"enabled": "yes"}, "1번째 SL/TP 세션: 켜짐 여부가 올바르지 않습니다."),
