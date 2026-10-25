@@ -432,7 +432,8 @@ class KiwoomClient:
                 api_id=api_id,
                 target=url,
                 http_status=response.status_code,
-                body_head=response.text[:_LOG_BODY_LIMIT],
+                # 자른 뒤에는 비밀값을 알아볼 수 없으므로 먼저 가린다.
+                body_head=secrets.mask(response.text)[:_LOG_BODY_LIMIT],
                 elapsed_ms=elapsed_ms,
             )
             raise response_format_error(api_id, f"HTTP {response.status_code}, return_code 없음")
