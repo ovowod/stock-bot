@@ -203,16 +203,18 @@ class _Link:
         self._task: asyncio.Task[None] | None = None
         self._connection_no = 0
         self.stopped = False
+        # 마지막 구독이 해지돼 연결을 닫았다. 그사이 새 구독이 생겼으면 기다리지 않고 다시 연다.
+        self._closed_idle = False
 
     def changed(self) -> None:
         """구독이 바뀌었다. 구독이 하나라도 생기면 그때 연결을 연다."""
         self._changed.set()
-        if (
-            self._task is None
-            and not self.stopped
-            and any(c.subscription is not None for c in self.channels)
-        ):
+        if self._task is None and not self.stopped and not self._idle():
             self._task = asyncio.create_task(self._run())
+
+    def _idle(self) -> bool:
+        """구독이 하나도 없다. 같은 앱 키의 다른 서버를 끊지 않게 연결해 두지 않는다."""
+        return all(c.subscription is None for c in self.channels)
 
     async def stop(self) -> None:
         self.stopped = True
@@ -234,12 +236,22 @@ class _Link:
         try:
             # 끊긴 동안의 이벤트는 보충하지 않는다. 다시 연결해 등록만 한다.
             delay = RECONNECT_INITIAL_SECONDS
-            while True:
+            while not self._idle():
                 if await self._session():
                     delay = RECONNECT_INITIAL_SECONDS
+                if self._closed_idle:
+                    # 실패로 끊긴 것이 아니므로 재연결 대기 없이 루프 조건만 다시 본다.
+                    self._closed_idle = False
+                    continue
+                if self._idle():
+                    # 끊긴 동안 구독이 모두 해지됐다. 다시 연결하지 않는다.
+                    break
                 log(logger, logging.WARNING, "realtime_reconnect_wait", wait_seconds=delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_SECONDS)
+            # 확인과 비우기 사이에 await가 없어, 그 뒤에 생긴 구독은 changed()가 새로 연결한다.
+            self._task = None
+            log(logger, logging.INFO, "realtime_idle_closed")
         except _SessionReplaced as replaced:
             # 같은 앱 키로 서버가 둘 떠 있으면 다시 연결할 때마다 서로를 끊어낸다.
             # 나중에 연결한 쪽이 지켜보도록 이 서버는 멈추고, 조용히 끊기지 않게 알린다.
@@ -388,6 +400,10 @@ class _Link:
                     continue
                 sent[channel] = channel.version
                 await self._apply(connection, number, replies, channel, registered)
+            if not registered and self._idle():
+                # 마지막 구독까지 해지했다. 연결을 닫는다.
+                self._closed_idle = True
+                return
             await self._changed.wait()
 
     async def _apply(

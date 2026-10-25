@@ -34,6 +34,8 @@ QUOTE_TYPES = {Market.DOMESTIC: "0B"}
 REGULAR_MARKET = {Market.DOMESTIC: "2"}
 # 공유 연결에서 SL / TP가 쓰는 그룹 번호. 체결 감시는 1을 쓴다.
 GROUP_NO = "2"
+# 지금 켜진 SL/TP 세션을 다시 계산하는 간격. 설정을 저장할 때도 다시 계산한다.
+SESSION_CHECK_SECONDS = 1.0
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 
@@ -57,10 +59,15 @@ class _Run:
     number: int
     day: date
     session: _Session
+    # 이 실행을 시작한 시각. 그보다 먼저 받은 시세는 앞 실행의 것이다(껐다 켠 경우 포함).
+    started_at: datetime
     triggered: set[str] = field(default_factory=set)
 
     def covers(self, found: tuple[date, _Session] | None) -> bool:
-        """그 날짜·세션이 이 실행의 것인가. 기준이 바뀌어도 같은 시간 범위면 같은 실행이다."""
+        """그 날짜·세션이 이 실행의 것인가. 기준이 바뀌어도 같은 시간 범위면 같은 실행이다.
+
+        시간 범위를 바꾸면 다른 세션으로 본다. 기준이나 제외종목만 바꿔야 실행이 이어진다.
+        """
         return found is not None and found[0] == self.day and found[1].span == self.session.span
 
 
@@ -103,16 +110,24 @@ class SlTpWatcher:
             await watch.stop()
         self._watches.clear()
 
+    def settings_saved(self, spec: EnvironmentSpec, settings: dict[str, Any]) -> None:
+        """설정 저장이 성공했다. 지켜보지 않는 환경(실전, 인증정보 없음)은 무시한다."""
+        for watch in self._watches:
+            if watch.spec is spec:
+                watch.settings_saved(settings)
+
 
 class _Watch:
     """투자 환경 하나의 SL / TP 실행."""
 
     def __init__(self, owner: SlTpWatcher, spec: EnvironmentSpec) -> None:
         self._owner = owner
-        self._spec = spec
+        self.spec = spec
         self._zone = ZoneInfo(TIMEZONES[spec.market])
-        # 밀려남·설정 읽기 실패·서버 종료로 멈췄다. 멈추면 판정도 주문도 하지 않는다.
+        # 밀려남·서버 종료로 멈췄다. 멈추면 판정도 주문도 하지 않는다.
         self._stopped = False
+        # 시작 때 설정 파일을 읽지 못했다. 정상 설정이 저장될 때까지 멈춰 있다.
+        self._settings_broken = False
         self._sessions: list[_Session] = []
         self._excluded: set[str] = set()
         self._run: _Run | None = None
@@ -131,15 +146,49 @@ class _Watch:
         self._channel = owner.hub.channel(spec, "sl_tp", "SL / TP", self._on_event)
 
     def start(self) -> None:
+        self._spawn(self._tick())
         try:
-            settings = self._owner.settings.read(self._spec)
+            settings = self._owner.settings.read(self.spec)
         except AppError as exc:
             # 깨진 설정을 빈 설정이나 옛 설정으로 착각해 동작하지 않는다.
-            self._stopped = True
+            self._settings_broken = True
             log(logger, logging.ERROR, "sl_tp_watch_stopped", reason=exc.kind, cause=exc.message)
             return
         self._apply(settings)
         self._refresh_run()
+
+    def settings_saved(self, settings: dict[str, Any]) -> None:
+        token = environment_var.set(self.spec.environment.value)
+        try:
+            self._settings_saved(settings)
+        finally:
+            environment_var.reset(token)
+
+    def _settings_saved(self, settings: dict[str, Any]) -> None:
+        if self._settings_broken:
+            log(logger, logging.INFO, "sl_tp_watch_resumed", reason="settings_saved")
+        self._settings_broken = False
+        excluded = self._excluded
+        self._apply(settings)
+        run = self._run
+        self._refresh_run()
+        if self._run is run and run is not None and excluded != self._excluded:
+            # 같은 실행 안에서 제외종목만 바뀌었다. 트리거 기록은 두고 구독만 맞춘다.
+            if self._holdings_ready:
+                self._subscribe()
+
+    async def _tick(self) -> None:
+        while True:
+            await asyncio.sleep(SESSION_CHECK_SECONDS)
+            try:
+                self._refresh_run()
+            except Exception as exc:
+                # 한 번의 계산 오류로 세션 전환이 멈추지 않게 한다.
+                logger.error(
+                    "sl_tp_session_check_failed",
+                    exc_info=exc,
+                    extra={"fields": {"error_type": type(exc).__name__}},
+                )
 
     async def stop(self) -> None:
         # 서버가 꺼질 때 진행 중인 주문 호출은 기다리지 않는다.
@@ -176,32 +225,44 @@ class _Watch:
 
     def _is_stopped(self) -> bool:
         # 밀려남은 채널 큐를 거치기 전에 공유 연결에서 바로 읽는다.
-        return self._stopped or self._channel.stopped
+        return self._stopped or self._settings_broken or self._channel.stopped
 
     def _refresh_run(self) -> None:
-        """지금 켜진 세션에 맞춰 SL/TP 세션 실행을 시작하거나 끝낸다."""
+        """지금 켜진 세션에 맞춰 SL/TP 세션 실행을 시작하거나 끝낸다.
+
+        시각이 되어 시작, 다른 세션으로 넘어감, OFF→ON, 다음 날 같은 세션은 모두 새 실행이다.
+        """
+        if self._is_stopped():
+            return
         found = self._session_at(self._owner.now())
+        run = self._run
+        if run is not None and found is not None and run.covers(found):
+            # 같은 세션 안에서 기준만 바뀌면 실행 번호와 트리거 기록을 그대로 둔다.
+            run.session = found[1]
+            return
+        if run is not None:
+            log(logger, logging.INFO, "sl_tp_session_ended", **self._run_fields(run))
+            self._run = None
+            self._holdings_ready = False
         if found is None:
-            if self._run is not None:
-                log(logger, logging.INFO, "sl_tp_session_ended", **self._run_fields(self._run))
-                self._run = None
+            if run is not None:
                 self._channel.subscribe(None)
             return
         day, session = found
-        run = self._run
-        if run is not None and run.covers(found):
-            # 같은 세션 안에서 기준만 바뀌면 실행 번호와 트리거 기록을 그대로 둔다.
-            run.session = session
-            return
         self._runs += 1
-        self._run = _Run(self._runs, day, session)
-        log(logger, logging.INFO, "sl_tp_session_started", **self._run_fields(self._run))
-        self._holdings_ready = False
+        self._run = _Run(self._runs, day, session, self._owner.now())
+        log(
+            logger,
+            logging.INFO,
+            "sl_tp_session_started",
+            **self._run_fields(self._run),
+            previous_run=None if run is None else run.number,
+        )
         self._spawn(self._load_holdings(self._run))
 
     async def _load_holdings(self, run: _Run) -> None:
         try:
-            rows = await self._owner.positions(self._spec)
+            rows = await self._owner.positions(self.spec)
         except AppError as exc:
             log(
                 logger,
@@ -255,11 +316,11 @@ class _Watch:
             self._channel.subscribe(None)
             return
         self._channel.subscribe(
-            Subscription(GROUP_NO, codes, [QUOTE_TYPES[self._spec.market]], refresh="0")
+            Subscription(GROUP_NO, codes, [QUOTE_TYPES[self.spec.market]], refresh="0")
         )
 
     async def _on_event(self, event: RealtimeEvent) -> None:
-        environment_var.set(self._spec.environment.value)
+        environment_var.set(self.spec.environment.value)
         if event.kind is EventKind.CONNECTED:
             self._connection = event.connection
             self._connected = True
@@ -289,7 +350,9 @@ class _Watch:
         if run is None:
             self._skip(code, "outside_session")
             return
-        if not run.covers(self._session_at(event.received_at)):
+        if event.received_at < run.started_at or not run.covers(
+            self._session_at(event.received_at)
+        ):
             # 큐 처리가 세션 경계를 넘어 밀려도 앞 세션의 시세를 지금 세션 기준으로 판정하지 않는다.
             log(logger, logging.DEBUG, "sl_tp_quote_dropped", code=code, reason="other_run")
             return
@@ -327,7 +390,7 @@ class _Watch:
                 rate=str(rate),
                 threshold=str(threshold),
             )
-            if not self._owner.guard.claim(self._spec.environment, code):
+            if not self._owner.guard.claim(self.spec.environment, code):
                 log(logger, logging.INFO, "auto_sell_skipped", code=code, reason="in_progress")
                 return
             # 시세 처리는 주문 결과를 기다리지 않는다.
@@ -344,7 +407,7 @@ class _Watch:
             return "subscription_rejected"
         if not self._holdings_ready:
             return "holdings_pending"
-        if str(values.get("290", "")).strip() != REGULAR_MARKET[self._spec.market]:
+        if str(values.get("290", "")).strip() != REGULAR_MARKET[self.spec.market]:
             return "not_regular_market"
         if code not in self._holdings or code in self._excluded:
             return "not_watched"
@@ -379,10 +442,10 @@ class _Watch:
         return None
 
     async def _sell(self, run: _Run, code: str, request_id: str) -> None:
-        environment = self._spec.environment
+        environment = self.spec.environment
         try:
             result = await self._owner.orders.sell_all_at_market(
-                self._spec,
+                self.spec,
                 code,
                 exchange="",
                 order_key=f"sl-tp-{request_id}",
@@ -430,7 +493,7 @@ class _Watch:
         연결 끊김만으로는 취소하지 않는다. 끊기기 전 체결가는 실제 체결이었다.
         """
         reason = None
-        if self._spec.is_real:
+        if self.spec.is_real:
             reason = "real_trading"
         elif self._is_stopped():
             reason = "stopped"

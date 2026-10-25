@@ -343,3 +343,22 @@ async def test_unanswered_registration_keeps_growing_the_reconnect_wait(
         await wait_until(lambda: len(reconnect_waits(caplog)) >= 3)
 
     assert reconnect_waits(caplog)[:3] == [0.01, 0.02, 0.04]
+
+
+async def test_connection_closes_when_the_last_subscription_is_removed_and_reopens_later():
+    # 구독이 하나도 없는 인증정보는 연결해 두지 않는다.
+    # ADR 0001: 같은 앱 키를 쓰는 다른 서버를 끊지 않게 한다.
+    realtime = FakeRealtime()
+    async with hub_with(realtime) as hub:
+        quotes = hub.channel(DOMESTIC_PAPER, "sl_tp", "SL / TP", Recorder())
+        quotes.subscribe(QUOTES)
+        [first] = await realtime.wait_registered()
+        quotes.subscribe(None)
+        await wait_until(lambda: first.closed)
+        assert first.requests("REMOVE")
+        await asyncio.sleep(0.05)
+        assert len(realtime.connections) == 1
+        quotes.subscribe(QUOTES)
+        second = (await realtime.wait_registered(2))[1]
+
+    assert second.sent_trnm() == ["LOGIN", "REG"]

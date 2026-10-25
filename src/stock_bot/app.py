@@ -107,6 +107,7 @@ def create_app(
     sl_tp_watch = SlTpWatcher(
         kiwoom, sl_tp, accounts.positions, orders, AutoSellGuard(), realtime, now
     )
+    sl_tp.on_saved = sl_tp_watch.settings_saved
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

@@ -1,6 +1,6 @@
 """SL / TP 설정: 투자 환경마다 제외종목과 SL/TP 세션을 JSON 파일 하나로 보관한다.
 
-매도 동작은 아직 없다. 설정을 읽고, 검사하고, 저장하기만 한다.
+설정을 읽고, 검사하고, 저장한다. 저장이 성공하면 on_saved에 새 설정을 알린다.
 """
 
 import json
@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -32,9 +33,14 @@ TAKE_PROFIT_RANGE = (Decimal("0.01"), Decimal("1000"))
 STOP_LOSS_RANGE = (Decimal("0.01"), Decimal("99.99"))
 
 
+# 저장이 성공하면 (투자 환경, 읽기 API와 같은 모양의 설정)으로 부른다.
+SettingsListener = Callable[[EnvironmentSpec, dict[str, Any]], None]
+
+
 class SlTpSettingsStore:
     def __init__(self, directory: Path) -> None:
         self._directory = directory
+        self.on_saved: SettingsListener | None = None
 
     def _path(self, spec: EnvironmentSpec) -> Path:
         return self._directory / f"{spec.environment.value}.json"
@@ -65,7 +71,18 @@ class SlTpSettingsStore:
         # 쓰기는 await 없이 끝나므로 같은 환경의 저장이 서로 섞이지 않는다.
         self._write(spec, settings)
         log(logger, logging.INFO, "sl_tp_settings_saved", **counts)
-        return _response(spec, settings)
+        response = _response(spec, settings)
+        if self.on_saved is not None:
+            # 이미 저장했다. 반영 쪽 오류로 저장 결과를 실패로 돌려주지 않는다.
+            try:
+                self.on_saved(spec, response)
+            except Exception as exc:
+                logger.error(
+                    "sl_tp_settings_listener_failed",
+                    exc_info=exc,
+                    extra={"fields": {"error_type": type(exc).__name__}},
+                )
+        return response
 
     def _load(self, spec: EnvironmentSpec) -> dict[str, Any]:
         path = self._path(spec)
