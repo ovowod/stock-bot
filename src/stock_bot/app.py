@@ -30,7 +30,7 @@ from stock_bot.config import (
     parse_environment,
 )
 from stock_bot.errors import AppError
-from stock_bot.fill_watch import FillWatcher, RealtimeConnect, connect_websocket
+from stock_bot.fill_watch import FillWatcher
 from stock_bot.kiwoom import KST, KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
@@ -39,6 +39,7 @@ from stock_bot.open_order import OpenOrderService
 from stock_bot.order import OrderService
 from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
+from stock_bot.realtime import RealtimeConnect, RealtimeHub, connect_websocket
 from stock_bot.sl_tp import SlTpSettingsStore
 from stock_bot.stock_search import StockSearchService, today_kst
 
@@ -59,7 +60,9 @@ def create_app(
     clock: Callable[[], float] | None = None,
     notifier: DiscordNotifier | None = None,
     realtime_connect: RealtimeConnect | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> FastAPI:
+    """clock은 로그인 만료용 경과 시간이고, now는 시간대가 붙은 현재 시각이다."""
     setup_logging(log_dir)
     if environ is None:
         load_env_file()
@@ -95,7 +98,10 @@ def create_app(
         lambda spec: open_orders.orders(spec, listing_required=True),
         on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
     )
-    fills = FillWatcher(kiwoom, notifier, realtime_connect or connect_websocket)
+    realtime = RealtimeHub(
+        kiwoom, notifier, realtime_connect or connect_websocket, now or (lambda: datetime.now(UTC))
+    )
+    fills = FillWatcher(kiwoom, notifier, realtime)
     sl_tp = SlTpSettingsStore(data_dir / "sl-tp")
 
     @asynccontextmanager
@@ -105,6 +111,7 @@ def create_app(
             yield
         finally:
             await fills.stop()
+            await realtime.stop()
 
     app = FastAPI(
         title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
