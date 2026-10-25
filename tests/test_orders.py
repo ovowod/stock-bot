@@ -88,6 +88,19 @@ def test_invalid_orders_are_rejected_without_calling_kiwoom(make_client):
     assert fake.requests == []
 
 
+def test_order_key_is_logged_on_receipt_even_when_the_order_is_rejected(make_client, caplog):
+    """입력 검사·실전 차단으로 끝난 요청도 주문 키로 찾을 수 있다."""
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    client = make_client()
+    client.post(DOMESTIC_URL, json=domestic_order(order_key="key-bad", quantity="0"))
+    client.post("/api/environments/domestic_real/orders", json=domestic_order(order_key="key-real"))
+    client.post(DOMESTIC_URL, content=b"not json")
+
+    received = [r for r in caplog.records if r.getMessage() == "order_received"]
+    keys = [getattr(r, "fields", {})["order_key"] for r in received]
+    assert keys == ["key-bad", "key-real", None]
+
+
 def test_twelve_digit_values_are_passed_to_kiwoom_as_typed(make_client):
     fake = FakeKiwoom().reply("kt10000", ORDER_REPLY)
     response = make_client(fake).post(
@@ -136,6 +149,7 @@ def test_order_events_are_logged_with_the_order_key(make_client, caplog):
     make_client(fake).post(DOMESTIC_URL, json=domestic_order(order_key="key-77"))
 
     events = {r.getMessage(): getattr(r, "fields", {}) for r in caplog.records}
+    assert events["order_received"]["order_key"] == "key-77"
     assert events["order_requested"]["order_key"] == "key-77"
     assert events["order_requested"]["quantity"] == "3"
     assert events["order_accepted"]["order_no"] == "00024"

@@ -85,9 +85,11 @@ class OrderService:
 
     async def place(self, spec: EnvironmentSpec, request: Any) -> dict[str, Any]:
         """request는 브라우저가 보낸 JSON 본문이다. 해석하지 못했으면 None이다."""
+        # 받은 즉시 주문 키를 남겨, 입력 검사나 실전 차단으로 끝난 요청도 추적할 수 있게 한다.
+        order_key = request.get("order_key") if isinstance(request, dict) else None
+        log(logger, logging.INFO, "order_received", order_key=order_key)
         # 실전투자는 입력 검사보다 먼저, 키움을 부르기 전에 막는다.
         if spec.is_real:
-            order_key = request.get("order_key") if isinstance(request, dict) else None
             log(logger, logging.WARNING, "order_blocked_real", order_key=order_key)
             raise AppError("order_not_allowed", "실전투자에서는 주문할 수 없습니다.", 403)
         order = _validate(request, spec.market)
