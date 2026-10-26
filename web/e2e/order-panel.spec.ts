@@ -188,6 +188,51 @@ test("현재가를 불러오지 못하면 안내를 보여주고, 입력 여부�
   await expect(dialog.getByLabel("가격 (원)")).toHaveValue("185,000");
 });
 
+test("호가 단위에 맞지 않는 현재가는 매수에 불리하지 않은 아래 호가로 채운다", async ({ page }) => {
+  // 2026-10-26 모의 서버가 213,750원을 현재가로 줬고, 그대로 주문하면 호가단위 오류로 거부됐다.
+  await mockApi(page, { domestic: [rankingItem("005930", "삼성전자", null, 213_500)], us: [] }, [], ({ code }) => ({
+    body: { code, price: 213_750, fetched_at: "2026-10-26T01:04:45+00:00" },
+  }));
+  await openDashboard(page);
+  await selectEnvironment(page, "국내 모의");
+  await selectMenu(page, "순위");
+  await tradingValueCard(page).getByRole("button", { name: /삼성전자/ }).click();
+
+  await expect(panel(page, "삼성전자").getByLabel("가격 (원)")).toHaveValue("213,500");
+});
+
+test("현재가를 불러오는 중에 패널을 닫으면 조회를 취소하고 그 응답은 반영하지 않는다", async ({ page }) => {
+  // 첫 조회만 늦게, 다른 가격으로 답한다.
+  let count = 0;
+  await mockApi(page, { domestic: [rankingItem("000660", "SK하이닉스", null, 184_100)], us: [] }, [], ({ code }) => {
+    count += 1;
+    return count === 1
+      ? { body: { code, price: 150_000, fetched_at: "2026-10-05T06:30:00+00:00" }, delayMs: 1500 }
+      : { body: { code, price: 190_000, fetched_at: "2026-10-05T06:30:00+00:00" } };
+  });
+  const cancelled: string[] = [];
+  page.on("requestfailed", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/quote")) cancelled.push(request.url());
+  });
+  await openDashboard(page);
+  await selectEnvironment(page, "국내 모의");
+  await selectMenu(page, "순위");
+  const row = tradingValueCard(page).getByRole("button", { name: /SK하이닉스/ });
+
+  await row.click();
+  await expect(panel(page, "SK하이닉스").getByText("현재가를 불러오는 중입니다.")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(panel(page, "SK하이닉스")).toHaveCount(0);
+  await expect.poll(() => cancelled.length).toBe(1);
+
+  await row.click();
+  const dialog = panel(page, "SK하이닉스");
+  await expect(dialog.getByLabel("가격 (원)")).toHaveValue("190,000");
+  // 취소한 첫 조회의 응답 시각이 지나도 가격은 그대로다.
+  await page.waitForTimeout(1700);
+  await expect(dialog.getByLabel("가격 (원)")).toHaveValue("190,000");
+});
+
 test("패널이 열린 동안 뒤쪽 화면은 막히고, 닫으면 눌렀던 종목으로 초점이 돌아간다", async ({ page }) => {
   await mockApi(page, { domestic: [rankingItem("000660", "SK하이닉스", null, 184_100)], us: [] });
   await openDashboard(page);

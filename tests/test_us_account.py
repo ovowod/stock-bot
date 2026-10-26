@@ -3,12 +3,79 @@ import logging
 from tests.fake_kiwoom import (
     UST21070_HOLDING,
     UST21070_REPLY,
+    body_of,
     kiwoom_error,
     us_fake,
     usa10099_row,
 )
 
 URL = "/api/environments/us_paper/account"
+
+
+def test_us_account_is_converted_for_the_screen(make_client):
+    fake = us_fake()
+    body = make_client(fake).get(URL).json()
+
+    assert body_of(fake.calls("ust21070")[0]) == {"stex_tp": "", "stk_cd": ""}
+    assert body_of(fake.calls("ust21110")[0]) == {}
+    assert body["environment"] == "us_paper"
+    assert body["market"] == "us"
+    assert body["account_no"] == "8200****22"
+    assert body["currency"] == "USD"
+    # 문서에 없는 최상위 stex_tp("000030")는 응답에 담지 않는다.
+    assert "stex_tp" not in body
+    assert body["summary"] == {
+        "total_evaluation": 156464.6701,
+        "total_purchase": 157279.9717,
+        "total_profit_loss": -1599.6616,
+        "total_return_rate": -1.01,
+        "today_realized_profit_loss": 0.0,
+        "today_realized_return_rate": 0.0,
+    }
+    assert body["summary_krw"] == {
+        "total_evaluation": 238530390,
+        "total_purchase": 239773317,
+        "total_profit_loss": -2438684,
+        "today_realized_profit_loss": 0,
+    }
+    assert body["deposit"] == {
+        "krw_deposit": 930907881,
+        "currencies": [
+            {
+                "currency": "USD",
+                "currency_name": "미국달러",
+                "deposit": 18039493.57,
+                "orderable": 18613792.11,
+                "withdrawable": 18039493.57,
+            }
+        ],
+    }
+    assert body["holdings"] == [
+        {
+            "code": "AAPL",
+            "name": "애플",
+            "exchange": "미국",
+            "currency": "USD",
+            "quantity": 395,
+            "sellable_quantity": 395,
+            "purchase_price": 282.1603,
+            "current_price": 275.24,
+            "purchase_amount": 111453.3212,
+            "evaluation_amount": 108719.8,
+            "profit_loss": -3283.9512,
+            "return_rate": -2.94,
+            "evaluation_amount_krw": 165743335,
+            "profit_loss_krw": -5006383,
+        }
+    ]
+
+
+def test_empty_us_holdings_is_a_normal_result(make_client):
+    fake = us_fake().reply("ust21070", {**UST21070_REPLY, "result_list": []})
+    response = make_client(fake).get(URL)
+
+    assert response.status_code == 200
+    assert response.json()["holdings"] == []
 
 
 def test_us_holding_exchange_names_match_the_ranking_and_search_names(make_client):

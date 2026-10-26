@@ -105,6 +105,54 @@ def test_malformed_responses_are_format_errors(make_client, reply):
     assert response.json()["error"]["kind"] == "response_format_error"
 
 
+def _fields(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, object]]:
+    return [r.fields for r in caplog.records if r.getMessage() == event]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("reply", "status", "head"),
+    [
+        (httpx.Response(500, text="<html>Internal Server Error</html>"), 500, "<html>"),
+        (httpx.Response(200, json={"unexpected": True}), 200, '{"unexpected"'),
+    ],
+    ids=["not-json", "no-return-code"],
+)
+def test_malformed_body_is_logged_with_status_and_head(make_client, caplog, reply, status, head):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    make_client(domestic_fake().reply("kt00018", reply)).get(URL)
+
+    [logged] = _fields(caplog, "kiwoom_response_malformed")
+    assert logged["api_id"] == "kt00018"
+    assert logged["http_status"] == status
+    assert str(logged["body_head"]).startswith(head)
+
+
+def test_missing_field_is_logged_with_status_and_head(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    reply = {k: v for k, v in KT00018_REPLY.items() if k != "tot_evlt_amt"}
+    make_client(domestic_fake().reply("kt00018", page_response(reply))).get(URL)
+
+    [response] = [f for f in _fields(caplog, "kiwoom_response") if f["api_id"] == "kt00018"]
+    assert response["http_status"] == 200
+    [missing] = _fields(caplog, "kiwoom_field_missing")
+    assert missing["api_id"] == "kt00018"
+    assert missing["key"] == "tot_evlt_amt"
+    assert str(missing["body_head"]).startswith('{"return_code": 0')
+    assert '"tot_pur_amt": "000000017598258"' in str(missing["body_head"])
+    assert len(str(missing["body_head"])) == 200
+
+
+def test_logged_body_head_masks_secrets_before_cutting(make_client, caplog):
+    """비밀값이 자르는 위치에 걸쳐 있어도 앞부분이 남지 않는다."""
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    secret = FAKE_ENV["PAPER_KR_APP_SECRET"]
+    text = "x" * (200 - len(secret) // 2) + secret
+    make_client(domestic_fake().reply("kt00018", httpx.Response(500, text=text))).get(URL)
+
+    [logged] = _fields(caplog, "kiwoom_response_malformed")
+    assert secret[: len(secret) // 2] not in str(logged["body_head"])
+
+
 def test_network_failure_is_connection_error(make_client):
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused")

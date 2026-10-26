@@ -455,6 +455,51 @@ test("호출 한도 초과는 잠시 후 다시 시도하라고 안내한다", a
   await expect(page.getByRole("alert")).toContainText("잠시 후 다시 시도하세요");
 });
 
+for (const [kind, status, message, title] of [
+  [
+    "account_mismatch",
+    409,
+    "조회된 계좌번호가 설정한 계좌번호와 다릅니다. 조회를 중단했습니다.",
+    "계좌번호가 일치하지 않습니다",
+  ],
+  ["kiwoom_error", 502, "키움 오류 [20] 조회할 자료가 없습니다", "키움 API 오류"],
+  [
+    "response_format_error",
+    502,
+    "키움 응답 형식이 올바르지 않습니다. (tot_evlt_amt 필드가 없습니다)",
+    "키움 응답을 해석하지 못했습니다",
+  ],
+  [
+    "incomplete_result",
+    502,
+    "조회 결과가 10페이지를 넘어 전체를 가져오지 못했습니다.",
+    "조회 결과를 모두 가져오지 못했습니다",
+  ],
+  ["connection_error", 502, "키움 서버에 연결하지 못했습니다.", "키움 서버에 연결하지 못했습니다"],
+] as const) {
+  test(`${kind} 오류는 알맞은 안내와 다시 시도 버튼을 보여준다`, async ({ page }) => {
+    await mockAccount(page, {
+      domestic_paper: { status, body: { error: { kind, message, request_id: "r1" } } },
+    });
+    await openDashboard(page);
+
+    const alert = page.getByRole("alert");
+    await expect(alert).toContainText(title);
+    await expect(alert).toContainText(message);
+    await expect(alert.getByRole("button", { name: "다시 시도" })).toBeVisible();
+  });
+}
+
+test("자체 서버에 연결하지 못하면 서버 실행 여부를 확인하라고 안내한다", async ({ page }) => {
+  await mockAccount(page, {});
+  // 나중에 등록한 route가 먼저 처리된다.
+  await page.route("**/api/environments/*/account", (route) => route.abort());
+  await openDashboard(page);
+
+  await expect(page.getByRole("alert")).toContainText("서버에 연결할 수 없습니다");
+  await expect(page.getByRole("alert")).toContainText("서버가 실행 중인지 확인하세요");
+});
+
 test("환경을 바꾸면 이전 환경 데이터를 즉시 지우고, 늦게 온 이전 응답은 반영하지 않는다", async ({ page }) => {
   let domesticSlow = false;
   await mockAccount(page, {

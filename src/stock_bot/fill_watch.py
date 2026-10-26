@@ -20,6 +20,7 @@ from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import FIELD_VALUE_LIMIT, DiscordNotifier, Embed, EmbedField
+from stock_bot.open_order import is_us_no_open_orders
 from stock_bot.reader import Reader
 from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub
 
@@ -34,7 +35,7 @@ REGISTER_RETRY_MAX_SECONDS = 60.0
 # 조회만 하는 TR이라 다시 보내도 안전하다. 키움 오류 응답은 다시 시도하지 않는다.
 LOOKUP_RETRY_SECONDS = 1.0
 
-# 매도 손익 계산용으로 주문번호별로 더해 둔 체결을 마지막 체결 뒤 이만큼 지나면 지운다.
+# 미국 매도 손익 계산용으로 주문번호별로 더해 둔 체결을 마지막 체결 뒤 이만큼 지나면 지운다.
 # 일부만 체결된 채 끝난 주문이 쌓이지 않게 하기 위해서다.
 # 날짜로 지우지 않는 건 미국 장이 한국 자정을 넘기 때문이다.
 FILL_MEMORY_SECONDS = 24 * 3600
@@ -83,7 +84,7 @@ class FillWatcher:
         self._guard = guard
         # 거부된 구독을 다시 등록하려고 기다리는 작업. 감시마다 많아야 하나다.
         self._retries: set[asyncio.Task[None]] = set()
-        # (투자 환경, 주문번호)별로 지금까지 받은 매도 체결. 서버를 재시작하면 사라진다.
+        # (투자 환경, 주문번호)별로 지금까지 받은 미국 매도 체결. 서버를 재시작하면 사라진다.
         self._sell_fills: dict[tuple[str, str], _OrderFills] = {}
 
     def start(self) -> None:
@@ -205,6 +206,9 @@ class FillWatcher:
             price=_plain(fill.price),
             quantity=_plain(fill.quantity),
             remaining=_plain(fill.remaining),
+            filled_quantity=_plain(fill.filled_quantity),
+            average_price=_plain(fill.average_price),
+            realized_cost=_plain(fill.realized_cost),
         )
         trigger_request_id = await self._auto_sell(spec, fill, event)
         profit = await self._sell_profit(spec, fill) if fill.side == "sell" else None
@@ -257,6 +261,8 @@ class FillWatcher:
 
     async def _sell_profit(self, spec: EnvironmentSpec, fill: Fill) -> SellProfit:
         """지금까지 체결된 수량 전체의 매도 손익. 수수료·세금은 빼지 않는다."""
+        if fill.market is Market.DOMESTIC:
+            return await self._domestic_sell_profit(spec, fill)
         now = time.monotonic()
         for key, entry in list(self._sell_fills.items()):
             if now - entry.updated > FILL_MEMORY_SECONDS:
@@ -276,8 +282,7 @@ class FillWatcher:
         entry.amount += fill.price * fill.quantity
         entry.quantity += fill.quantity
         entry.updated = now
-        if fill.market is Market.US:
-            entry.add_realized_cost(fill.realized_cost, fill.quantity)
+        entry.add_realized_cost(fill.realized_cost, fill.quantity)
         if fill.remaining == 0:
             del self._sell_fills[key]
         filled = fill.ordered - fill.remaining
@@ -294,33 +299,50 @@ class FillWatcher:
             )
             return SellProfit(failure=LOOKUP_FAILED)
 
-        if fill.market is Market.US:
-            # 미국은 체결 이벤트의 실현손익매입금(50724)이 이번 체결분의 매입 금액이다.
-            # ust21630은 모의투자에서 매도 뒤 -994로 실패해 쓰지 않는다(spec Implementation Notes).
-            if entry.cost is None:
-                log(
-                    logger,
-                    logging.WARNING,
-                    "sell_profit_failed",
-                    order_no=fill.order_no,
-                    cause="realized_cost_unusable",
-                    realized_cost=_plain(fill.realized_cost),
-                )
-                return SellProfit(failure=LOOKUP_FAILED)
-            cost = entry.cost
-            purchase = cost / filled
-        else:
-            domestic_purchase = await self._purchase_price(spec, fill.code)
-            if domestic_purchase is None:
-                return SellProfit(failure=LOOKUP_FAILED)
-            purchase = domestic_purchase
-            cost = purchase * filled
-        unit = MONEY_UNITS[fill.market]
-        return SellProfit(
-            amount=(entry.amount - cost).quantize(unit, ROUND_HALF_UP),
-            rate=((entry.amount - cost) / cost * 100).quantize(Decimal("0.01"), ROUND_HALF_UP),
-            purchase=purchase,
-        )
+        # 미국은 체결 이벤트의 실현손익매입금(50724)이 이번 체결분의 매입 금액이다.
+        # ust21630은 모의투자에서 매도 뒤 -994로 실패해 쓰지 않는다(spec Implementation Notes).
+        if entry.cost is None:
+            log(
+                logger,
+                logging.WARNING,
+                "sell_profit_failed",
+                order_no=fill.order_no,
+                cause="realized_cost_unusable",
+                realized_cost=_plain(fill.realized_cost),
+            )
+            return SellProfit(failure=LOOKUP_FAILED)
+        return _profit(entry.amount, entry.cost, entry.cost / filled, fill.market)
+
+    async def _domestic_sell_profit(self, spec: EnvironmentSpec, fill: Fill) -> SellProfit:
+        """국내 00은 910·911로 이 주문의 평균 체결가와 누적 체결 수량을 준다(2026-10-26 모의 로그).
+        그래서 앞선 체결을 받지 못했어도 이번 이벤트만으로 계산한다."""
+        if (
+            fill.code is None
+            or fill.average_price is None
+            or fill.filled_quantity is None
+            or fill.ordered is None
+            or fill.remaining is None
+        ):
+            return SellProfit(failure=UNKNOWN)
+        filled = fill.ordered - fill.remaining
+        if fill.filled_quantity != filled:
+            # 911이 누적 체결 수량이 아니면 이 계산은 맞지 않는다. 추측하지 않는다.
+            log(
+                logger,
+                logging.WARNING,
+                "sell_profit_failed",
+                order_no=fill.order_no,
+                cause="filled_quantity_mismatch",
+                filled_quantity=_plain(fill.filled_quantity),
+                filled=_plain(filled),
+            )
+            return SellProfit(failure=LOOKUP_FAILED)
+        purchase = await self._purchase_price(spec, fill.code)
+        if purchase is None:
+            return SellProfit(failure=LOOKUP_FAILED)
+        # 평균 체결가는 원 단위로 반올림돼 오므로 체결 금액이 수량만큼 몇 원 다를 수 있다.
+        amount = fill.average_price * filled
+        return _profit(amount, purchase * filled, purchase, fill.market)
 
     async def _purchase_price(self, spec: EnvironmentSpec, code: str) -> Decimal | None:
         """당일 실현손익 상세(ka10077)에서 그 종목의 매입가를 찾는다. 못 찾으면 None이다."""
@@ -389,7 +411,15 @@ class FillWatcher:
             body = {"ord_dt": "", "slby_tp": "0", "stex_tp": "", "stk_cd": ""}
             parse = _us_open_order
         try:
-            data = await self._lookup(spec, api_id, path, body)
+            try:
+                data = await self._lookup(spec, api_id, path, body)
+            except AppError as exc:
+                if spec.market is not Market.US or not is_us_no_open_orders(exc):
+                    raise
+                log(
+                    logger, logging.INFO, "open_orders_none_reply", api_id=api_id, cause=exc.message
+                )
+                data = {list_key: []}
             orders = [parse(row) for row in Reader(data, api_id).rows(list_key)]
         except AppError as exc:
             log(
@@ -416,9 +446,11 @@ LOOKUP_FAILED = "조회 실패"
 
 # 금액 비교·표시 단위. 원은 1원, 달러는 1센트.
 MONEY_UNITS = {Market.DOMESTIC: Decimal(1), Market.US: Decimal("0.01")}
-# 같은 주문의 체결마다 실현손익매입금 ÷ 체결량(매입단가)이 이만큼 넘게 다르면
-# 체결분 값이 아니라고 본다.
-UNIT_COST_TOLERANCE = Decimal("0.0001")
+# 같은 주문의 체결마다 실현손익매입금 ÷ 체결량(매입단가)이 이 비율보다 더 다르면
+# 체결분 값이 아니라고(누계 값이라고) 본다. 체결분 값이어도 체결마다 조금씩 다르게 온다.
+# 2026-10-26 모의: 20주 뒤 1주 체결의 값이 4.93달러로, 평균 매입단가 4.8658달러와 1.3% 달랐다.
+# 누계 값이면 비율이 (지금까지 체결 수량 ÷ 이번 체결량)배가 되어 이보다 훨씬 크다.
+UNIT_COST_TOLERANCE = Decimal("0.05")
 
 
 @dataclass
@@ -439,10 +471,14 @@ class _OrderFills:
             self.cost = None
             return
         unit_cost = cost / quantity
-        if self.unit_cost is not None and abs(unit_cost - self.unit_cost) > UNIT_COST_TOLERANCE:
+        if (
+            self.unit_cost is not None
+            and abs(unit_cost - self.unit_cost) > self.unit_cost * UNIT_COST_TOLERANCE
+        ):
             self.cost = None
             return
-        self.unit_cost = unit_cost
+        if self.unit_cost is None:
+            self.unit_cost = unit_cost
         self.cost += cost
 
 
@@ -472,6 +508,9 @@ class Fill:
     time: str | None
     # 미국 매도 체결분의 매입 금액(F5 50724). 국내는 None이다.
     realized_cost: Decimal | None = None
+    # 국내만: 이 주문의 지금까지 체결 수량(911)과 평균 체결가(910). 미국은 None이다.
+    filled_quantity: Decimal | None = None
+    average_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -528,11 +567,14 @@ def _domestic_fill(values: dict[str, Any]) -> Fill:
         name=_text(values, "302"),
         order_no=_text(values, "9203"),
         side=_side(values),
-        price=_number(values, "910"),
-        quantity=_number(values, "911"),
+        # 910·911은 이 주문의 평균 체결가·누적 체결 수량으로 온다. 이번 체결분은 914·915다.
+        price=_number(values, "914"),
+        quantity=_number(values, "915"),
         ordered=_number(values, "900"),
         remaining=_number(values, "902"),
         time=_time(values, "908"),
+        filled_quantity=_number(values, "911"),
+        average_price=_number(values, "910"),
     )
 
 
@@ -645,6 +687,14 @@ def _fill_embed(
             ),
             _open_orders_field(open_orders),
         ),
+    )
+
+
+def _profit(amount: Decimal, cost: Decimal, purchase: Decimal, market: Market) -> SellProfit:
+    return SellProfit(
+        amount=(amount - cost).quantize(MONEY_UNITS[market], ROUND_HALF_UP),
+        rate=((amount - cost) / cost * 100).quantize(Decimal("0.01"), ROUND_HALF_UP),
+        purchase=purchase,
     )
 
 

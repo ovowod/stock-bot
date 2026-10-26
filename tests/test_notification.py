@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import time
 
 import httpx
 import pytest
@@ -136,7 +138,7 @@ async def test_rate_limit_waits_and_retries_once(monkeypatch):
     assert len(fake.requests) == 2
 
 
-async def test_rate_limit_twice_gives_up(monkeypatch):
+async def test_rate_limit_gives_up_after_the_last_attempt(monkeypatch):
     async def fake_sleep(seconds: float) -> None:
         pass
 
@@ -144,7 +146,44 @@ async def test_rate_limit_twice_gives_up(monkeypatch):
     fake = FakeDiscord(httpx.Response(429, json={"retry_after": 0.5}))
 
     assert await notifier(fake).send("체결") is False
-    assert len(fake.requests) == 2
+    assert len(fake.requests) == notification.MAX_ATTEMPTS
+
+
+async def test_burst_of_messages_is_sent_one_at_a_time_and_none_is_lost():
+    """2026-10-26 장 시작 때 SL / TP 알림이 한꺼번에 나가 429를 두 번 받은 7건이 사라졌다.
+    채널 한도를 0.2초에 1건으로 흉내 낸다."""
+    last_sent = [-1.0]
+    in_flight = [0, 0]  # 지금, 최대
+
+    class Bucket:
+        requests: list[httpx.Request] = []
+
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            self.requests.append(request)
+            now = time.monotonic()
+            if now - last_sent[0] < 0.2:
+                return httpx.Response(429, json={"retry_after": 0.2, "global": False})
+            last_sent[0] = now
+            return httpx.Response(200, json={"id": "1"})
+
+    class Tracking(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.inner = httpx.MockTransport(Bucket())
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            in_flight[0] += 1
+            in_flight[1] = max(in_flight)
+            try:
+                await asyncio.sleep(0.01)
+                return await self.inner.handle_async_request(request)
+            finally:
+                in_flight[0] -= 1
+
+    discord = DiscordNotifier(ENV, transport=Tracking())
+    results = await asyncio.gather(*(discord.send(f"알림 {i}") for i in range(5)))
+
+    assert results == [True] * 5
+    assert in_flight[1] == 1
 
 
 async def test_long_rate_limit_wait_is_not_retried():

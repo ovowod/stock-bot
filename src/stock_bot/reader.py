@@ -1,9 +1,18 @@
 """키움 응답에서 필드를 꺼낸다. 필요한 필드가 없거나 형식이 틀리면 응답 형식 오류로 처리한다."""
 
+import json
+import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from stock_bot.errors import response_format_error
+from stock_bot.logging_setup import log
+from stock_bot.masking import secrets
+
+logger = logging.getLogger("stock_bot.reader")
+
+# 로그에 남길 본문 앞부분 길이. 키움 클라이언트의 형식 오류 로그와 같다.
+_LOG_BODY_LIMIT = 200
 
 
 class Reader:
@@ -54,5 +63,16 @@ class Reader:
 
 def required(data: dict[str, Any], key: str, api_id: str) -> Any:
     if key not in data or data[key] is None:
+        # 성공 응답에 필드가 빠진 경우다. HTTP 상태는 같은 request_id의 kiwoom_response 로그에 있다.
+        # 자른 뒤에는 비밀값을 알아볼 수 없으므로 먼저 가린다.
+        body = secrets.mask(json.dumps(data, ensure_ascii=False, default=str))
+        log(
+            logger,
+            logging.ERROR,
+            "kiwoom_field_missing",
+            api_id=api_id,
+            key=key,
+            body_head=body[:_LOG_BODY_LIMIT],
+        )
         raise response_format_error(api_id, f"{key} 필드가 없습니다.")
     return data[key]

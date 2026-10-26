@@ -163,6 +163,28 @@ def test_us_real_trading_lists_open_orders_but_none_are_cancelable(make_client):
     assert fake.calls("ust21050")[0].url.host == "api.kiwoom.com"
 
 
+# 2026-10-26 실전 로그: 실전 ust21050은 미체결이 없으면 빈 목록 대신 이렇게 답한다.
+NO_OPEN_ORDERS = "[2000](571758:해당 계좌의미체결내역이 없습니다.)"
+
+
+def test_us_real_reply_without_open_orders_is_an_empty_list(make_client):
+    fake = us_kiwoom().reply("ust21050", kiwoom_error(20, NO_OPEN_ORDERS))
+
+    response = make_client(fake).get("/api/environments/us_real/open-orders")
+
+    assert response.status_code == 200
+    assert response.json()["orders"] == []
+
+
+def test_other_us_open_order_errors_are_still_errors(make_client):
+    fake = us_kiwoom().reply("ust21050", kiwoom_error(20, "[2000](571759:다른 오류입니다.)"))
+
+    response = make_client(fake).get("/api/environments/us_real/open-orders")
+
+    assert response.status_code == 502
+    assert response.json()["error"]["kind"] == "kiwoom_error"
+
+
 def test_market_orders_have_no_price(make_client):
     fake = us_kiwoom(us_open_order(frgn_trde_tp="03", frgn_trde_nm="시장가", ord_uv="0.0000"))
 
