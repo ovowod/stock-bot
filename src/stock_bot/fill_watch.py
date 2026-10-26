@@ -14,13 +14,14 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from stock_bot.account import DOMESTIC_ACCOUNT_PATH, US_ACCOUNT_PATH
+from stock_bot.auto_sell import AutoSellGuard
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import FIELD_VALUE_LIMIT, DiscordNotifier, Embed, EmbedField
 from stock_bot.reader import Reader
-from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
+from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub
 
 logger = logging.getLogger("stock_bot.fill_watch")
 
@@ -38,6 +39,12 @@ LOOKUP_RETRY_SECONDS = 1.0
 # 날짜로 지우지 않는 건 미국 장이 한국 자정을 넘기 때문이다.
 FILL_MEMORY_SECONDS = 24 * 3600
 
+# 매도 체결이 온 종목에 진행 중인 자동 매도가 있으면, 체결 이벤트를 받은 때부터
+# 이만큼 그 주문 결과를 기다린 뒤 주문번호를 맞춰 본다.
+# 시장가는 주문 응답보다 체결 통보가 먼저 올 수 있다.
+AUTO_SELL_RESULT_WAIT_SECONDS = 5.0
+AUTO_SELL_MARK = "SL / TP 자동 매도"
+
 # 실시간 연결 하나에 구독할 실시간 항목과 그 이벤트의 투자 환경.
 # 00은 국내 주문체결, F5는 미국 실시간 체결이다.
 # 국내 실전과 미국 실전은 인증정보와 계좌가 같아 연결 하나로 받는다.
@@ -50,8 +57,6 @@ WATCHES: tuple[Watch, ...] = (
 # 실시간 항목별로 체결을 뜻하는 주문상태(913). 접수·확인·취소·거부 등은 알리지 않는다.
 # F5의 체결완료는 2026-10-08 모의 서버에서 확인했고, 부분체결은 키움 가이드 설명을 따른다.
 FILL_STATUSES = {"00": {"체결"}, "F5": {"부분체결", "체결완료"}}
-# 공유 연결에서 체결 감시가 쓰는 그룹 번호. 기능마다 따로 쓴다.
-GROUP_NO = "1"
 
 
 def _connection_spec(watch: Watch) -> EnvironmentSpec:
@@ -64,10 +69,18 @@ def _environments(watch: Watch) -> str:
 
 
 class FillWatcher:
-    def __init__(self, kiwoom: KiwoomClient, notifier: DiscordNotifier, hub: RealtimeHub) -> None:
+    def __init__(
+        self,
+        kiwoom: KiwoomClient,
+        notifier: DiscordNotifier,
+        hub: RealtimeHub,
+        guard: AutoSellGuard,
+    ) -> None:
         self._kiwoom = kiwoom
         self._notifier = notifier
         self._hub = hub
+        # 자동 매도 공통 장치. 접수된 자동 매도의 주문번호로 체결에 표시를 붙인다.
+        self._guard = guard
         # 거부된 구독을 다시 등록하려고 기다리는 작업. 감시마다 많아야 하나다.
         self._retries: set[asyncio.Task[None]] = set()
         # (투자 환경, 주문번호)별로 지금까지 받은 매도 체결. 서버를 재시작하면 사라진다.
@@ -109,7 +122,8 @@ class FillWatcher:
 
     def _watch(self, watch: Watch) -> None:
         # 끊긴 동안의 체결은 보충하지 않는다. 공유 연결이 다시 연결해 등록만 한다.
-        subscription = Subscription(GROUP_NO, [""], list(watch))
+        # 주문체결은 계좌 단위 항목이라 SL / TP와 함께 받는다.
+        types = list(watch)
         delay = REGISTER_RETRY_INITIAL_SECONDS
         retry: asyncio.Task[None] | None = None
 
@@ -120,7 +134,7 @@ class FillWatcher:
             if event.kind is EventKind.REAL:
                 for item in event.items:
                     try:
-                        await self._handle(watch, item)
+                        await self._handle(watch, item, event)
                     except Exception as exc:
                         # 한 체결의 처리 오류로 같은 메시지의 다른 체결을 놓치지 않게 한다.
                         logger.error(
@@ -145,27 +159,27 @@ class FillWatcher:
                 )
                 if retry is not None:
                     retry.cancel()
-                retry = self._retry(channel.subscribe, subscription, delay)
+                retry = self._retry(channel.share, types, delay)
                 delay = min(delay * 2, REGISTER_RETRY_MAX_SECONDS)
 
         channel = self._hub.channel(_connection_spec(watch), "fill_watch", "체결 감시", on_event)
-        channel.subscribe(subscription)
+        channel.share(types)
 
     def _retry(
-        self, subscribe: Callable[[Subscription], None], subscription: Subscription, delay: float
+        self, share: Callable[[list[str]], None], types: list[str], delay: float
     ) -> asyncio.Task[None]:
         """밀려나 멈춘 연결이면 다시 구독해도 연결을 열지 않는다."""
 
         async def later() -> None:
             await asyncio.sleep(delay)
-            subscribe(subscription)
+            share(types)
 
         task = asyncio.create_task(later())
         self._retries.add(task)
         task.add_done_callback(self._retries.discard)
         return task
 
-    async def _handle(self, watch: Watch, item: Any) -> None:
+    async def _handle(self, watch: Watch, item: Any, event: RealtimeEvent) -> None:
         # 체결 하나의 수신·처리·알림 로그를 같은 ID로 묶는다.
         request_id_var.set(uuid.uuid4().hex[:12])
         values = item.get("values") if isinstance(item, dict) else None
@@ -192,10 +206,54 @@ class FillWatcher:
             quantity=_plain(fill.quantity),
             remaining=_plain(fill.remaining),
         )
+        trigger_request_id = await self._auto_sell(spec, fill, event)
         profit = await self._sell_profit(spec, fill) if fill.side == "sell" else None
         open_orders = await self._open_orders(spec)
-        sent = await self._notifier.send(embed=_fill_embed(fill, profit, open_orders), spec=spec)
-        log(logger, logging.INFO, "fill_notified", order_no=fill.order_no, sent=sent)
+        embed = _fill_embed(fill, profit, open_orders, auto_sell=trigger_request_id is not None)
+        sent = await self._notifier.send(embed=embed, spec=spec)
+        log(
+            logger,
+            logging.INFO,
+            "fill_notified",
+            order_no=fill.order_no,
+            sent=sent,
+            trigger_request_id=trigger_request_id,
+        )
+
+    async def _auto_sell(
+        self, spec: EnvironmentSpec, fill: Fill, event: RealtimeEvent
+    ) -> str | None:
+        """이 체결이 SL / TP 자동 매도의 것이면 그 트리거 요청 ID다.
+
+        체결 처리의 요청 ID는 체결마다 따로 두고, 트리거 ID로 찾으면 부분 체결까지 나오게 한다.
+        """
+        if fill.side != "sell" or fill.code is None or fill.order_no is None:
+            return None
+        waited = time.monotonic() - event.received_clock
+        settled = await self._guard.settled(
+            spec.environment, fill.code, AUTO_SELL_RESULT_WAIT_SECONDS - waited
+        )
+        accepted = self._guard.accepted(spec.environment, fill.order_no)
+        if accepted is None:
+            if not settled:
+                log(
+                    logger,
+                    logging.WARNING,
+                    "fill_auto_sell_wait_timeout",
+                    order_no=fill.order_no,
+                    # 큐에서 기다린 시간을 포함해 체결 이벤트를 받은 뒤 지난 시간이다.
+                    waited_seconds=round(time.monotonic() - event.received_clock, 3),
+                    limit_seconds=AUTO_SELL_RESULT_WAIT_SECONDS,
+                )
+            return None
+        log(
+            logger,
+            logging.INFO,
+            "fill_auto_sell_matched",
+            order_no=fill.order_no,
+            trigger_request_id=accepted.trigger_request_id,
+        )
+        return accepted.trigger_request_id
 
     async def _sell_profit(self, spec: EnvironmentSpec, fill: Fill) -> SellProfit:
         """지금까지 체결된 수량 전체의 매도 손익. 수수료·세금은 빼지 않는다."""
@@ -545,7 +603,10 @@ def _hhmmss(text: str) -> str | None:
 
 
 def _fill_embed(
-    fill: Fill, profit: SellProfit | None, open_orders: list[OpenOrder] | None
+    fill: Fill,
+    profit: SellProfit | None,
+    open_orders: list[OpenOrder] | None,
+    auto_sell: bool = False,
 ) -> Embed:
     side = {"buy": "매수", "sell": "매도"}.get(fill.side or "")
     title = f"체결 · {side}" if side else "체결"
@@ -566,6 +627,8 @@ def _fill_embed(
     )
     return Embed(
         title=title,
+        # 사용자가 직접 낸 매도와 구분한다.
+        description=AUTO_SELL_MARK if auto_sell else "",
         color=color,
         fields=(
             EmbedField("종목", stock or UNKNOWN),

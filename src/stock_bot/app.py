@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from stock_bot.account import AccountService
 from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
+from stock_bot.auto_sell import AutoSellGuard
 from stock_bot.config import (
     DATA_DIR,
     ENVIRONMENTS,
@@ -41,6 +42,7 @@ from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
 from stock_bot.realtime import RealtimeConnect, RealtimeHub, connect_websocket
 from stock_bot.sl_tp import SlTpSettingsStore
+from stock_bot.sl_tp_watch import SlTpWatcher
 from stock_bot.stock_search import StockSearchService, today_kst
 
 logger = logging.getLogger("stock_bot.api")
@@ -55,7 +57,7 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     static_dir: Path | None = WEB_DIST,
     log_dir: Path | None = LOG_DIR,
-    data_dir: Path = DATA_DIR,
+    data_dir: Path | None = None,
     today: Callable[[], date] | None = None,
     clock: Callable[[], float] | None = None,
     notifier: DiscordNotifier | None = None,
@@ -97,19 +99,27 @@ def create_app(
         # 취소 재확인은 미국 종목 목록이 꼭 있어야 거래소를 정할 수 있다.
         lambda spec: open_orders.orders(spec, listing_required=True),
         on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
+        fresh_holding=accounts.fresh_holding,
     )
-    realtime = RealtimeHub(
-        kiwoom, notifier, realtime_connect or connect_websocket, now or (lambda: datetime.now(UTC))
+    now = now or (lambda: datetime.now(UTC))
+    realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
+    # 자동 매도 공통 장치. 체결 알림이 자동 매도의 체결을 알아보는 데도 쓴다.
+    guard = AutoSellGuard()
+    fills = FillWatcher(kiwoom, notifier, realtime, guard)
+    sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
+    sl_tp_watch = SlTpWatcher(
+        kiwoom, sl_tp, accounts.positions, orders, guard, realtime, notifier, now
     )
-    fills = FillWatcher(kiwoom, notifier, realtime)
-    sl_tp = SlTpSettingsStore(data_dir / "sl-tp")
+    sl_tp.on_saved = sl_tp_watch.settings_saved
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         fills.start()
+        sl_tp_watch.start()
         try:
             yield
         finally:
+            await sl_tp_watch.stop()
             await fills.stop()
             await realtime.stop()
 

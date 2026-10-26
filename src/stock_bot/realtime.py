@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -41,6 +42,9 @@ RECONNECT_MAX_SECONDS = 60.0
 
 # 같은 앱 키로 다른 연결이 들어왔을 때 키움이 기존 연결에 보내는 SYSTEM 코드(모의 서버에서 확인).
 SESSION_REPLACED_CODE = "R10001"
+# 여러 기능이 함께 받는 계좌 단위 실시간 항목(주문체결 00·F5)을 한 번만 등록하는 그룹 번호.
+# 같은 항목을 그룹 둘에 등록하면 키움이 이벤트를 두 번 보내는지 확인하지 못해 겹쳐 등록하지 않는다.
+SHARED_GROUP_NO = "1"
 
 NEUTRAL_COLOR = 0x8B8F98
 
@@ -79,6 +83,10 @@ class RealtimeEvent:
     items: list[dict[str, Any]] = field(default_factory=list)
     # REJECTED의 return_code·return_msg.
     detail: dict[str, Any] = field(default_factory=dict)
+    # REGISTERED·REJECTED가 어느 그룹의 등록 결과인지. 함께 받는 항목은 SHARED_GROUP_NO다.
+    group: str | None = None
+    # 받은 때의 경과 시간 시계(time.monotonic). 큐에서 기다린 시간까지 재는 데 쓴다.
+    received_clock: float = field(default_factory=time.monotonic)
 
 
 EventHandler = Callable[[RealtimeEvent], Awaitable[None]]
@@ -94,6 +102,8 @@ class Channel:
         self.feature = feature
         self.label = label
         self.subscription: Subscription | None = None
+        # 다른 기능과 함께 받는 계좌 단위 실시간 항목. 연결이 한 번만 등록한다.
+        self.shared: list[str] = []
         # 구독을 바꿀 때마다 는다. 연결은 보낸 버전과 비교해 다시 보낼지 정한다.
         self.version = 0
         self._link = link
@@ -106,6 +116,33 @@ class Channel:
         self.subscription = subscription
         self.version += 1
         self._link.changed()
+
+    def share(self, types: list[str] | None) -> None:
+        """계좌 단위 실시간 항목(item이 빈 값)을 다른 기능과 함께 받는다. None이면 그만 받는다.
+
+        넣을 때마다 REG를 다시 보낸다. 새로 함께 받는 기능도 지금 등록 결과
+        (REGISTERED·REJECTED)를 받게 하고, 거부 뒤 재시도도 같은 호출로 한다.
+        그만 받을 때는 합친 항목이 바뀔 때만 다시 등록한다.
+        """
+        wanted = list(types or [])
+        self.shared = wanted
+        self._link.share_changed(resend=bool(wanted))
+
+    @property
+    def stopped(self) -> bool:
+        """연결이 밀려나거나 서버가 꺼져 멈췄다.
+
+        STOPPED 이벤트가 큐에서 처리되기 전에도 바로 안다.
+        """
+        return self._link.stopped
+
+    @property
+    def connection(self) -> int | None:
+        """지금 LOGIN까지 된 연결의 번호. 끊겨 있으면 None이다.
+
+        큐에 밀린 이벤트가 이전 연결의 것인지 CONNECTED·DISCONNECTED를 처리하기 전에도 가른다.
+        """
+        return self._link.connection
 
     def put(self, event: RealtimeEvent) -> None:
         self._queue.put_nowait(event)
@@ -166,11 +203,12 @@ class RealtimeHub:
         self._links.clear()
 
     async def _notify_replaced(self, link: _Link, features: list[str]) -> None:
+        # 그 연결로 동작하던 기능을 모두 적는다. 체결 감시만 있으면 "체결 감시 중단"이다.
         stopped = "·".join(features) or "실시간 감시"
         await self._notifier.send(
             f"[{link.labels}]",
             embed=Embed(
-                title="체결 감시 중단",
+                title=f"{stopped} 중단",
                 description=(
                     f"다른 곳에서 같은 앱 키로 접속해 이 서버의 {stopped}를 멈춥니다. "
                     "다시 지켜보려면 이 서버를 재시작하세요."
@@ -192,22 +230,55 @@ class _Link:
         self.labels = "·".join(s.label for s in specs)
         self.channels: list[Channel] = []
         self._changed = asyncio.Event()
+        # 여러 채널이 함께 받는 항목을 대신 등록하는 채널. 등록 결과는 함께 받는 채널에 넘긴다.
+        self._shared = Channel(self, "shared", "", self._forward_shared)
+        self.channels.append(self._shared)
         self._task: asyncio.Task[None] | None = None
         self._connection_no = 0
-        self._stopped = False
+        # 지금 LOGIN까지 된 연결의 번호. 끊겨 있으면 None이다.
+        self.connection: int | None = None
+        self.stopped = False
+        # 마지막 구독이 해지돼 연결을 닫았다. 그사이 새 구독이 생겼으면 기다리지 않고 다시 연다.
+        self._closed_idle = False
 
     def changed(self) -> None:
         """구독이 바뀌었다. 구독이 하나라도 생기면 그때 연결을 연다."""
         self._changed.set()
-        if (
-            self._task is None
-            and not self._stopped
-            and any(c.subscription is not None for c in self.channels)
-        ):
+        if self._task is None and not self.stopped and not self._idle():
             self._task = asyncio.create_task(self._run())
 
+    def _idle(self) -> bool:
+        """구독이 하나도 없다. 같은 앱 키의 다른 서버를 끊지 않게 연결해 두지 않는다."""
+        return all(c.subscription is None for c in self.channels)
+
+    def share_changed(self, resend: bool) -> None:
+        """함께 받는 항목을 다시 맞춘다. 합친 항목이 그대로면 resend일 때만 다시 등록한다."""
+        sharing = self._sharing()
+        types = list(dict.fromkeys(t for c in sharing for t in c.shared))
+        self._shared.feature = "+".join(c.feature for c in sharing) or "shared"
+        current = self._shared.subscription
+        if not resend and (current.types if current else []) == types:
+            return
+        self._shared.subscribe(Subscription(SHARED_GROUP_NO, [""], types) if types else None)
+
+    def _sharing(self) -> list[Channel]:
+        return [c for c in self.channels if c is not self._shared and c.shared]
+
+    def _features(self) -> list[Channel]:
+        """지금 이 연결로 무언가를 받고 있는 기능."""
+        return [
+            c
+            for c in self.channels
+            if c is not self._shared and (c.subscription is not None or c.shared)
+        ]
+
+    async def _forward_shared(self, event: RealtimeEvent) -> None:
+        if event.kind in (EventKind.REGISTERED, EventKind.REJECTED):
+            for channel in self._sharing():
+                channel.put(event)
+
     async def stop(self) -> None:
-        self._stopped = True
+        self.stopped = True
         tasks = [self._task] if self._task else []
         for task in tasks:
             task.cancel()
@@ -226,17 +297,27 @@ class _Link:
         try:
             # 끊긴 동안의 이벤트는 보충하지 않는다. 다시 연결해 등록만 한다.
             delay = RECONNECT_INITIAL_SECONDS
-            while True:
+            while not self._idle():
                 if await self._session():
                     delay = RECONNECT_INITIAL_SECONDS
+                if self._closed_idle:
+                    # 실패로 끊긴 것이 아니므로 재연결 대기 없이 루프 조건만 다시 본다.
+                    self._closed_idle = False
+                    continue
+                if self._idle():
+                    # 끊긴 동안 구독이 모두 해지됐다. 다시 연결하지 않는다.
+                    break
                 log(logger, logging.WARNING, "realtime_reconnect_wait", wait_seconds=delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_SECONDS)
+            # 확인과 비우기 사이에 await가 없어, 그 뒤에 생긴 구독은 changed()가 새로 연결한다.
+            self._task = None
+            log(logger, logging.INFO, "realtime_idle_closed")
         except _SessionReplaced as replaced:
             # 같은 앱 키로 서버가 둘 떠 있으면 다시 연결할 때마다 서로를 끊어낸다.
             # 나중에 연결한 쪽이 지켜보도록 이 서버는 멈추고, 조용히 끊기지 않게 알린다.
-            self._stopped = True
-            stopped = [c for c in self.channels if c.subscription is not None]
+            self.stopped = True
+            stopped = self._features()
             log(
                 logger,
                 logging.ERROR,
@@ -276,6 +357,7 @@ class _Link:
             log(logger, logging.INFO, "realtime_logged_in", target=target)
             logged_in = healthy = True
             self._connection_no += 1
+            self.connection = self._connection_no
             self._broadcast(EventKind.CONNECTED, self._connection_no)
             await self._serve(connection, self._connection_no)
         except _SessionReplaced:
@@ -299,6 +381,7 @@ class _Link:
             )
         finally:
             if logged_in:
+                self.connection = None
                 self._broadcast(EventKind.DISCONNECTED, self._connection_no)
             try:
                 await connection.close()
@@ -349,10 +432,11 @@ class _Link:
         ]
         routed: set[int] = set()
         for channel in self.channels:
-            subscription = channel.subscription
-            if subscription is None:
+            if channel is self._shared:
                 continue
-            mine = [item for item in items if item.get("type") in subscription.types]
+            subscription = channel.subscription
+            types = {*(subscription.types if subscription else []), *channel.shared}
+            mine = [item for item in items if item.get("type") in types]
             routed.update(id(item) for item in mine)
             if mine:
                 channel.put(RealtimeEvent(EventKind.REAL, number, received_at, mine))
@@ -380,6 +464,10 @@ class _Link:
                     continue
                 sent[channel] = channel.version
                 await self._apply(connection, number, replies, channel, registered)
+            if not registered and self._idle():
+                # 마지막 구독까지 해지했다. 연결을 닫는다.
+                self._closed_idle = True
+                return
             await self._changed.wait()
 
     async def _apply(
@@ -425,7 +513,9 @@ class _Link:
                 target=self._spec.realtime_url,
                 **_fields(channel, wanted),
             )
-            channel.put(RealtimeEvent(EventKind.REGISTERED, number, self._hub.now()))
+            channel.put(
+                RealtimeEvent(EventKind.REGISTERED, number, self._hub.now(), group=wanted.grp_no)
+            )
             return
         log(
             logger,
@@ -436,7 +526,13 @@ class _Link:
             **_result(reply),
         )
         channel.put(
-            RealtimeEvent(EventKind.REJECTED, number, self._hub.now(), detail=_result(reply))
+            RealtimeEvent(
+                EventKind.REJECTED,
+                number,
+                self._hub.now(),
+                detail=_result(reply),
+                group=wanted.grp_no,
+            )
         )
 
     async def _request(
