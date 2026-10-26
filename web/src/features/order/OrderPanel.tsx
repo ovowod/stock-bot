@@ -113,7 +113,10 @@ function usePriceWithQuote(env: EnvironmentOption, target: OrderTarget) {
     const controller = new AbortController();
     fetchQuote(env.value, target.code, target.exchange, controller.signal).then(
       (quote) => {
-        const text = quote.price === null ? null : quoteToPriceText(quote.price, env.market);
+        const text =
+          quote.price === null
+            ? null
+            : quoteToPriceText(quote.price, env.market, target.category, target.sell ? 1 : -1);
         if (!touched.current && text !== null) setPriceText(text);
         setQuoteText(text);
         setStatus("ready");
@@ -123,7 +126,7 @@ function usePriceWithQuote(env: EnvironmentOption, target: OrderTarget) {
       },
     );
     return () => controller.abort();
-  }, [env.value, env.market, target.code, target.exchange]);
+  }, [env.value, env.market, target.code, target.exchange, target.category, target.sell]);
 
   const change = (value: string) => {
     touched.current = true;

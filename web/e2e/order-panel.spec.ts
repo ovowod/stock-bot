@@ -188,6 +188,19 @@ test("현재가를 불러오지 못하면 안내를 보여주고, 입력 여부�
   await expect(dialog.getByLabel("가격 (원)")).toHaveValue("185,000");
 });
 
+test("호가 단위에 맞지 않는 현재가는 매수에 불리하지 않은 아래 호가로 채운다", async ({ page }) => {
+  // 2026-10-26 모의 서버가 213,750원을 현재가로 줬고, 그대로 주문하면 호가단위 오류로 거부됐다.
+  await mockApi(page, { domestic: [rankingItem("005930", "삼성전자", null, 213_500)], us: [] }, [], ({ code }) => ({
+    body: { code, price: 213_750, fetched_at: "2026-10-26T01:04:45+00:00" },
+  }));
+  await openDashboard(page);
+  await selectEnvironment(page, "국내 모의");
+  await selectMenu(page, "순위");
+  await tradingValueCard(page).getByRole("button", { name: /삼성전자/ }).click();
+
+  await expect(panel(page, "삼성전자").getByLabel("가격 (원)")).toHaveValue("213,500");
+});
+
 test("현재가를 불러오는 중에 패널을 닫으면 조회를 취소하고 그 응답은 반영하지 않는다", async ({ page }) => {
   // 첫 조회만 늦게, 다른 가격으로 답한다.
   let count = 0;

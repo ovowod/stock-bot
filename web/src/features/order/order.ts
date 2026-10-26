@@ -108,8 +108,21 @@ export function parsePrice(
  * 조회한 현재가를 가격 칸에 넣을 문자열로 바꾼다. 미국 현재가는 소수 넷째 자리까지 오지만
  * 주문은 $1 이상이면 둘째 자리까지만 받으므로 반올림한다(예: 747.7512 -> 747.75).
  */
-export function quoteToPriceText(price: number, market: Market): string {
-  if (market === "domestic" || price < 1) return String(price);
+export function quoteToPriceText(
+  price: number,
+  market: Market,
+  category: string | null = null,
+  direction: 1 | -1 = -1,
+): string {
+  if (market === "domestic") {
+    // 모의 서버 현재가가 213,750원처럼 호가 단위에 맞지 않게 온 적이 있다(2026-10-26).
+    // 그대로 채우면 주문이 호가단위 오류로 거부되므로, 현재가보다 불리하지 않은 쪽 호가로 맞춘다.
+    // 매수는 아래, 매도는 위 호가다.
+    const tick = tickAt(domesticTicks(category), price);
+    if (price % tick === 0) return String(price);
+    return String((direction === 1 ? Math.ceil(price / tick) : Math.floor(price / tick)) * tick);
+  }
+  if (price < 1) return String(price);
   // 1.005 * 100이 100.49999...가 되는 부동소수 오차를 피하려고 먼저 자릿수를 정리한다.
   return String(Math.round(Number((price * 100).toFixed(6))) / 100);
 }
@@ -149,16 +162,22 @@ export function stepPrice(
 ): string | null {
   const { price } = parsePrice(priceText, market);
   if (price === null) return null;
-  const ticks =
-    market === "us" ? US_TICKS : /^(ETF|ETN)/.test(category ?? "") ? KRX_FUND_TICKS : KRX_STOCK_TICKS;
+  const ticks = market === "us" ? US_TICKS : domesticTicks(category);
   const units = market === "us" ? Math.round(price * US_SCALE) : price;
-  const tickAt = (value: number) => ticks.find(([limit]) => value < limit)![1];
   // 내릴 때는 바로 아래 가격의 구간 단위를 쓴다(예: 200,000원 -> 199,900원).
-  const tick = direction === 1 ? tickAt(units) : tickAt(units - 1);
+  const tick = direction === 1 ? tickAt(ticks, units) : tickAt(ticks, units - 1);
   const next = direction === 1 ? (Math.floor(units / tick) + 1) * tick : (Math.ceil(units / tick) - 1) * tick;
   if (next <= 0) return null;
   if (market === "domestic") return String(next);
   return (next / US_SCALE).toFixed(next < US_SCALE ? 4 : 2);
+}
+
+function domesticTicks(category: string | null): [number, number][] {
+  return /^(ETF|ETN)/.test(category ?? "") ? KRX_FUND_TICKS : KRX_STOCK_TICKS;
+}
+
+function tickAt(ticks: [number, number][], value: number): number {
+  return ticks.find(([limit]) => value < limit)![1];
 }
 
 /** 최종 확인마다 새로 만드는 주문 키. 보안 연결이 아니어도 쓸 수 있는 getRandomValues로 만든다. */
