@@ -11,7 +11,7 @@ from stock_bot import fill_watch
 from stock_bot import realtime as realtime_module
 from stock_bot.app import create_app
 from stock_bot.notification import DiscordNotifier
-from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, body_of, page_response
+from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, body_of, kiwoom_error, page_response
 from tests.fake_realtime import (
     OK_LOGIN,
     OK_REG,
@@ -1062,6 +1062,16 @@ async def test_lookup_gives_up_after_the_second_timeout(no_retry_wait):
 
     assert len(kiwoom.calls("ust21050")) == 2
     assert fields(payload)["미체결 주문"] == "조회 실패"
+
+
+async def test_us_reply_without_open_orders_is_shown_as_none():
+    # 실전 ust21050은 미체결이 없으면 return_code 20, 571758 메시지로 답한다(2026-10-26 실전 로그).
+    kiwoom = fill_kiwoom().reply(
+        "ust21050", kiwoom_error(20, "[2000](571758:해당 계좌의미체결내역이 없습니다.)")
+    )
+    [payload] = await us_fills(kiwoom, us_fill_event())
+
+    assert fields(payload)["미체결 주문 (0건)"] == "없음"
 
 
 async def test_kiwoom_rejection_is_not_retried(no_retry_wait):

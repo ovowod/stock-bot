@@ -23,6 +23,18 @@ US_REQUEST_BODY = {"ord_dt": "", "slby_tp": "0", "stex_tp": "", "stk_cd": ""}
 US_CANCEL_ORDER = "12"
 US_MODIFY_ORDER = "11"
 US_RESERVED = {"예약", "1"}
+# 실전 ust21050은 미체결이 없으면 빈 목록 대신 return_code 20과 이 메시지 코드로 답한다.
+# 2026-10-26 실전 로그: "[2000](571758:해당 계좌의미체결내역이 없습니다.)". 모의는 빈 목록이다.
+US_NO_OPEN_ORDERS_CODE = "571758:"
+
+
+def is_us_no_open_orders(exc: AppError) -> bool:
+    """ust21050의 "미체결 없음" 응답이면 True다. 오류가 아니라 빈 목록으로 다룬다."""
+    return (
+        exc.kind == "kiwoom_error"
+        and exc.detail.get("return_code") == 20
+        and US_NO_OPEN_ORDERS_CODE in exc.message
+    )
 
 
 class OpenOrderService:
@@ -56,7 +68,13 @@ class OpenOrderService:
     async def _us_orders(
         self, spec: EnvironmentSpec, listing_required: bool
     ) -> list[dict[str, Any]]:
-        data = await self._kiwoom.call(spec, US_API_ID, US_ACCOUNT_PATH, US_REQUEST_BODY)
+        try:
+            data = await self._kiwoom.call(spec, US_API_ID, US_ACCOUNT_PATH, US_REQUEST_BODY)
+        except AppError as exc:
+            if not is_us_no_open_orders(exc):
+                raise
+            log(logger, logging.INFO, "open_orders_none_reply", api_id=US_API_ID, cause=exc.message)
+            data = {"result_list": []}
         rows = [
             row
             for row in Reader(data, US_API_ID).rows("result_list")

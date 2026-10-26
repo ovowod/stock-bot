@@ -20,6 +20,7 @@ from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import FIELD_VALUE_LIMIT, DiscordNotifier, Embed, EmbedField
+from stock_bot.open_order import is_us_no_open_orders
 from stock_bot.reader import Reader
 from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub
 
@@ -410,7 +411,15 @@ class FillWatcher:
             body = {"ord_dt": "", "slby_tp": "0", "stex_tp": "", "stk_cd": ""}
             parse = _us_open_order
         try:
-            data = await self._lookup(spec, api_id, path, body)
+            try:
+                data = await self._lookup(spec, api_id, path, body)
+            except AppError as exc:
+                if spec.market is not Market.US or not is_us_no_open_orders(exc):
+                    raise
+                log(
+                    logger, logging.INFO, "open_orders_none_reply", api_id=api_id, cause=exc.message
+                )
+                data = {list_key: []}
             orders = [parse(row) for row in Reader(data, api_id).rows(list_key)]
         except AppError as exc:
             log(
