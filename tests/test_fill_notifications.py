@@ -180,8 +180,18 @@ async def test_domestic_buy_fill_is_sent_to_discord():
 async def test_last_fill_of_a_sell_order_shows_fully_filled():
     realtime = FakeRealtime()
     discord = FakeDiscord()
+    # 앞서 3주가 체결되고 남은 7주가 체결됐다. 910·911은 주문 전체의 평균 체결가·누적 수량이다.
     event = fill_event(
-        **{"905": "-매도", "907": "1", "910": "-61000", "911": "7", "902": "0", "903": "607000"}
+        **{
+            "905": "-매도",
+            "907": "1",
+            "910": "-61000",
+            "911": "10",
+            "902": "0",
+            "903": "610000",
+            "914": "-61000",
+            "915": "7",
+        }
     )
     async with running(realtime, discord):
         [connection] = await realtime.wait_registered()
@@ -202,8 +212,10 @@ async def test_only_fills_are_notified():
     async with running(realtime, discord, kiwoom):
         [connection] = await realtime.wait_registered()
         for status in ("접수", "확인", "취소", "거부"):
-            connection.push(fill_event(**{"913": status, "911": "", "910": ""}))
-        connection.push(fill_event(**{"911": "4"}))
+            connection.push(
+                fill_event(**{"913": status, "911": "", "910": "", "914": "", "915": ""})
+            )
+        connection.push(fill_event(**{"911": "4", "902": "6", "915": "4"}))
         await discord.wait_for(1)
         await asyncio.sleep(0.05)
 
@@ -217,7 +229,7 @@ async def test_unreadable_values_are_shown_as_unknown_and_next_fill_still_works(
     discord = FakeDiscord()
     async with running(realtime, discord):
         [connection] = await realtime.wait_registered()
-        connection.push(fill_event(**{"911": "abc", "902": "", "907": "9"}))
+        connection.push(fill_event(**{"915": "abc", "902": "", "907": "9"}))
         connection.push(fill_event())
         await discord.wait_for(2)
 
@@ -229,7 +241,7 @@ async def test_unreadable_values_are_shown_as_unknown_and_next_fill_still_works(
     unreadable = [
         r.fields["key"] for r in caplog.records if r.getMessage() == "fill_value_unreadable"
     ]
-    assert set(unreadable) == {"911", "902", "907"}
+    assert set(unreadable) == {"915", "902", "907"}
 
 
 async def test_fills_arrive_in_order_even_when_discord_asks_to_retry():
@@ -673,8 +685,17 @@ async def test_open_order_lookup_failure_still_sends_the_fill(reply, caplog):
 
 
 def sell(**overrides: str) -> dict:
-    """삼성전자 10주 매도 주문의 체결. 기본은 61,000원에 10주 전량 체결이다."""
-    values = {"905": "-매도", "907": "1", "910": "-61000", "911": "10", "902": "0"}
+    """삼성전자 10주 매도 주문의 체결. 기본은 61,000원에 10주 전량 체결이다.
+    910·911은 주문 전체의 평균 체결가·누적 수량, 914·915는 이번 체결분이다."""
+    values = {
+        "905": "-매도",
+        "907": "1",
+        "910": "-61000",
+        "911": "10",
+        "902": "0",
+        "914": "-61000",
+        "915": "10",
+    }
     return fill_event(**{**values, **overrides})
 
 
@@ -713,36 +734,50 @@ async def test_buy_fill_does_not_look_up_profit():
 
 async def test_split_sell_shows_profit_for_everything_filled_so_far():
     kiwoom = with_realized(realized_row(buy_uv="97602.9573459"))
+    # 2026-10-26 모의 로그처럼 910·911은 누적(평균 체결가, 누적 수량)으로 온다.
     first, second = await notify_fills(
         kiwoom,
-        sell(**{"910": "100000", "911": "3", "902": "7"}),
-        sell(**{"910": "101000", "911": "7", "902": "0"}),
+        sell(**{"910": "100000", "911": "3", "902": "7", "914": "100000", "915": "3"}),
+        sell(**{"910": "100700", "911": "10", "902": "0", "914": "101000", "915": "7"}),
     )
 
+    assert fields(first)["이번 체결"] == "3주 @ 100,000원 (300,000원)"
+    assert fields(second)["이번 체결"] == "7주 @ 101,000원 (707,000원)"
     # 3주 x 100,000 = 300,000 - 매입 292,808.87 = 7,191.13 → 7,191원
     assert fields(first)["매도 손익"].startswith("+7,191원 (+2.46%) · 매입가 97,603원")
-    # 300,000 + 707,000 = 1,007,000 - 매입 976,029.57 = 30,970.43 → 30,970원
+    # 10주 x 평균 100,700 = 1,007,000 - 매입 976,029.57 = 30,970.43 → 30,970원
     assert fields(second)["매도 손익"].startswith("+30,970원 (+3.17%)")
     assert fields(second)["누적"] == "10 / 10주 · 전량 체결"
 
 
-async def test_profit_is_unknown_when_earlier_fills_of_the_order_were_missed():
+async def test_profit_is_shown_even_when_earlier_fills_of_the_order_were_missed():
     # 서버가 앞선 3주 체결을 받지 못한 채(재시작 등) 나머지 7주 체결만 받은 경우.
+    # 누적 값으로 계산하므로 앞선 체결이 없어도 된다.
     kiwoom = with_realized(realized_row())
-    [payload] = await notify_fills(kiwoom, sell(**{"911": "7", "902": "0"}))
+    [payload] = await notify_fills(kiwoom, sell(**{"915": "7"}))
 
-    assert payload["embeds"][0]["title"] == "체결 · 매도"
+    # 10주 x 61,000 - 10주 x 60,000 = 10,000원
+    assert fields(payload)["매도 손익"].startswith("+10,000원 (+1.67%) · 매입가 60,000원")
+
+
+async def test_profit_fails_when_filled_quantity_is_not_cumulative(caplog):
+    # 911이 누적 수량(주문 수량 - 미체결 수량)과 다르면 계산 방식이 맞지 않으므로 추측하지 않는다.
+    kiwoom = with_realized(realized_row())
+    [payload] = await notify_fills(kiwoom, sell(**{"911": "7", "915": "7"}))
+
     assert payload["embeds"][0]["color"] == GRAY
     assert fields(payload)["매도 손익"] == "조회 실패"
+    [failed] = [r for r in caplog.records if r.getMessage() == "sell_profit_failed"]
+    assert failed.fields["cause"] == "filled_quantity_mismatch"  # type: ignore[attr-defined]
+    assert kiwoom.calls("ka10077") == []
 
 
 async def test_stale_partial_fills_are_forgotten(monkeypatch):
     monkeypatch.setattr(fill_watch, "FILL_MEMORY_SECONDS", 0)
-    kiwoom = with_realized(realized_row())
-    _, second = await notify_fills(
-        kiwoom,
-        sell(**{"911": "3", "902": "7"}),
-        sell(**{"911": "7", "902": "0"}),
+    _, second = await us_fills(
+        fill_kiwoom(),
+        us_sell(**{"911": "10", "902": "21", "50724": "0000120.7500"}),
+        us_sell(**{"911": "21", "902": "0", "50724": "0000253.5750"}),
     )
 
     assert fields(second)["매도 손익"] == "조회 실패"
@@ -905,6 +940,24 @@ async def test_us_split_sell_adds_up_fills_across_midnight():
     assert fields(first)["매도 손익"].startswith("+$4.25 (+3.52%)")
     # (125.00 + 264.60) - 374.325 = 15.275
     assert fields(second)["매도 손익"].startswith("+$15.28 (+4.08%)")
+
+
+async def test_us_split_sell_accepts_slightly_different_per_fill_costs():
+    # 2026-10-26 모의: MI 21주가 20주와 1주로 나눠 체결됐고, 1주 체결의 50724는 4.93이었다.
+    # 평균 매입단가 4.8658과 1.3% 다르지만 누계(약 102달러)가 아니라 체결분 값이다.
+    # 첫 체결의 50724는 로그에 없어 20 x 4.866 = 97.32로 둔다.
+    _, second = await us_fills(
+        fill_kiwoom(),
+        us_sell(
+            **{"900": "21", "911": "20", "902": "1", "910": "0000000.4728", "50724": "0000097.3200"}
+        ),
+        us_sell(
+            **{"900": "21", "911": "1", "902": "0", "910": "0000000.4728", "50724": "0000004.9300"}
+        ),
+    )
+
+    # 21 x 0.4728 = 9.9288 - (97.32 + 4.93) = -92.3212
+    assert fields(second)["매도 손익"].startswith("-$92.32 (-90.29%) · 매입가 $4.869")
 
 
 @pytest.mark.parametrize(
