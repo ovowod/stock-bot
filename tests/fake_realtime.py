@@ -2,26 +2,38 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 OK_LOGIN = {"trnm": "LOGIN", "return_code": 0, "return_msg": ""}
 OK_REG = {"trnm": "REG", "return_code": 0, "return_msg": ""}
+OK_REMOVE = {"trnm": "REMOVE", "return_code": 0, "return_msg": ""}
+
+# REG·REMOVE 요청 하나를 받아 응답을 고른다. None이면 응답하지 않는다.
+Responder = Callable[[dict[str, Any]], Any]
 
 
 class FakeConnection:
-    def __init__(self, url: str, login_reply: Any, reg_reply: Any) -> None:
+    def __init__(
+        self, url: str, login_reply: Any, reg_reply: Any, responder: Responder | None = None
+    ) -> None:
         self.url = url
         self.sent: list[dict[str, Any]] = []
         self.closed = False
         self.close_error: Exception | None = None
         self._inbox: asyncio.Queue[str | bytes | None] = asyncio.Queue()
         # None이면 응답하지 않는다.
-        self._replies = {"LOGIN": login_reply, "REG": reg_reply}
+        self._replies = {"LOGIN": login_reply, "REG": reg_reply, "REMOVE": OK_REMOVE}
+        self._responder = responder
 
     async def send(self, message: str) -> None:
         data = json.loads(message)
         self.sent.append(data)
-        reply = self._replies.get(data.get("trnm"))
+        trnm = data.get("trnm")
+        if self._responder is not None and trnm in ("REG", "REMOVE"):
+            reply = self._responder(data)
+        else:
+            reply = self._replies.get(trnm)
         if reply is not None:
             self.push(reply)
 
@@ -49,16 +61,25 @@ class FakeConnection:
     def sent_trnm(self) -> list[str]:
         return [m.get("trnm", "") for m in self.sent]
 
+    def requests(self, trnm: str) -> list[dict[str, Any]]:
+        return [m for m in self.sent if m.get("trnm") == trnm]
+
 
 class FakeRealtime:
     """login_reply·reg_reply에 목록을 주면 연결 순서대로 하나씩 쓰고, 마지막 값을 계속 쓴다.
-    refuse는 앞에서부터 거부할 연결 수다."""
+    refuse는 앞에서부터 거부할 연결 수다. responder를 주면 모든 연결의 REG·REMOVE 요청마다
+    그 함수로 응답을 고른다(특정 구독만 거부하거나 응답을 미룰 때)."""
 
     def __init__(
-        self, login_reply: Any = OK_LOGIN, reg_reply: Any = OK_REG, refuse: int = 0
+        self,
+        login_reply: Any = OK_LOGIN,
+        reg_reply: Any = OK_REG,
+        refuse: int = 0,
+        responder: Responder | None = None,
     ) -> None:
         self.login_reply = login_reply
         self.reg_reply = reg_reply
+        self.responder = responder
         self.refuse = refuse
         self.attempts = 0
         self.connections: list[FakeConnection] = []
@@ -68,7 +89,9 @@ class FakeRealtime:
         if self.attempts <= self.refuse:
             raise ConnectionRefusedError("fake refused")
         index = len(self.connections)
-        connection = FakeConnection(url, _nth(self.login_reply, index), _nth(self.reg_reply, index))
+        connection = FakeConnection(
+            url, _nth(self.login_reply, index), _nth(self.reg_reply, index), self.responder
+        )
         self.connections.append(connection)
         return connection
 

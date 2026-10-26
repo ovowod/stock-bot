@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from stock_bot.account import AccountService
 from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
+from stock_bot.auto_sell import AutoSellGuard
 from stock_bot.config import (
     DATA_DIR,
     ENVIRONMENTS,
@@ -30,7 +31,7 @@ from stock_bot.config import (
     parse_environment,
 )
 from stock_bot.errors import AppError
-from stock_bot.fill_watch import FillWatcher, RealtimeConnect, connect_websocket
+from stock_bot.fill_watch import FillWatcher
 from stock_bot.kiwoom import KST, KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
@@ -39,7 +40,9 @@ from stock_bot.open_order import OpenOrderService
 from stock_bot.order import OrderService
 from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
+from stock_bot.realtime import RealtimeConnect, RealtimeHub, connect_websocket
 from stock_bot.sl_tp import SlTpSettingsStore
+from stock_bot.sl_tp_watch import SlTpWatcher
 from stock_bot.stock_search import StockSearchService, today_kst
 
 logger = logging.getLogger("stock_bot.api")
@@ -54,12 +57,14 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     static_dir: Path | None = WEB_DIST,
     log_dir: Path | None = LOG_DIR,
-    data_dir: Path = DATA_DIR,
+    data_dir: Path | None = None,
     today: Callable[[], date] | None = None,
     clock: Callable[[], float] | None = None,
     notifier: DiscordNotifier | None = None,
     realtime_connect: RealtimeConnect | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> FastAPI:
+    """clock은 로그인 만료용 경과 시간이고, now는 시간대가 붙은 현재 시각이다."""
     setup_logging(log_dir)
     if environ is None:
         load_env_file()
@@ -94,17 +99,29 @@ def create_app(
         # 취소 재확인은 미국 종목 목록이 꼭 있어야 거래소를 정할 수 있다.
         lambda spec: open_orders.orders(spec, listing_required=True),
         on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
+        fresh_holding=accounts.fresh_holding,
     )
-    fills = FillWatcher(kiwoom, notifier, realtime_connect or connect_websocket)
-    sl_tp = SlTpSettingsStore(data_dir / "sl-tp")
+    now = now or (lambda: datetime.now(UTC))
+    realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
+    # 자동 매도 공통 장치. 체결 알림이 자동 매도의 체결을 알아보는 데도 쓴다.
+    guard = AutoSellGuard()
+    fills = FillWatcher(kiwoom, notifier, realtime, guard)
+    sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
+    sl_tp_watch = SlTpWatcher(
+        kiwoom, sl_tp, accounts.positions, orders, guard, realtime, notifier, now
+    )
+    sl_tp.on_saved = sl_tp_watch.settings_saved
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         fills.start()
+        sl_tp_watch.start()
         try:
             yield
         finally:
+            await sl_tp_watch.stop()
             await fills.stop()
+            await realtime.stop()
 
     app = FastAPI(
         title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan

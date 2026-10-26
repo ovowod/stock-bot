@@ -128,7 +128,12 @@ test("자동매매 → SL / TP에서 안내 문구와 빈 설정을 보여준다
 
   expect(loads).toEqual(["domestic_paper"]);
   await expect(page.getByText("평균 매입가 대비 수익률이 익절 기준 이상이거나 손절 기준 이하가 되면")).toBeVisible();
-  await expect(page.getByText("자동매도는 아직 동작하지 않습니다. 지금은 설정만 저장됩니다.")).toBeVisible();
+  await expect(
+    page.getByText(
+      "이 화면을 닫아도 서버가 켜져 있으면 동작합니다. 서버와 키움의 연결이 끊긴 동안에는 판정하지 않습니다.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByText("아직 동작하지 않습니다")).toHaveCount(0);
   await expect(page.getByText("제외종목이 없습니다")).toBeVisible();
   await expect(page.getByText("모든 SL/TP 세션에 똑같이 적용됩니다")).toBeVisible();
   await expect(saveButton(page)).toBeDisabled();
@@ -324,6 +329,25 @@ test("미국 환경은 뉴욕시간 정규장으로 세션을 만든다", async 
   await expect(sessionList(page)).toContainText("정규장(09:30–16:00) 안에서만 정할 수 있습니다");
   await expectNoHorizontalScroll(page);
 });
+
+for (const [date, korea] of [
+  // 미국 서머타임(EDT)에는 뉴욕보다 13시간, 끝난 뒤(EST, 11월 1일부터)에는 14시간 빠르다.
+  ["2026-10-26T03:00:00Z", "한국시간 22:30–다음 날 05:00 (오늘 기준)"],
+  ["2026-11-02T03:00:00Z", "한국시간 23:30–다음 날 06:00 (오늘 기준)"],
+] as const) {
+  test(`미국 정규장 옆에 한국시간을 함께 보여준다 (${date.slice(0, 10)})`, async ({ page }) => {
+    await page.clock.setFixedTime(new Date(date));
+    await mockSlTp(page);
+    await openSlTp(page);
+    await expect(page.getByText("정규장 09:00–15:30 · 한국시간(Asia/Seoul)")).toBeVisible();
+    // 국내는 이미 한국시간이라 덧붙이지 않는다.
+    await expect(page.getByText("(오늘 기준)")).toHaveCount(0);
+
+    await page.getByRole("radio", { name: "미국 모의" }).click();
+    await expect(page.getByText(`정규장 09:30–16:00 · 뉴욕시간(America/New_York) · ${korea}`)).toBeVisible();
+    await expectNoHorizontalScroll(page);
+  });
+}
 
 test("저장하는 동안에는 세션 추가·삭제·시각 편집이 막힌다", async ({ page }) => {
   await mockSlTp(page, {

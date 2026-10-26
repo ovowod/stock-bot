@@ -13,6 +13,42 @@ export const TIMEZONE_NAMES: Record<string, string> = {
   "America/New_York": "뉴욕시간",
 };
 
+const KOREA = "Asia/Seoul";
+
+/** timeZone에서 본 그 순간의 날짜·시각 부분(년·월·일·시·분). */
+function zonedParts(instant: number, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(instant);
+  const get = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+  return { year: get("year"), month: get("month"), day: get("day"), hour: get("hour"), minute: get("minute") };
+}
+
+/**
+ * 그 시장 시간대의 오늘 HH:MM이 한국시간으로 몇 시인지. 날짜가 넘어가면 "다음 날"을 붙인다.
+ * 서머타임은 now의 날짜로 정해지므로 같은 정규장도 계절에 따라 한국시간이 1시간 달라진다.
+ */
+export function koreaTime(time: string, timeZone: string, now: Date = new Date()): string {
+  const today = zonedParts(now.getTime(), timeZone);
+  const wall = Date.UTC(today.year, today.month - 1, today.day, Number(time.slice(0, 2)), Number(time.slice(3)));
+  // 그 시간대의 벽시계 시각이 wall이 되는 순간을 찾는다. 시차를 두 번 맞추면 서머타임 경계에서도 맞는다.
+  let instant = wall;
+  for (let i = 0; i < 2; i++) {
+    const seen = zonedParts(instant, timeZone);
+    instant += wall - Date.UTC(seen.year, seen.month - 1, seen.day, seen.hour, seen.minute);
+  }
+  const korea = zonedParts(instant, KOREA);
+  const text = `${String(korea.hour).padStart(2, "0")}:${String(korea.minute).padStart(2, "0")}`;
+  const nextDay = Date.UTC(korea.year, korea.month - 1, korea.day) > Date.UTC(today.year, today.month - 1, today.day);
+  return nextDay ? `다음 날 ${text}` : text;
+}
+
 const toMinutes = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
 const fromMinutes = (minutes: number) =>
   `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;

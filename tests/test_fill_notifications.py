@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 
 from stock_bot import fill_watch
+from stock_bot import realtime as realtime_module
 from stock_bot.app import create_app
 from stock_bot.notification import DiscordNotifier
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, body_of, page_response
@@ -253,17 +254,27 @@ async def test_failed_login_does_not_register_and_closes(caplog):
     assert "realtime_login_failed" in [r.getMessage() for r in caplog.records]
 
 
-async def test_failed_registration_is_logged_and_closes(caplog):
-    realtime = FakeRealtime(reg_reply={"trnm": "REG", "return_code": 1, "return_msg": "x"})
-    async with running(realtime):
-        await wait_until(lambda: bool(realtime.connections) and realtime.connections[0].closed)
+async def test_failed_registration_keeps_the_connection_open(fast_register_retry, caplog):
+    # REG가 거부돼도 연결은 그대로 두고 구독만 다시 등록한다(spec 체결 알림 이전).
+    # 공유 연결의 다른 구독까지 끊지 않기 위해서다. 예전에는 연결을 닫고 다시 연결했다.
+    replies = iter([FAILED_REG, OK_REG])
+    realtime = FakeRealtime(responder=lambda message: next(replies))
+    discord = FakeDiscord()
+    async with running(realtime, discord):
+        connection = await first_connection(realtime)
+        await wait_until(lambda: len(connection.requests("REG")) == 2)
+        connection.push(fill_event())
+        await discord.wait_for(1)
 
+    assert "realtime_disconnected" not in [r.getMessage() for r in caplog.records]
+    assert len(realtime.connections) == 1
+    assert connection.sent_trnm()[:3] == ["LOGIN", "REG", "REG"]
     assert "realtime_register_failed" in [r.getMessage() for r in caplog.records]
 
 
 @pytest.mark.parametrize("silent", ["login_reply", "reg_reply"])
 async def test_no_reply_to_login_or_registration_times_out(monkeypatch, caplog, silent):
-    monkeypatch.setattr(fill_watch, "RESPONSE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(realtime_module, "RESPONSE_TIMEOUT_SECONDS", 0.05)
     realtime = FakeRealtime()
     setattr(realtime, silent, None)
     async with running(realtime):
@@ -282,7 +293,9 @@ async def test_connection_and_fill_steps_are_logged_without_secrets(caplog):
         await discord.wait_for(1)
         await wait_until(lambda: "fill_notified" in [r.getMessage() for r in caplog.records])
 
-    events = [r.getMessage() for r in caplog.records if r.name == "stock_bot.fill_watch"]
+    # 연결 단계는 공유 실시간 연결이, 체결 단계는 체결 감시가 남긴다.
+    watched = ("stock_bot.fill_watch", "stock_bot.realtime")
+    events = [r.getMessage() for r in caplog.records if r.name in watched]
     assert events == [
         "fill_watch_started",
         "fill_watch_skipped",
@@ -320,9 +333,20 @@ FAILED_REG = {"trnm": "REG", "return_code": 1, "return_msg": "x"}
 
 
 @pytest.fixture
+def fast_register_retry(monkeypatch):
+    monkeypatch.setattr(fill_watch, "REGISTER_RETRY_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(fill_watch, "REGISTER_RETRY_MAX_SECONDS", 0.04)
+
+
+async def first_connection(realtime: FakeRealtime):
+    await wait_until(lambda: bool(realtime.connections))
+    return realtime.connections[0]
+
+
+@pytest.fixture
 def fast_reconnect(monkeypatch):
-    monkeypatch.setattr(fill_watch, "RECONNECT_INITIAL_SECONDS", 0.01)
-    monkeypatch.setattr(fill_watch, "RECONNECT_MAX_SECONDS", 0.04)
+    monkeypatch.setattr(realtime_module, "RECONNECT_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(realtime_module, "RECONNECT_MAX_SECONDS", 0.04)
 
 
 def waits(caplog) -> list[float]:
@@ -369,7 +393,7 @@ async def test_failed_login_gets_a_new_token_before_reconnecting(fast_reconnect)
 
 
 async def test_no_login_reply_reconnects_with_a_new_token(fast_reconnect, monkeypatch):
-    monkeypatch.setattr(fill_watch, "RESPONSE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(realtime_module, "RESPONSE_TIMEOUT_SECONDS", 0.05)
     realtime = FakeRealtime(login_reply=[None, OK_LOGIN])
     async with running(realtime):
         await realtime.wait_registered()
@@ -381,20 +405,53 @@ async def test_no_login_reply_reconnects_with_a_new_token(fast_reconnect, monkey
     assert first.sent[0]["token"] != second.sent[0]["token"]
 
 
-async def test_wait_grows_while_registration_fails_and_resets_after_success(fast_reconnect, caplog):
-    realtime = FakeRealtime(reg_reply=[FAILED_REG, FAILED_REG, FAILED_REG, FAILED_REG, OK_REG])
-    async with running(realtime):
-        registered = (await realtime.wait_registered(5))[4]
-        registered.drop()
-        await wait_until(lambda: len(waits(caplog)) >= 5)
+def register_waits(caplog) -> list[float]:
+    return [
+        r.fields["wait_seconds"]
+        for r in caplog.records
+        if r.getMessage() == "fill_watch_register_retry"
+    ]
 
-    # 연결은 되지만 REG가 실패하면 간격이 늘어나고, 등록에 성공한 뒤 끊기면 처음으로 돌아간다.
-    assert waits(caplog)[:5] == [0.01, 0.02, 0.04, 0.04, 0.01]
+
+async def test_register_retry_wait_grows_and_resets_after_success(
+    fast_reconnect, fast_register_retry, caplog
+):
+    # 예전에는 REG 거부 때 연결을 닫고 재연결 간격을 늘렸다. 지금은 연결을 유지한 채
+    # REG만 늘어나는 간격으로 다시 보내고, 등록에 성공하면 간격을 처음으로 되돌린다.
+    replies = iter([FAILED_REG] * 4 + [OK_REG, FAILED_REG, OK_REG])
+    realtime = FakeRealtime(responder=lambda message: next(replies))
+    async with running(realtime):
+        first = await first_connection(realtime)
+        await wait_until(lambda: len(first.requests("REG")) == 5)
+        first.drop()
+        await wait_until(lambda: len(realtime.connections) == 2)
+        second = realtime.connections[1]
+        await wait_until(lambda: len(second.requests("REG")) == 2)
+
+    assert first.sent_trnm() == ["LOGIN", "REG", "REG", "REG", "REG", "REG"]
+    assert register_waits(caplog) == [0.01, 0.02, 0.04, 0.04, 0.01]
+
+
+async def test_register_retry_is_dropped_once_registration_succeeds(fast_reconnect, monkeypatch):
+    # 거부 뒤 다시 등록을 기다리는 동안 재연결로 등록에 성공하면, 기다리던 재등록은 보내지 않는다.
+    monkeypatch.setattr(fill_watch, "REGISTER_RETRY_INITIAL_SECONDS", 0.2)
+    replies = iter([FAILED_REG])
+    realtime = FakeRealtime(responder=lambda message: next(replies, OK_REG))
+    async with running(realtime):
+        first = await first_connection(realtime)
+        await wait_until(lambda: len(first.requests("REG")) == 1)
+        first.drop()
+        await wait_until(lambda: len(realtime.connections) == 2)
+        second = realtime.connections[1]
+        await wait_until(lambda: len(second.requests("REG")) == 1)
+        await asyncio.sleep(0.3)
+        assert len(second.requests("REG")) == 1
 
 
 async def test_shutdown_stops_waiting_to_reconnect(monkeypatch):
-    monkeypatch.setattr(fill_watch, "RECONNECT_INITIAL_SECONDS", 30)
-    realtime = FakeRealtime(reg_reply=FAILED_REG)
+    monkeypatch.setattr(realtime_module, "RECONNECT_INITIAL_SECONDS", 30)
+    # REG 거부는 더 이상 연결을 닫지 않으므로 LOGIN 거부로 재연결 대기를 만든다.
+    realtime = FakeRealtime(login_reply=FAILED_LOGIN)
     started = asyncio.get_running_loop().time()
     async with running(realtime):
         await wait_until(lambda: bool(realtime.connections) and realtime.connections[0].closed)
@@ -404,7 +461,8 @@ async def test_shutdown_stops_waiting_to_reconnect(monkeypatch):
 
 
 async def test_web_api_keeps_working_while_realtime_fails(fast_reconnect):
-    realtime = FakeRealtime(reg_reply=FAILED_REG)
+    # REG 거부는 더 이상 연결을 닫지 않으므로 LOGIN 거부로 재연결이 반복되게 한다.
+    realtime = FakeRealtime(login_reply=FAILED_LOGIN)
     async with running(realtime) as app:
         await wait_until(lambda: len(realtime.connections) >= 2)
         async with httpx.AsyncClient(

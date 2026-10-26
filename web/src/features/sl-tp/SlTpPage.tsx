@@ -5,6 +5,7 @@ import { ErrorNotice, Panel } from "../account/parts";
 import { useStockSearch } from "../search/useStockSearch";
 import {
   hasErrors,
+  koreaTime,
   nextSession,
   sessionErrors,
   STOP_LOSS_RANGE,
@@ -36,7 +37,9 @@ export function SlTpPage({ environment }: { environment: EnvironmentValue }) {
             전량을 시장가로 매도합니다. 제외종목은 매도하지 않습니다.
           </span>
         </p>
-        <p className="pl-6 font-semibold">자동매도는 아직 동작하지 않습니다. 지금은 설정만 저장됩니다.</p>
+        <p className="pl-6 font-semibold">
+          이 화면을 닫아도 서버가 켜져 있으면 동작합니다. 서버와 키움의 연결이 끊긴 동안에는 판정하지 않습니다.
+        </p>
       </div>
 
       {state.status === "loading" && (
@@ -210,6 +213,9 @@ function SessionsSection({
       <p className="-mt-1 mb-3 text-sm text-muted">
         정규장 {hours.start}–{hours.end} · {TIMEZONE_NAMES[settings.timezone] ?? settings.timezone}(
         {settings.timezone})
+        {/* 미국 정규장은 한국시간으로 바꿔 함께 보여준다. 서머타임에 따라 1시간 달라져 오늘 기준이다. */}
+        {settings.timezone !== "Asia/Seoul" &&
+          ` · 한국시간 ${koreaTime(hours.start, settings.timezone)}–${koreaTime(hours.end, settings.timezone)} (오늘 기준)`}
       </p>
       {!settings.can_enable && (
         <p className="mb-3 rounded-2xl bg-real-soft px-4 py-3 text-sm font-semibold text-real">

@@ -1,45 +1,34 @@
 """키움 실시간 주문체결을 지켜보다가 체결 알림을 Discord로 보낸다.
 
-인증정보마다 실시간 연결을 하나 열고, LOGIN 뒤 주문체결 실시간 항목을 등록한다.
+공유 실시간 연결(realtime)에 인증정보마다 주문체결 실시간 항목을 구독한다.
 체결 감시는 조회만 하고 주문 TR은 부르지 않는다.
 """
 
 import asyncio
-import json
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Any, Protocol
-
-from websockets.asyncio.client import connect as websocket_connect
+from typing import Any
 
 from stock_bot.account import DOMESTIC_ACCOUNT_PATH, US_ACCOUNT_PATH
+from stock_bot.auto_sell import AutoSellGuard
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import FIELD_VALUE_LIMIT, DiscordNotifier, Embed, EmbedField
 from stock_bot.reader import Reader
+from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub
 
 logger = logging.getLogger("stock_bot.fill_watch")
 
-
-class RealtimeConnection(Protocol):
-    async def send(self, message: str) -> None: ...
-    async def recv(self) -> str | bytes: ...
-    async def close(self) -> None: ...
-
-
-RealtimeConnect = Callable[[str], Awaitable[RealtimeConnection]]
-
-# LOGIN·REG 응답을 기다리는 시간. 넘으면 연결을 닫고 다시 연결한다.
-RESPONSE_TIMEOUT_SECONDS = 10.0
-# 다시 연결하기 전 기다리는 시간. 실패가 이어지면 두 배씩 늘리고, 등록에 성공하면 처음으로 되돌린다.
-RECONNECT_INITIAL_SECONDS = 1.0
-RECONNECT_MAX_SECONDS = 60.0
+# 구독이 거부되면 연결은 그대로 두고 이 간격으로 다시 등록한다.
+# 실패가 이어지면 두 배씩 늘리고, 등록에 성공하면 처음으로 되돌린다.
+REGISTER_RETRY_INITIAL_SECONDS = 1.0
+REGISTER_RETRY_MAX_SECONDS = 60.0
 
 # 미체결·매입가 조회가 연결 실패·시간 초과로 끝나면 이만큼 기다렸다가 한 번만 다시 시도한다.
 # 조회만 하는 TR이라 다시 보내도 안전하다. 키움 오류 응답은 다시 시도하지 않는다.
@@ -50,10 +39,13 @@ LOOKUP_RETRY_SECONDS = 1.0
 # 날짜로 지우지 않는 건 미국 장이 한국 자정을 넘기 때문이다.
 FILL_MEMORY_SECONDS = 24 * 3600
 
-# 같은 앱 키로 다른 연결이 들어왔을 때 키움이 기존 연결에 보내는 SYSTEM 코드(모의 서버에서 확인).
-SESSION_REPLACED_CODE = "R10001"
+# 매도 체결이 온 종목에 진행 중인 자동 매도가 있으면, 체결 이벤트를 받은 때부터
+# 이만큼 그 주문 결과를 기다린 뒤 주문번호를 맞춰 본다.
+# 시장가는 주문 응답보다 체결 통보가 먼저 올 수 있다.
+AUTO_SELL_RESULT_WAIT_SECONDS = 5.0
+AUTO_SELL_MARK = "SL / TP 자동 매도"
 
-# 실시간 연결 하나가 등록할 실시간 항목과 그 이벤트의 투자 환경.
+# 실시간 연결 하나에 구독할 실시간 항목과 그 이벤트의 투자 환경.
 # 00은 국내 주문체결, F5는 미국 실시간 체결이다.
 # 국내 실전과 미국 실전은 인증정보와 계좌가 같아 연결 하나로 받는다.
 Watch = dict[str, EnvironmentSpec]
@@ -76,23 +68,26 @@ def _environments(watch: Watch) -> str:
     return ",".join(spec.environment.value for spec in watch.values())
 
 
-async def connect_websocket(url: str) -> RealtimeConnection:
-    return await websocket_connect(url)
-
-
 class FillWatcher:
     def __init__(
-        self, kiwoom: KiwoomClient, notifier: DiscordNotifier, connect: RealtimeConnect
+        self,
+        kiwoom: KiwoomClient,
+        notifier: DiscordNotifier,
+        hub: RealtimeHub,
+        guard: AutoSellGuard,
     ) -> None:
         self._kiwoom = kiwoom
         self._notifier = notifier
-        self._connect = connect
-        self._tasks: list[asyncio.Task[None]] = []
+        self._hub = hub
+        # 자동 매도 공통 장치. 접수된 자동 매도의 주문번호로 체결에 표시를 붙인다.
+        self._guard = guard
+        # 거부된 구독을 다시 등록하려고 기다리는 작업. 감시마다 많아야 하나다.
+        self._retries: set[asyncio.Task[None]] = set()
         # (투자 환경, 주문번호)별로 지금까지 받은 매도 체결. 서버를 재시작하면 사라진다.
         self._sell_fills: dict[tuple[str, str], _OrderFills] = {}
 
     def start(self) -> None:
-        """알림이 꺼져 있으면 지켜보지 않는다. 인증정보가 없는 투자 환경은 건너뛴다."""
+        """알림이 꺼져 있으면 구독하지 않는다. 인증정보가 없는 투자 환경은 건너뛴다."""
         if not self._notifier.enabled:
             log(logger, logging.INFO, "fill_watch_disabled", cause="discord_disabled")
             return
@@ -117,144 +112,74 @@ class FillWatcher:
                 target=spec.realtime_url,
                 type=list(watch),
             )
-            self._tasks.append(asyncio.create_task(self._watch(watch)))
+            self._watch(watch)
 
     async def stop(self) -> None:
-        for task in self._tasks:
+        for task in self._retries:
             task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
+        await asyncio.gather(*self._retries, return_exceptions=True)
+        self._retries.clear()
 
-    async def _watch(self, watch: Watch) -> None:
-        # 작업마다 context가 따로라 여기서 정하면 이 감시의 모든 로그에 투자 환경이 남는다.
-        environment_var.set(_environments(watch))
-        # 받는 쪽은 큐에 넣기만 하고 작업자가 순서대로 처리한다.
-        # 알림 처리가 늦어도 PING 응답이 막히지 않고, 같은 주문의 체결 순서가 지켜진다.
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        worker = asyncio.create_task(self._work(watch, queue))
-        try:
-            # 끊긴 동안의 체결은 보충하지 않는다. 다시 연결해 등록만 한다.
-            delay = RECONNECT_INITIAL_SECONDS
-            while True:
-                if await self._session(watch, queue):
-                    delay = RECONNECT_INITIAL_SECONDS
-                log(logger, logging.WARNING, "realtime_reconnect_wait", wait_seconds=delay)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, RECONNECT_MAX_SECONDS)
-        except _SessionReplaced as replaced:
-            # 같은 앱 키로 서버가 둘 떠 있으면 다시 연결할 때마다 서로를 끊어낸다.
-            # 나중에 연결한 쪽이 지켜보도록 이 서버는 멈추고, 알림이 조용히 끊기지 않게 알린다.
-            log(
-                logger,
-                logging.ERROR,
-                "realtime_session_replaced",
-                code=replaced.code,
-                message=replaced.message,
-            )
-            labels = "·".join(spec.label for spec in watch.values())
-            await self._notifier.send(
-                f"[{labels}]",
-                embed=Embed(
-                    title="체결 감시 중단",
-                    description=(
-                        "다른 곳에서 같은 앱 키로 접속해 이 서버의 체결 감시를 멈춥니다. "
-                        "다시 지켜보려면 이 서버를 재시작하세요."
-                    ),
-                    color=NEUTRAL_COLOR,
-                ),
-            )
-        finally:
-            worker.cancel()
-            await asyncio.gather(worker, return_exceptions=True)
+    def _watch(self, watch: Watch) -> None:
+        # 끊긴 동안의 체결은 보충하지 않는다. 공유 연결이 다시 연결해 등록만 한다.
+        # 주문체결은 계좌 단위 항목이라 SL / TP와 함께 받는다.
+        types = list(watch)
+        delay = REGISTER_RETRY_INITIAL_SECONDS
+        retry: asyncio.Task[None] | None = None
 
-    async def _session(self, watch: Watch, queue: asyncio.Queue[dict[str, Any]]) -> bool:
-        """연결 하나가 끝날 때까지 받는다. LOGIN과 REG까지 성공했으면 True다."""
-        registered = False
-        spec = _connection_spec(watch)
-        target = spec.realtime_url
-        try:
-            token = await self._kiwoom.access_token(spec)
-            connection = await self._connect(target)
-        except Exception as exc:
-            log(
-                logger,
-                logging.ERROR,
-                "realtime_connect_failed",
-                target=target,
-                error_type=type(exc).__name__,
-                cause=str(exc),
-            )
-            return registered
-        log(logger, logging.INFO, "realtime_connected", target=target)
-        try:
-            await _send(connection, {"trnm": "LOGIN", "token": token})
-            await _expect(connection, "LOGIN")
-            log(logger, logging.INFO, "realtime_logged_in", target=target)
-            await _send(
-                connection,
-                {
-                    "trnm": "REG",
-                    "grp_no": "1",
-                    "refresh": "1",
-                    "data": [{"item": [""], "type": list(watch)}],
-                },
-            )
-            await _expect(connection, "REG")
-            log(logger, logging.INFO, "realtime_registered", target=target, type=list(watch))
-            registered = True
-            while True:
-                message = await _receive(connection)
-                if message.get("trnm") == "REAL":
-                    queue.put_nowait(message)
-        except _SessionReplaced:
-            raise
-        except _RealtimeFailure as failure:
-            log(logger, logging.ERROR, failure.event, target=target, **failure.fields)
-            if failure.fields.get("trnm") == "LOGIN":
-                # LOGIN이 거부되거나 응답이 없으면 만료·무효 토큰일 수 있다.
-                # 다음 연결은 새 토큰으로 한다.
-                await self._kiwoom.discard_access_token(spec, token)
-                log(logger, logging.WARNING, "realtime_token_discarded", target=target)
-        except Exception as exc:
-            log(
-                logger,
-                logging.WARNING,
-                "realtime_disconnected",
-                target=target,
-                error_type=type(exc).__name__,
-                cause=str(exc),
-            )
-        finally:
-            try:
-                await connection.close()
-            except Exception as exc:
-                # 여기서 오류가 새면 재연결 반복이 끝나 체결 감시가 조용히 멈춘다.
+        async def on_event(event: RealtimeEvent) -> None:
+            nonlocal delay, retry
+            # 채널 작업자의 로그에 이 감시의 투자 환경이 남는다. 체결마다 다시 정한다.
+            environment_var.set(_environments(watch))
+            if event.kind is EventKind.REAL:
+                for item in event.items:
+                    try:
+                        await self._handle(watch, item, event)
+                    except Exception as exc:
+                        # 한 체결의 처리 오류로 같은 메시지의 다른 체결을 놓치지 않게 한다.
+                        logger.error(
+                            "fill_handle_failed",
+                            exc_info=exc,
+                            extra={"fields": {"error_type": type(exc).__name__}},
+                        )
+            elif event.kind is EventKind.REGISTERED:
+                # 재연결로 먼저 등록됐으면 기다리던 재등록은 보내지 않는다.
+                delay = REGISTER_RETRY_INITIAL_SECONDS
+                if retry is not None:
+                    retry.cancel()
+                    retry = None
+            elif event.kind is EventKind.REJECTED:
                 log(
                     logger,
                     logging.WARNING,
-                    "realtime_close_failed",
-                    target=target,
-                    error_type=type(exc).__name__,
-                    cause=str(exc),
+                    "fill_watch_register_retry",
+                    target=_connection_spec(watch).realtime_url,
+                    type=list(watch),
+                    wait_seconds=delay,
                 )
-        return registered
+                if retry is not None:
+                    retry.cancel()
+                retry = self._retry(channel.share, types, delay)
+                delay = min(delay * 2, REGISTER_RETRY_MAX_SECONDS)
 
-    async def _work(self, watch: Watch, queue: asyncio.Queue[dict[str, Any]]) -> None:
-        while True:
-            message = await queue.get()
-            data = message.get("data")
-            for item in data if isinstance(data, list) else []:
-                try:
-                    await self._handle(watch, item)
-                except Exception as exc:
-                    # 한 체결의 처리 오류로 작업자가 멈추면 그 뒤 체결 알림이 모두 끊긴다.
-                    logger.error(
-                        "fill_handle_failed",
-                        exc_info=exc,
-                        extra={"fields": {"error_type": type(exc).__name__}},
-                    )
+        channel = self._hub.channel(_connection_spec(watch), "fill_watch", "체결 감시", on_event)
+        channel.share(types)
 
-    async def _handle(self, watch: Watch, item: Any) -> None:
+    def _retry(
+        self, share: Callable[[list[str]], None], types: list[str], delay: float
+    ) -> asyncio.Task[None]:
+        """밀려나 멈춘 연결이면 다시 구독해도 연결을 열지 않는다."""
+
+        async def later() -> None:
+            await asyncio.sleep(delay)
+            share(types)
+
+        task = asyncio.create_task(later())
+        self._retries.add(task)
+        task.add_done_callback(self._retries.discard)
+        return task
+
+    async def _handle(self, watch: Watch, item: Any, event: RealtimeEvent) -> None:
         # 체결 하나의 수신·처리·알림 로그를 같은 ID로 묶는다.
         request_id_var.set(uuid.uuid4().hex[:12])
         values = item.get("values") if isinstance(item, dict) else None
@@ -281,10 +206,54 @@ class FillWatcher:
             quantity=_plain(fill.quantity),
             remaining=_plain(fill.remaining),
         )
+        trigger_request_id = await self._auto_sell(spec, fill, event)
         profit = await self._sell_profit(spec, fill) if fill.side == "sell" else None
         open_orders = await self._open_orders(spec)
-        sent = await self._notifier.send(embed=_fill_embed(fill, profit, open_orders), spec=spec)
-        log(logger, logging.INFO, "fill_notified", order_no=fill.order_no, sent=sent)
+        embed = _fill_embed(fill, profit, open_orders, auto_sell=trigger_request_id is not None)
+        sent = await self._notifier.send(embed=embed, spec=spec)
+        log(
+            logger,
+            logging.INFO,
+            "fill_notified",
+            order_no=fill.order_no,
+            sent=sent,
+            trigger_request_id=trigger_request_id,
+        )
+
+    async def _auto_sell(
+        self, spec: EnvironmentSpec, fill: Fill, event: RealtimeEvent
+    ) -> str | None:
+        """이 체결이 SL / TP 자동 매도의 것이면 그 트리거 요청 ID다.
+
+        체결 처리의 요청 ID는 체결마다 따로 두고, 트리거 ID로 찾으면 부분 체결까지 나오게 한다.
+        """
+        if fill.side != "sell" or fill.code is None or fill.order_no is None:
+            return None
+        waited = time.monotonic() - event.received_clock
+        settled = await self._guard.settled(
+            spec.environment, fill.code, AUTO_SELL_RESULT_WAIT_SECONDS - waited
+        )
+        accepted = self._guard.accepted(spec.environment, fill.order_no)
+        if accepted is None:
+            if not settled:
+                log(
+                    logger,
+                    logging.WARNING,
+                    "fill_auto_sell_wait_timeout",
+                    order_no=fill.order_no,
+                    # 큐에서 기다린 시간을 포함해 체결 이벤트를 받은 뒤 지난 시간이다.
+                    waited_seconds=round(time.monotonic() - event.received_clock, 3),
+                    limit_seconds=AUTO_SELL_RESULT_WAIT_SECONDS,
+                )
+            return None
+        log(
+            logger,
+            logging.INFO,
+            "fill_auto_sell_matched",
+            order_no=fill.order_no,
+            trigger_request_id=accepted.trigger_request_id,
+        )
+        return accepted.trigger_request_id
 
     async def _sell_profit(self, spec: EnvironmentSpec, fill: Fill) -> SellProfit:
         """지금까지 체결된 수량 전체의 매도 손익. 수수료·세금은 빼지 않는다."""
@@ -434,72 +403,6 @@ class FillWatcher:
             return None
         log(logger, logging.INFO, "open_orders_fetched", api_id=api_id, count=len(orders))
         return orders
-
-
-async def _send(connection: RealtimeConnection, message: dict[str, Any]) -> None:
-    await connection.send(json.dumps(message, ensure_ascii=False))
-
-
-class _SessionReplaced(Exception):
-    """같은 앱 키로 다른 연결이 들어와 키움이 이 연결을 끊었다."""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(code)
-        self.code = code
-        self.message = message
-
-
-class _RealtimeFailure(Exception):
-    def __init__(self, event: str, **fields: Any) -> None:
-        super().__init__(event)
-        self.event = event
-        self.fields = fields
-
-
-async def _expect(connection: RealtimeConnection, trnm: str) -> dict[str, Any]:
-    """trnm 응답을 기다린다. 제한 시간을 넘거나 return_code가 0이 아니면 실패다."""
-    try:
-        async with asyncio.timeout(RESPONSE_TIMEOUT_SECONDS):
-            message = await _receive(connection)
-            while message.get("trnm") != trnm:
-                message = await _receive(connection)
-    except TimeoutError:
-        raise _RealtimeFailure(
-            "realtime_reply_timeout", trnm=trnm, timeout_seconds=RESPONSE_TIMEOUT_SECONDS
-        ) from None
-    if str(message.get("return_code")) != "0":
-        raise _RealtimeFailure(
-            "realtime_login_failed" if trnm == "LOGIN" else "realtime_register_failed",
-            trnm=trnm,
-            return_code=message.get("return_code"),
-            return_msg=message.get("return_msg"),
-        )
-    return message
-
-
-async def _receive(connection: RealtimeConnection) -> dict[str, Any]:
-    """PING이 아닌 다음 메시지를 받는다. PING은 받은 그대로 돌려보낸다."""
-    while True:
-        raw = await connection.recv()
-        text = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
-        try:
-            message = json.loads(text)
-        except ValueError:
-            message = None
-        if not isinstance(message, dict):
-            log(logger, logging.WARNING, "realtime_message_malformed", body_head=text[:200])
-            continue
-        if message.get("trnm") == "PING":
-            await connection.send(text)
-            log(logger, logging.DEBUG, "realtime_ping")
-            continue
-        if message.get("trnm") == "SYSTEM":
-            code, notice = str(message.get("code", "")), str(message.get("message", ""))
-            if code == SESSION_REPLACED_CODE:
-                raise _SessionReplaced(code, notice)
-            log(logger, logging.WARNING, "realtime_system_message", code=code, message=notice)
-            continue
-        return message
 
 
 # 한국 증권 앱 관례: 빨강은 매수·이익, 파랑은 손실.
@@ -700,7 +603,10 @@ def _hhmmss(text: str) -> str | None:
 
 
 def _fill_embed(
-    fill: Fill, profit: SellProfit | None, open_orders: list[OpenOrder] | None
+    fill: Fill,
+    profit: SellProfit | None,
+    open_orders: list[OpenOrder] | None,
+    auto_sell: bool = False,
 ) -> Embed:
     side = {"buy": "매수", "sell": "매도"}.get(fill.side or "")
     title = f"체결 · {side}" if side else "체결"
@@ -721,6 +627,8 @@ def _fill_embed(
     )
     return Embed(
         title=title,
+        # 사용자가 직접 낸 매도와 구분한다.
+        description=AUTO_SELL_MARK if auto_sell else "",
         color=color,
         fields=(
             EmbedField("종목", stock or UNKNOWN),
