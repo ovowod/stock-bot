@@ -140,8 +140,10 @@ async def test_cancel_response_does_not_wait_for_discord():
     async with _client(_kiwoom(), discord) as client:
         await _login(client)
         response = await asyncio.wait_for(client.post(URL, json=cancel()), timeout=2)
-        await discord.wait_for(2)
+        # 알림은 한 번에 하나씩 나가므로 취소 알림은 붙잡힌 로그인 알림 뒤에서 기다린다.
+        await discord.wait_for(1)
         # 응답은 이미 왔고, Discord는 아직 붙잡혀 있다.
         assert response.status_code == 200
         assert not discord.release.is_set()
         discord.release.set()
+        await discord.wait_for(2)

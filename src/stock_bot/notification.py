@@ -24,6 +24,9 @@ API_BASE = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://github.com/ovowod/stock-bot, 0.1.0)"
 # 429에서 이보다 오래 기다리라고 하면 다시 보내지 않는다. 호출한 쪽을 오래 붙잡지 않기 위해서다.
 MAX_RETRY_WAIT_SECONDS = 5.0
+# 429를 받으면 기다렸다가 이 횟수까지 보낸다. 알림이 몰리면 두 번으로는 모자랐다.
+# (2026-10-26 장 시작 때 SL / TP 알림 7건이 두 번 모두 막혀 사라졌다.)
+MAX_ATTEMPTS = 4
 _LOG_BODY_LIMIT = 200
 
 # Discord 메시지·embed 한도.
@@ -63,6 +66,8 @@ class DiscordNotifier:
         self._url = f"{API_BASE}/channels/{channel_id}/messages"
         self._headers = {"Authorization": f"Bot {token}", "User-Agent": USER_AGENT}
         secrets.add(token)
+        # 같은 채널에 한 번에 하나씩 보낸다. 동시에 보내면 함께 429를 받고 함께 다시 보내 또 막힌다.
+        self._lock = asyncio.Lock()
 
         missing = [
             name
@@ -101,13 +106,18 @@ class DiscordNotifier:
             log(logger, logging.WARNING, "discord_skipped_empty", environment=environment)
             return False
 
-        for attempt in (1, 2):
-            retry_after = await self._post(payload, environment, attempt)
-            if retry_after is None:
-                return True
-            if attempt == 2 or retry_after < 0 or retry_after > MAX_RETRY_WAIT_SECONDS:
-                return False
-            await asyncio.sleep(retry_after)
+        async with self._lock:
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                retry_after = await self._post(payload, environment, attempt)
+                if retry_after is None:
+                    return True
+                if (
+                    attempt == MAX_ATTEMPTS
+                    or retry_after < 0
+                    or retry_after > MAX_RETRY_WAIT_SECONDS
+                ):
+                    return False
+                await asyncio.sleep(retry_after)
         raise AssertionError("unreachable")
 
     async def aclose(self) -> None:
