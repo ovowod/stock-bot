@@ -99,6 +99,7 @@ def create_app(
         # 취소 재확인은 미국 종목 목록이 꼭 있어야 거래소를 정할 수 있다.
         lambda spec: open_orders.orders(spec, listing_required=True),
         on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
+        fresh_holding=accounts.fresh_holding,
     )
     now = now or (lambda: datetime.now(UTC))
     realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)

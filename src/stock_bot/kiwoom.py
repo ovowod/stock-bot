@@ -34,6 +34,7 @@ _LOG_BODY_LIMIT = 200
 # 모의 서버가 1.002초 간격을 1700으로 거부한 적이 있어 0.2초 여유를 둔다.
 CALL_INTERVAL_SECONDS = 1.2
 # 이보다 오래 기다려야 하면 보내지 않고 호출 한도 오류로 돌려준다. 화면이 오래 멈춰 있지 않게 한다.
+# 화면을 붙잡지 않는 서버 작업(자동 매도)은 patient로 불러 이 한도 없이 차례를 기다린다.
 MAX_PACING_WAIT_SECONDS = 5.0
 
 INVALID_TOKEN = 8005
@@ -117,14 +118,14 @@ class _Pacer:
         self._kst_now = kst_now
         self._slots: dict[tuple[str, str], list[_Slot]] = {}
 
-    async def wait(self, unit: _Unit, api_id: str) -> None:
+    async def wait(self, unit: _Unit, api_id: str, patient: bool = False) -> None:
         start = self._clock()
         slots = self._slots.setdefault(unit.key, [])
         # 기준 시간이 지난 기록은 더 이상 한도에 세어지지 않는다.
         while slots and slots[0].sent and slots[0].at + CALL_INTERVAL_SECONDS <= start:
             slots.pop(0)
         at = self._earliest(unit, slots, start)
-        if at - start > MAX_PACING_WAIT_SECONDS:
+        if not patient and at - start > MAX_PACING_WAIT_SECONDS:
             log(
                 logger,
                 logging.WARNING,
@@ -244,13 +245,23 @@ class KiwoomClient:
             await self._discard_token(spec, cached)
 
     async def call(
-        self, spec: EnvironmentSpec, api_id: str, path: str, body: dict[str, Any]
+        self,
+        spec: EnvironmentSpec,
+        api_id: str,
+        path: str,
+        body: dict[str, Any],
+        patient: bool = False,
     ) -> dict[str, Any]:
-        """TR을 호출한다. 연속조회가 있으면 최대 MAX_PAGES까지 목록 필드를 이어 붙인다."""
+        """TR을 호출한다. 연속조회가 있으면 최대 MAX_PAGES까지 목록 필드를 이어 붙인다.
+
+        patient면 호출 한도 대기에 MAX_PACING_WAIT_SECONDS 제한을 두지 않는다.
+        """
         merged: dict[str, Any] = {}
         cont_yn, next_key = "N", ""
         for page_no in range(1, MAX_PAGES + 1):
-            page = await self._call_page(spec, api_id, path, body, cont_yn, next_key, page_no)
+            page = await self._call_page(
+                spec, api_id, path, body, cont_yn, next_key, page_no, patient
+            )
             # 앞 페이지에서 목록이던 필드가 빠지거나 목록이 아니면,
             # 일부만 받은 결과를 돌려주지 않고 응답 형식 오류로 처리한다.
             for key, value in merged.items():
@@ -288,6 +299,7 @@ class KiwoomClient:
         path: str,
         body: dict[str, Any],
         ready: Callable[[], bool] | None = None,
+        patient: bool = False,
     ) -> dict[str, Any]:
         """주문처럼 다시 보내면 안 되는 TR을 한 번만 호출한다.
 
@@ -302,7 +314,7 @@ class KiwoomClient:
             "Content-Type": CONTENT_TYPE,
         }
         try:
-            page = await self._post(spec, api_id, path, body, headers, 1, ready)
+            page = await self._post(spec, api_id, path, body, headers, 1, ready, patient)
         except _KiwoomResult as result:
             if result.code == INVALID_TOKEN:
                 await self._discard_token(spec, token)
@@ -332,6 +344,7 @@ class KiwoomClient:
         cont_yn: str,
         next_key: str,
         page_no: int,
+        patient: bool = False,
     ) -> _Page:
         token = await self._token(spec)
         for attempt in (1, 2):
@@ -343,7 +356,7 @@ class KiwoomClient:
                 "Content-Type": CONTENT_TYPE,
             }
             try:
-                return await self._post(spec, api_id, path, body, headers, page_no)
+                return await self._post(spec, api_id, path, body, headers, page_no, patient=patient)
             except _KiwoomResult as result:
                 if result.code != INVALID_TOKEN or attempt == 2:
                     raise _classify(result) from None
@@ -406,9 +419,10 @@ class KiwoomClient:
         headers: dict[str, str],
         page_no: int,
         ready: Callable[[], bool] | None = None,
+        patient: bool = False,
     ) -> _Page:
         url = f"{spec.domain}{path}"
-        await self._pacer.wait(_pacing_unit(spec, api_id), api_id)
+        await self._pacer.wait(_pacing_unit(spec, api_id), api_id, patient)
         if ready is not None and not ready():
             # 호출 한도 자리는 이미 썼지만 보내지 않았다. 한도를 넘길 일은 없으므로 되돌리지 않는다.
             log(logger, logging.WARNING, "kiwoom_request_cancelled", api_id=api_id, target=url)

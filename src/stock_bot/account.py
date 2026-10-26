@@ -53,6 +53,11 @@ class AccountService:
         # 투자 환경 -> (확인에 쓴 토큰, 확인한 계좌번호). 어느 계좌를 조회할지는 토큰이 정하므로
         # 같은 토큰을 쓰는 동안은 다시 확인하지 않는다.
         self._verified: dict[Environment, tuple[str, str]] = {}
+        # 자동 매도용 잔고 조회 묶음. 다음에 읽을 묶음(그 결과를 기다리는 Future)과 기다리는 수.
+        self._next_balance: dict[Environment, asyncio.Future[dict[str, Any]]] = {}
+        self._balance_waiters: dict[Environment, int] = {}
+        self._reading_balance: set[Environment] = set()
+        self._balance_tasks: set[asyncio.Task[None]] = set()
 
     async def fetch(self, spec: EnvironmentSpec) -> dict[str, Any]:
         account_no = await self._verified_account_no(spec)
@@ -145,51 +150,60 @@ class AccountService:
 
         보유하지 않으면 두 수량이 0이다. 수량을 읽지 못하면 추측하지 않고 오류로 돌려준다.
         """
+        return _holding(spec, code, await self._balance(spec))
+
+    async def fresh_holding(self, spec: EnvironmentSpec, code: str) -> dict[str, Any]:
+        """holding과 같지만, 동시에 부른 종목들이 잔고 조회 한 번을 함께 쓴다(자동 매도용).
+
+        부른 뒤에 시작한 조회의 결과만 쓴다. 이미 진행 중인 조회는 기다리지 않고 다음 조회에 낀다.
+        호출 한도 대기에 시간 제한을 두지 않는다. 화면을 붙잡지 않는 서버 작업이기 때문이다.
+        """
+        environment = spec.environment
+        batch = self._next_balance.get(environment)
+        if batch is None:
+            batch = self._next_balance[environment] = asyncio.get_running_loop().create_future()
+            self._balance_waiters[environment] = 0
+            if environment not in self._reading_balance:
+                task = asyncio.create_task(self._read_balances(spec))
+                self._balance_tasks.add(task)
+                task.add_done_callback(self._balance_tasks.discard)
+        self._balance_waiters[environment] += 1
+        # 기다리던 쪽 하나가 취소돼도 함께 쓰는 조회는 계속한다.
+        return _holding(spec, code, await asyncio.shield(batch))
+
+    async def _read_balances(self, spec: EnvironmentSpec) -> None:
+        """기다리는 묶음이 없어질 때까지 묶음마다 한 번씩 읽는다."""
+        environment = spec.environment
+        self._reading_balance.add(environment)
+        try:
+            while (batch := self._next_balance.pop(environment, None)) is not None:
+                waiters = self._balance_waiters.pop(environment, 0)
+                try:
+                    data = await self._balance(spec, patient=True)
+                except Exception as error:
+                    batch.set_exception(error)
+                    log(logger, logging.WARNING, "balance_shared_failed", waiters=waiters)
+                    continue
+                batch.set_result(data)
+                log(logger, logging.INFO, "balance_shared", waiters=waiters)
+        finally:
+            self._reading_balance.discard(environment)
+
+    async def _balance(self, spec: EnvironmentSpec, patient: bool = False) -> dict[str, Any]:
         if spec.market is Market.DOMESTIC:
-            api_id, quantity_key, sellable_key = "kt00018", "rmnd_qty", "trde_able_qty"
-            data = await self._kiwoom.call(
-                spec, api_id, DOMESTIC_ACCOUNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+            return await self._kiwoom.call(
+                spec,
+                "kt00018",
+                DOMESTIC_ACCOUNT_PATH,
+                {"qry_tp": "1", "dmst_stex_tp": "KRX"},
+                patient=patient,
             )
-            # 현금 매도(kt10001) 대상인 현금잔고(crd_tp=00) 줄만 센다. 신용 보유분은 세지 않는다.
-            rows = [
-                row
-                for row in Reader(data, api_id).rows("acnt_evlt_remn_indv_tot")
-                if _strip_prefix(row.text("stk_cd")) == code and row.text("crd_tp") == "00"
-            ]
-        else:
-            api_id, quantity_key, sellable_key = "ust21070", "poss_qty", "sell_alowq"
-            # 종목코드를 넣으면 거래소도 넣어야 한다(모의 서버 1517).
-            # 그런데 잔고의 거래소 표기가 주문과 다를 수 있어(NYSE Arca ETF를 아멕스로 준다)
-            # 계좌 확인처럼 전체를 받아 티커로 찾는다.
-            data = await self._kiwoom.call(
-                spec, api_id, US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}
-            )
-            rows = [
-                row
-                for row in Reader(data, api_id).rows("result_list")
-                if row.text("stk_cd") == code
-            ]
-        if len(rows) > 1:
-            # kt00018 문서 예제가 합산 조회인데도 같은 종목 두 줄을 준다.
-            # 뜻을 모르므로 더하지도 고르지도 않는다.
-            raise AppError(
-                "unsupported_holding",
-                "지원하지 않는 잔고 형태입니다. (같은 종목이 여러 줄)",
-                502,
-                {"api_id": api_id},
-            )
-        quantity = sellable = 0
-        if rows:
-            quantity = _required_count(rows[0], quantity_key, api_id)
-            sellable = _required_count(rows[0], sellable_key, api_id)
-        result = {
-            "code": code,
-            "held": bool(rows),
-            "quantity": quantity,
-            "sellable_quantity": sellable,
-        }
-        log(logger, logging.INFO, "holding_checked", api_id=api_id, **result)
-        return result
+        # 종목코드를 넣으면 거래소도 넣어야 한다(모의 서버 1517).
+        # 그런데 잔고의 거래소 표기가 주문과 다를 수 있어(NYSE Arca ETF를 아멕스로 준다)
+        # 계좌 확인처럼 전체를 받아 티커로 찾는다.
+        return await self._kiwoom.call(
+            spec, "ust21070", US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}, patient=patient
+        )
 
     async def positions(self, spec: EnvironmentSpec) -> list[dict[str, Any]]:
         """SL / TP가 지켜볼 보유종목 줄. 매입가를 읽지 못한 칸은 None이다.
@@ -316,6 +330,39 @@ class AccountService:
                 for h in b.rows("result_list", _HoldingReader)
             ],
         }
+
+
+def _holding(spec: EnvironmentSpec, code: str, data: dict[str, Any]) -> dict[str, Any]:
+    """잔고 응답에서 한 종목의 보유수량과 매도 가능 수량을 고른다."""
+    if spec.market is Market.DOMESTIC:
+        api_id, quantity_key, sellable_key = "kt00018", "rmnd_qty", "trde_able_qty"
+        # 현금 매도(kt10001) 대상인 현금잔고(crd_tp=00) 줄만 센다. 신용 보유분은 세지 않는다.
+        rows = [
+            row
+            for row in Reader(data, api_id).rows("acnt_evlt_remn_indv_tot")
+            if _strip_prefix(row.text("stk_cd")) == code and row.text("crd_tp") == "00"
+        ]
+    else:
+        api_id, quantity_key, sellable_key = "ust21070", "poss_qty", "sell_alowq"
+        rows = [
+            row for row in Reader(data, api_id).rows("result_list") if row.text("stk_cd") == code
+        ]
+    if len(rows) > 1:
+        # kt00018 문서 예제가 합산 조회인데도 같은 종목 두 줄을 준다.
+        # 뜻을 모르므로 더하지도 고르지도 않는다.
+        raise AppError(
+            "unsupported_holding",
+            "지원하지 않는 잔고 형태입니다. (같은 종목이 여러 줄)",
+            502,
+            {"api_id": api_id},
+        )
+    quantity = sellable = 0
+    if rows:
+        quantity = _required_count(rows[0], quantity_key, api_id)
+        sellable = _required_count(rows[0], sellable_key, api_id)
+    result = {"code": code, "held": bool(rows), "quantity": quantity, "sellable_quantity": sellable}
+    log(logger, logging.INFO, "holding_checked", api_id=api_id, **result)
+    return result
 
 
 def _required_count(row: Reader, key: str, api_id: str) -> int:

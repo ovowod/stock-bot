@@ -398,8 +398,8 @@ async def test_changes_while_waiting_for_the_call_limit_decide_whether_the_order
     waiting, release = asyncio.Event(), asyncio.Event()
     original = kiwoom_module._Pacer.wait
 
-    async def slow_wait(self, unit, api_id):
-        await original(self, unit, api_id)
+    async def slow_wait(self, unit, api_id, patient=False):
+        await original(self, unit, api_id, patient)
         if api_id == "kt10001":
             waiting.set()
             await release.wait()

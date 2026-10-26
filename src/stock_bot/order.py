@@ -41,6 +41,16 @@ CANCEL_UNKNOWN_RESULT_MESSAGE = (
     "접수 여부를 확인할 수 없습니다. 키움에서 주문 내역을 확인한 뒤 다시 시도하세요."
 )
 CANCEL_API_IDS = {Market.DOMESTIC: "kt10003", Market.US: "ust20003"}
+# 자동 매도의 주문 전 잔고 재확인이 일시적인 이유로 실패하면 이 간격(두 배씩)으로 몇 번 더 읽는다.
+# 주문 TR을 부르기 전이라 다시 읽어도 주문이 겹치지 않는다. 주문 TR은 여전히 한 번만 부른다.
+RECHECK_ATTEMPTS = 3
+RECHECK_RETRY_SECONDS = 1.0
+RETRYABLE_RECHECK_KINDS = {
+    "rate_limited",
+    "connection_error",
+    "kiwoom_error",
+    "response_format_error",
+}
 # 키움 문서의 orig_ord_no 길이(국내 7, 미국 9)를 따른다.
 _ORDER_NO = {Market.DOMESTIC: re.compile(r"^\d{1,7}$"), Market.US: re.compile(r"^\d{1,9}$")}
 # 키움 문서의 ord_qty·ord_uv 길이(12)를 따른다.
@@ -90,10 +100,13 @@ class OrderService:
         holding: HoldingLookup,
         open_orders: OpenOrderLookup,
         on_cancelled: CancelListener | None = None,
+        fresh_holding: HoldingLookup | None = None,
     ) -> None:
         self._kiwoom = kiwoom
         # 매도 직전 잔고 확인. 계좌 서비스가 준다.
         self._holding = holding
+        # 자동 매도의 잔고 확인. 동시에 몰린 자동 매도가 조회 한 번을 함께 쓴다.
+        self._fresh_holding = fresh_holding or holding
         # 취소 직전 미체결 확인. 미체결 주문 서비스가 준다.
         self._open_orders = open_orders
         self._on_cancelled = on_cancelled
@@ -160,10 +173,30 @@ class OrderService:
         # 같은 매도 가능 수량을 함께 쓰지 않는다.
         lock = self._sell_locks.setdefault((spec.environment, code), asyncio.Lock())
         async with lock:
-            try:
-                quantity = await self._sellable(spec, code, order_key)
-            except AppError as error:
-                return AutoSellResult("rejected", cause=error.message)
+            delay = RECHECK_RETRY_SECONDS
+            for attempt in range(1, RECHECK_ATTEMPTS + 1):
+                try:
+                    quantity = await self._sellable(spec, code, order_key, self._fresh_holding)
+                    break
+                except AppError as error:
+                    reason = error.__cause__ if isinstance(error.__cause__, AppError) else error
+                    if attempt == RECHECK_ATTEMPTS or reason.kind not in RETRYABLE_RECHECK_KINDS:
+                        return AutoSellResult("rejected", cause=error.message)
+                    if not ready():
+                        # 다시 읽어도 보내지 않을 주문이다(세션 끝·제외종목 추가 등).
+                        log(logger, logging.INFO, "auto_sell_cancelled", **fields)
+                        return AutoSellResult("cancelled")
+                    log(
+                        logger,
+                        logging.WARNING,
+                        "sellable_check_retry",
+                        **fields,
+                        attempt=attempt,
+                        kind=reason.kind,
+                        wait_seconds=delay,
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= 2
             if quantity <= 0:
                 log(logger, logging.INFO, "auto_sell_skipped", **fields, reason="no_sellable")
                 return AutoSellResult("skipped", quantity=0)
@@ -177,7 +210,8 @@ class OrderService:
                 "price": "",
             }
             try:
-                result = await self._send(spec, order, ready)
+                # 화면을 붙잡지 않으므로 호출 한도 대기에 시간 제한을 두지 않는다.
+                result = await self._send(spec, order, ready, patient=True)
             except AppError as error:
                 if error.kind == "cancelled_before_send":
                     log(logger, logging.INFO, "auto_sell_cancelled", **fields)
@@ -342,13 +376,19 @@ class OrderService:
                 )
         return result
 
-    async def _sellable(self, spec: EnvironmentSpec, code: str, order_key: str) -> int:
+    async def _sellable(
+        self,
+        spec: EnvironmentSpec,
+        code: str,
+        order_key: str,
+        lookup: HoldingLookup | None = None,
+    ) -> int:
         """매도 직전에 잔고를 다시 조회해 매도 가능 수량을 돌려준다.
 
-        확인하지 못하면 sellable_check_failed 오류다.
+        확인하지 못하면 sellable_check_failed 오류다. 원래 오류는 __cause__에 있다.
         """
         try:
-            holding = await self._holding(spec, code)
+            holding = await (lookup or self._holding)(spec, code)
         except AppError as error:
             log(
                 logger,
@@ -401,6 +441,7 @@ class OrderService:
         spec: EnvironmentSpec,
         order: dict[str, str],
         ready: Callable[[], bool] | None = None,
+        patient: bool = False,
     ) -> dict[str, Any]:
         """주문 TR을 한 번만 호출하고 결과를 분류한다."""
         api_id = ORDER_API_IDS[spec.market][order["side"]]
@@ -428,7 +469,7 @@ class OrderService:
                 # 매도 TR(ust20001)에만 있는 칸. STOP 주문만 쓰므로 지정가·시장가는 빈 값이다.
                 body["stop_pric"] = ""
         _, order_no = await self._call_order(
-            spec, api_id, path, body, order["order_key"], UNKNOWN_RESULT_MESSAGE, ready
+            spec, api_id, path, body, order["order_key"], UNKNOWN_RESULT_MESSAGE, ready, patient
         )
         log(logger, logging.INFO, "order_accepted", order_key=order["order_key"], order_no=order_no)
         return {
@@ -446,10 +487,11 @@ class OrderService:
         order_key: str,
         unknown_message: str,
         ready: Callable[[], bool] | None = None,
+        patient: bool = False,
     ) -> tuple[dict[str, Any], str]:
         """주문류 TR을 한 번만 호출하고 결과를 분류한다. 응답과 새 주문번호를 돌려준다."""
         try:
-            data = await self._kiwoom.call_once(spec, api_id, path, body, ready)
+            data = await self._kiwoom.call_once(spec, api_id, path, body, ready, patient)
             order_no = Reader(data, api_id).text("ord_no")
             if not order_no:
                 raise response_format_error(api_id, "ord_no 값이 비어 있습니다.")

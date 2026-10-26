@@ -593,8 +593,8 @@ async def test_replaced_connection_while_waiting_for_the_call_limit_cancels_the_
     waiting, release = asyncio.Event(), asyncio.Event()
     original = kiwoom_module._Pacer.wait
 
-    async def slow_wait(self, unit, api_id):
-        await original(self, unit, api_id)
+    async def slow_wait(self, unit, api_id, patient=False):
+        await original(self, unit, api_id, patient)
         if api_id == "kt10001":
             waiting.set()
             await release.wait()
@@ -623,8 +623,8 @@ async def test_disconnect_alone_while_waiting_for_the_call_limit_still_sells(dat
     waiting, release = asyncio.Event(), asyncio.Event()
     original = kiwoom_module._Pacer.wait
 
-    async def slow_wait(self, unit, api_id):
-        await original(self, unit, api_id)
+    async def slow_wait(self, unit, api_id, patient=False):
+        await original(self, unit, api_id, patient)
         if api_id == "kt10001":
             waiting.set()
             await release.wait()
