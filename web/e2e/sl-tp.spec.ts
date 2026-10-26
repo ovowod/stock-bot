@@ -330,6 +330,25 @@ test("미국 환경은 뉴욕시간 정규장으로 세션을 만든다", async 
   await expectNoHorizontalScroll(page);
 });
 
+for (const [date, korea] of [
+  // 미국 서머타임(EDT)에는 뉴욕보다 13시간, 끝난 뒤(EST, 11월 1일부터)에는 14시간 빠르다.
+  ["2026-10-26T03:00:00Z", "한국시간 22:30–다음 날 05:00 (오늘 기준)"],
+  ["2026-11-02T03:00:00Z", "한국시간 23:30–다음 날 06:00 (오늘 기준)"],
+] as const) {
+  test(`미국 정규장 옆에 한국시간을 함께 보여준다 (${date.slice(0, 10)})`, async ({ page }) => {
+    await page.clock.setFixedTime(new Date(date));
+    await mockSlTp(page);
+    await openSlTp(page);
+    await expect(page.getByText("정규장 09:00–15:30 · 한국시간(Asia/Seoul)")).toBeVisible();
+    // 국내는 이미 한국시간이라 덧붙이지 않는다.
+    await expect(page.getByText("(오늘 기준)")).toHaveCount(0);
+
+    await page.getByRole("radio", { name: "미국 모의" }).click();
+    await expect(page.getByText(`정규장 09:30–16:00 · 뉴욕시간(America/New_York) · ${korea}`)).toBeVisible();
+    await expectNoHorizontalScroll(page);
+  });
+}
+
 test("저장하는 동안에는 세션 추가·삭제·시각 편집이 막힌다", async ({ page }) => {
   await mockSlTp(page, {
     save: (environment, body) => ({ body: { ...settings(environment), ...body }, delayMs: 1000 }),

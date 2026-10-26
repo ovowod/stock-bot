@@ -5,6 +5,7 @@ import { ErrorNotice, Panel } from "../account/parts";
 import { useStockSearch } from "../search/useStockSearch";
 import {
   hasErrors,
+  koreaTime,
   nextSession,
   sessionErrors,
   STOP_LOSS_RANGE,
@@ -212,6 +213,9 @@ function SessionsSection({
       <p className="-mt-1 mb-3 text-sm text-muted">
         정규장 {hours.start}–{hours.end} · {TIMEZONE_NAMES[settings.timezone] ?? settings.timezone}(
         {settings.timezone})
+        {/* 미국 정규장은 한국시간으로 바꿔 함께 보여준다. 서머타임에 따라 1시간 달라져 오늘 기준이다. */}
+        {settings.timezone !== "Asia/Seoul" &&
+          ` · 한국시간 ${koreaTime(hours.start, settings.timezone)}–${koreaTime(hours.end, settings.timezone)} (오늘 기준)`}
       </p>
       {!settings.can_enable && (
         <p className="mb-3 rounded-2xl bg-real-soft px-4 py-3 text-sm font-semibold text-real">
