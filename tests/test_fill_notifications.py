@@ -365,6 +365,41 @@ async def test_fill_logs_share_one_request_id_from_receipt_to_alert(json_logs: J
     assert received[0]["request_id"] != received[1]["request_id"]
 
 
+class SlowDiscord(FakeDiscord):
+    """첫 요청의 응답을 gate가 열릴 때까지 늦춘다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:  # type: ignore[override]
+        if not self.payloads:
+            self.payloads.append(json.loads(request.content))
+            await self.gate.wait()
+            return httpx.Response(200, json={"id": "1"})
+        return super().__call__(request)
+
+
+async def test_fills_reach_the_feed_while_an_alert_waits_and_alerts_keep_order(caplog):
+    realtime = FakeRealtime()
+    discord = SlowDiscord()
+    async with running(realtime, discord, fill_kiwoom()):
+        [connection] = await realtime.wait_registered()
+        connection.push(fill_event())
+        await discord.wait_for(1)
+        connection.push(fill_event(**{"9203": "0000019"}))
+        # 첫 알림의 Discord 응답을 기다리는 동안에도 다음 체결은 체결 feed에 바로 닿는다.
+        await wait_until(
+            lambda: [r.getMessage() for r in caplog.records].count("fill_received") == 2
+        )
+        assert len(discord.payloads) == 1
+        discord.gate.set()
+        await discord.wait_for(2)
+
+    notified = [r.fields["order_no"] for r in caplog.records if r.getMessage() == "fill_notified"]
+    assert notified == ["0000018", "0000019"]
+
+
 async def test_malformed_message_is_logged_and_watching_continues(caplog):
     realtime = FakeRealtime()
     discord = FakeDiscord()

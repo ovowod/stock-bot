@@ -178,6 +178,57 @@ async def test_events_go_only_to_the_feature_that_subscribed_the_type():
     assert [i["type"] for i in quotes.real()[0].items] == ["0B"]
 
 
+async def test_immediate_channel_runs_before_queued_channels_for_the_same_message():
+    realtime = FakeRealtime()
+    order: list[str] = []
+
+    async def quotes(event: RealtimeEvent) -> None:
+        if event.kind is EventKind.REAL:
+            order.append("quote")
+
+    def fills(event: RealtimeEvent) -> None:
+        if event.kind is EventKind.REAL:
+            order.append("fill")
+
+    async with hub_with(realtime) as hub:
+        # 대기열 채널을 먼저 열어, 메시지를 나눌 때 대기열 채널이 먼저 받게 한다.
+        hub.channel(DOMESTIC_PAPER, "sl_tp", "SL / TP", quotes).subscribe(QUOTES)
+        hub.immediate_channel(DOMESTIC_PAPER, "fill_feed", "체결 감시", fills).subscribe(FILLS)
+        connection = (await realtime.wait_registered())[0]
+        await wait_until(lambda: len(connection.requests("REG")) == 2)
+        connection.push({"trnm": "REAL", "data": [*quote("005930")["data"], *order_fill()["data"]]})
+        await wait_until(lambda: len(order) == 2)
+
+    assert order == ["fill", "quote"]
+
+
+async def test_immediate_handler_error_is_logged_and_receiving_continues(caplog):
+    realtime = FakeRealtime()
+    fills: list[RealtimeEvent] = []
+    quotes = Recorder()
+
+    def failing(event: RealtimeEvent) -> None:
+        if event.kind is EventKind.REAL:
+            fills.append(event)
+            if len(fills) == 1:
+                raise RuntimeError("boom")
+
+    async with hub_with(realtime) as hub:
+        hub.immediate_channel(DOMESTIC_PAPER, "fill_feed", "체결 감시", failing).subscribe(FILLS)
+        hub.channel(DOMESTIC_PAPER, "sl_tp", "SL / TP", quotes).subscribe(QUOTES)
+        connection = (await realtime.wait_registered())[0]
+        await wait_until(lambda: len(connection.requests("REG")) == 2)
+        mixed = {"trnm": "REAL", "data": [*order_fill()["data"], *quote("005930")["data"]]}
+        connection.push(mixed)
+        connection.push(mixed)
+        await wait_until(lambda: len(fills) == 2 and len(quotes.real()) == 2)
+        assert not connection.closed
+
+    failed = [r for r in caplog.records if r.getMessage() == "realtime_handler_failed"]
+    assert len(failed) == 1
+    assert failed[0].fields["feature"] == "fill_feed"
+
+
 async def test_slow_fill_lookup_does_not_delay_another_features_events():
     # 체결 알림의 미체결 조회(ka10075) 응답을 막아 두어도 다른 기능의 시세는 바로 전달된다.
     lookup_started, lookup_gate = asyncio.Event(), asyncio.Event()

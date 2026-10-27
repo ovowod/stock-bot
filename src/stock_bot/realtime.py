@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -90,15 +91,26 @@ class RealtimeEvent:
 
 
 EventHandler = Callable[[RealtimeEvent], Awaitable[None]]
+# 대기열 없이 받는 채널의 handler. 받는 자리에서 바로 부르므로 기다리지 않고 빨리 끝나야 한다.
+ImmediateHandler = Callable[[RealtimeEvent], None]
 
 
 class Channel:
     """한 기능이 한 연결에 내는 구독. 이벤트는 채널마다 따로 큐에 쌓아 순서대로 handler에 넘긴다.
 
     채널마다 큐가 따로라서 한 기능의 처리가 늦어도 다른 기능의 이벤트는 늦어지지 않는다.
+    immediate handler로 연 채널은 큐 없이 받는 자리에서 바로 넘긴다. 그래서 같은 메시지의
+    다른 항목이 다른 채널의 큐에서 처리되기 전에 끝난다.
     """
 
-    def __init__(self, link: _Link, feature: str, label: str, handler: EventHandler) -> None:
+    def __init__(
+        self,
+        link: _Link,
+        feature: str,
+        label: str,
+        handler: EventHandler | None = None,
+        immediate: ImmediateHandler | None = None,
+    ) -> None:
         self.feature = feature
         self.label = label
         self.subscription: Subscription | None = None
@@ -107,9 +119,9 @@ class Channel:
         # 구독을 바꿀 때마다 는다. 연결은 보낸 버전과 비교해 다시 보낼지 정한다.
         self.version = 0
         self._link = link
-        self._handler = handler
+        self._immediate = immediate
         self._queue: asyncio.Queue[RealtimeEvent] = asyncio.Queue()
-        self._worker = asyncio.create_task(self._work())
+        self._worker = asyncio.create_task(self._work(handler)) if handler is not None else None
 
     def subscribe(self, subscription: Subscription | None) -> None:
         """구독을 바꾼다. None이면 해지한다. 같은 구독을 다시 넣으면 REG를 다시 보낸다."""
@@ -145,30 +157,42 @@ class Channel:
         return self._link.connection
 
     def put(self, event: RealtimeEvent) -> None:
-        self._queue.put_nowait(event)
+        if self._immediate is None:
+            self._queue.put_nowait(event)
+            return
+        try:
+            # handler가 바꾼 요청 ID 같은 로그 context가 받는 쪽의 다음 로그에 남지 않게 한다.
+            contextvars.copy_context().run(self._immediate, event)
+        except Exception as exc:
+            # 받는 자리에서 오류가 새면 연결이 끊긴다. 남기고 다음 이벤트를 받는다.
+            self._failed(event, exc)
 
     async def close(self) -> None:
-        self._worker.cancel()
-        await asyncio.gather(self._worker, return_exceptions=True)
+        if self._worker is not None:
+            self._worker.cancel()
+            await asyncio.gather(self._worker, return_exceptions=True)
 
-    async def _work(self) -> None:
+    async def _work(self, handler: EventHandler) -> None:
         while True:
             event = await self._queue.get()
             try:
-                await self._handler(event)
+                await handler(event)
             except Exception as exc:
                 # 이벤트 하나의 처리 오류로 작업자가 멈추면 그 뒤 이벤트를 모두 놓친다.
-                logger.error(
-                    "realtime_handler_failed",
-                    exc_info=exc,
-                    extra={
-                        "fields": {
-                            "feature": self.feature,
-                            "kind": event.kind.value,
-                            "error_type": type(exc).__name__,
-                        }
-                    },
-                )
+                self._failed(event, exc)
+
+    def _failed(self, event: RealtimeEvent, exc: Exception) -> None:
+        logger.error(
+            "realtime_handler_failed",
+            exc_info=exc,
+            extra={
+                "fields": {
+                    "feature": self.feature,
+                    "kind": event.kind.value,
+                    "error_type": type(exc).__name__,
+                }
+            },
+        )
 
 
 class RealtimeHub:
@@ -190,12 +214,21 @@ class RealtimeHub:
         self, spec: EnvironmentSpec, feature: str, label: str, handler: EventHandler
     ) -> Channel:
         """spec의 인증정보 연결에 채널을 연다. 연결은 구독이 생길 때 연다."""
+        link = self._link(spec)
+        return link.add(Channel(link, feature, label, handler))
+
+    def immediate_channel(
+        self, spec: EnvironmentSpec, feature: str, label: str, handler: ImmediateHandler
+    ) -> Channel:
+        """큐 없이 받는 자리에서 바로 handler를 부르는 채널을 연다."""
+        link = self._link(spec)
+        return link.add(Channel(link, feature, label, immediate=handler))
+
+    def _link(self, spec: EnvironmentSpec) -> _Link:
         link = self._links.get(spec.credential_prefix)
         if link is None:
             link = self._links[spec.credential_prefix] = _Link(self, spec)
-        channel = Channel(link, feature, label, handler)
-        link.channels.append(channel)
-        return channel
+        return link
 
     async def stop(self) -> None:
         for link in self._links.values():
@@ -240,6 +273,10 @@ class _Link:
         self.stopped = False
         # 마지막 구독이 해지돼 연결을 닫았다. 그사이 새 구독이 생겼으면 기다리지 않고 다시 연다.
         self._closed_idle = False
+
+    def add(self, channel: Channel) -> Channel:
+        self.channels.append(channel)
+        return channel
 
     def changed(self) -> None:
         """구독이 바뀌었다. 구독이 하나라도 생기면 그때 연결을 연다."""

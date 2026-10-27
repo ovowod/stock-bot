@@ -135,7 +135,8 @@ class _Line:
         self._delay = REGISTER_RETRY_INITIAL_SECONDS
         # 거부된 등록을 다시 보내려고 기다리는 작업. 많아야 하나다.
         self._retry: asyncio.Task[None] | None = None
-        self._channel = hub.channel(spec, "fill_feed", "", self._on_event)
+        # 체결은 받는 자리에서 바로 넘긴다. 같은 메시지나 그 뒤의 시세보다 먼저 처리되게 한다.
+        self._channel = hub.immediate_channel(spec, "fill_feed", "", self._on_event)
 
     def subscribe(self, subscriber: _Subscriber) -> Callable[[], None]:
         self._subscribers.append(subscriber)
@@ -187,7 +188,7 @@ class _Line:
             self._retry.cancel()
             self._retry = None
 
-    async def _on_event(self, event: RealtimeEvent) -> None:
+    def _on_event(self, event: RealtimeEvent) -> None:
         # 이 채널의 로그에 이 연결의 투자 환경이 남는다. 체결마다 그 투자 환경으로 다시 정한다.
         environment_var.set(self._names)
         if event.kind is EventKind.REAL:
