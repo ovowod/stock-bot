@@ -31,6 +31,7 @@ from stock_bot.config import (
     parse_environment,
 )
 from stock_bot.errors import AppError
+from stock_bot.fill_feed import FillFeed
 from stock_bot.fill_watch import FillWatcher
 from stock_bot.kiwoom import KST, KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
@@ -105,7 +106,8 @@ def create_app(
     realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
     # 자동 매도는 SL / TP가 내고, 체결 알림이 그 체결을 알아본다.
     auto_sell = AutoSell(orders)
-    fills = FillWatcher(kiwoom, open_orders, notifier, realtime, auto_sell)
+    feed = FillFeed(realtime)
+    fills = FillWatcher(kiwoom, open_orders, notifier, feed, auto_sell)
     sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
     sl_tp_watch = SlTpWatcher(kiwoom, sl_tp, accounts.positions, auto_sell, realtime, notifier, now)
     sl_tp.on_saved = sl_tp_watch.settings_saved
@@ -119,6 +121,7 @@ def create_app(
         finally:
             await sl_tp_watch.stop()
             await fills.stop()
+            await feed.stop()
             await realtime.stop()
 
     app = FastAPI(

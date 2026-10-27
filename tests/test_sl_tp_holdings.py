@@ -336,9 +336,9 @@ async def test_joining_a_rejected_fill_registration_learns_the_rejection(
     data_dir, caplog, monkeypatch
 ):
     # 체결 알림의 주문체결 등록이 거부돼 재시도를 기다리는 동안 SL/TP 세션이 시작된다.
-    from stock_bot import fill_watch
+    from stock_bot import fill_feed
 
-    monkeypatch.setattr(fill_watch, "REGISTER_RETRY_INITIAL_SECONDS", 30)
+    monkeypatch.setattr(fill_feed, "REGISTER_RETRY_INITIAL_SECONDS", 30)
     write_settings(data_dir, session(start="10:00", end="11:00"))
     clock = Clock(AT_10 - timedelta(seconds=1))
     realtime = rejecting_fills()

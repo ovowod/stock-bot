@@ -1,35 +1,27 @@
-"""키움 실시간 주문체결을 지켜보다가 체결 알림을 Discord로 보낸다.
+"""체결 feed로 내 계좌의 체결을 받아 체결 알림을 Discord로 보낸다.
 
-공유 실시간 연결(realtime)에 인증정보마다 주문체결 실시간 항목을 구독한다.
 체결 감시는 조회만 하고 주문 TR은 부르지 않는다.
 """
 
 import asyncio
 import logging
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Any
+from decimal import ROUND_HALF_UP, Decimal
 
 from stock_bot.account import DOMESTIC_ACCOUNT_PATH
 from stock_bot.auto_sell import AutoSell, AutoSellMatch
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
+from stock_bot.fill_feed import FILL_TYPES, FeedStatus, Fill, FillFeed
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import FIELD_VALUE_LIMIT, DiscordNotifier, Embed, EmbedField
 from stock_bot.open_order import OpenOrder, OpenOrderService
 from stock_bot.reader import Reader
-from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub
 
 logger = logging.getLogger("stock_bot.fill_watch")
-
-# 구독이 거부되면 연결은 그대로 두고 이 간격으로 다시 등록한다.
-# 실패가 이어지면 두 배씩 늘리고, 등록에 성공하면 처음으로 되돌린다.
-REGISTER_RETRY_INITIAL_SECONDS = 1.0
-REGISTER_RETRY_MAX_SECONDS = 60.0
 
 # 미체결·매입가 조회가 연결 실패·시간 초과로 끝나면 이만큼 기다렸다가 한 번만 다시 시도한다.
 # 조회만 하는 TR이라 다시 보내도 안전하다. 키움 오류 응답은 다시 시도하지 않는다.
@@ -40,27 +32,18 @@ LOOKUP_RETRY_SECONDS = 1.0
 # 날짜로 지우지 않는 건 미국 장이 한국 자정을 넘기 때문이다.
 FILL_MEMORY_SECONDS = 24 * 3600
 
-# 실시간 연결 하나에 구독할 실시간 항목과 그 이벤트의 투자 환경.
-# 00은 국내 주문체결, F5는 미국 실시간 체결이다.
-# 국내 실전과 미국 실전은 인증정보와 계좌가 같아 연결 하나로 받는다.
-Watch = dict[str, EnvironmentSpec]
-WATCHES: tuple[Watch, ...] = (
-    {"00": ENVIRONMENTS[Environment.DOMESTIC_PAPER]},
-    {"F5": ENVIRONMENTS[Environment.US_PAPER]},
-    {"00": ENVIRONMENTS[Environment.DOMESTIC_REAL], "F5": ENVIRONMENTS[Environment.US_REAL]},
+# 체결을 알릴 투자 환경. 인증정보마다 묶는다. 국내 실전과 미국 실전은 인증정보와 계좌가 같다.
+WATCHES: tuple[tuple[EnvironmentSpec, ...], ...] = (
+    (ENVIRONMENTS[Environment.DOMESTIC_PAPER],),
+    (ENVIRONMENTS[Environment.US_PAPER],),
+    (ENVIRONMENTS[Environment.DOMESTIC_REAL], ENVIRONMENTS[Environment.US_REAL]),
 )
-# 실시간 항목별로 체결을 뜻하는 주문상태(913). 접수·확인·취소·거부 등은 알리지 않는다.
-# F5의 체결완료는 2026-10-08 모의 서버에서 확인했고, 부분체결은 키움 가이드 설명을 따른다.
-FILL_STATUSES = {"00": {"체결"}, "F5": {"부분체결", "체결완료"}}
+# 밀려남 중단 알림에 쓰는 기능 이름.
+LABEL = "체결 감시"
 
 
-def _connection_spec(watch: Watch) -> EnvironmentSpec:
-    """연결에 쓸 투자 환경. 한 연결의 투자 환경들은 인증정보·도메인이 같다."""
-    return next(iter(watch.values()))
-
-
-def _environments(watch: Watch) -> str:
-    return ",".join(spec.environment.value for spec in watch.values())
+def _environments(watch: tuple[EnvironmentSpec, ...]) -> str:
+    return ",".join(spec.environment.value for spec in watch)
 
 
 class FillWatcher:
@@ -69,18 +52,19 @@ class FillWatcher:
         kiwoom: KiwoomClient,
         open_orders: OpenOrderService,
         notifier: DiscordNotifier,
-        hub: RealtimeHub,
+        feed: FillFeed,
         auto_sell: AutoSell,
     ) -> None:
         self._kiwoom = kiwoom
         # 계좌 화면과 같은 미체결 목록을 알림에 담는다.
         self._open_order_service = open_orders
         self._notifier = notifier
-        self._hub = hub
+        self._feed = feed
         # 접수된 자동 매도의 주문번호로 체결에 표시를 붙인다.
         self._auto_sell = auto_sell
-        # 거부된 구독을 다시 등록하려고 기다리는 작업. 감시마다 많아야 하나다.
-        self._retries: set[asyncio.Task[None]] = set()
+        # 받은 체결을 순서대로 알린다. 알림은 조회·전송을 기다리므로 체결 feed에서 떼어 둔다.
+        self._fills: asyncio.Queue[Fill] = asyncio.Queue()
+        self._worker: asyncio.Task[None] | None = None
         # (투자 환경, 주문번호)별로 지금까지 받은 미국 매도 체결. 서버를 재시작하면 사라진다.
         self._sell_fills: dict[tuple[str, str], _OrderFills] = {}
 
@@ -89,8 +73,9 @@ class FillWatcher:
         if not self._notifier.enabled:
             log(logger, logging.INFO, "fill_watch_disabled", cause="discord_disabled")
             return
+        self._worker = asyncio.create_task(self._work())
         for watch in WATCHES:
-            spec = _connection_spec(watch)
+            spec = watch[0]
             try:
                 self._kiwoom.credentials(spec)
             except AppError as exc:
@@ -108,106 +93,42 @@ class FillWatcher:
                 "fill_watch_started",
                 environment=_environments(watch),
                 target=spec.realtime_url,
-                type=list(watch),
+                type=list(dict.fromkeys(FILL_TYPES[s.environment] for s in watch)),
             )
-            self._watch(watch)
+            # 끊긴 동안의 체결은 보충하지 않는다. 공유 연결이 다시 연결해 등록만 한다.
+            for each in watch:
+                self._feed.subscribe(each, LABEL, self._on_fill)
 
     async def stop(self) -> None:
-        for task in self._retries:
-            task.cancel()
-        await asyncio.gather(*self._retries, return_exceptions=True)
-        self._retries.clear()
+        if self._worker is not None:
+            self._worker.cancel()
+            await asyncio.gather(self._worker, return_exceptions=True)
+            self._worker = None
 
-    def _watch(self, watch: Watch) -> None:
-        # 끊긴 동안의 체결은 보충하지 않는다. 공유 연결이 다시 연결해 등록만 한다.
-        # 주문체결은 계좌 단위 항목이라 SL / TP와 함께 받는다.
-        types = list(watch)
-        delay = REGISTER_RETRY_INITIAL_SECONDS
-        retry: asyncio.Task[None] | None = None
+    def _on_fill(self, value: Fill | FeedStatus) -> None:
+        # 등록 상태는 체결 feed가 다시 시도하며 로그로 남긴다. 체결 알림은 체결만 본다.
+        if isinstance(value, Fill):
+            self._fills.put_nowait(value)
 
-        async def on_event(event: RealtimeEvent) -> None:
-            nonlocal delay, retry
-            # 채널 작업자의 로그에 이 감시의 투자 환경이 남는다. 체결마다 다시 정한다.
-            environment_var.set(_environments(watch))
-            if event.kind is EventKind.REAL:
-                for item in event.items:
-                    try:
-                        await self._handle(watch, item, event)
-                    except Exception as exc:
-                        # 한 체결의 처리 오류로 같은 메시지의 다른 체결을 놓치지 않게 한다.
-                        logger.error(
-                            "fill_handle_failed",
-                            exc_info=exc,
-                            extra={"fields": {"error_type": type(exc).__name__}},
-                        )
-            elif event.kind is EventKind.REGISTERED:
-                # 재연결로 먼저 등록됐으면 기다리던 재등록은 보내지 않는다.
-                delay = REGISTER_RETRY_INITIAL_SECONDS
-                if retry is not None:
-                    retry.cancel()
-                    retry = None
-            elif event.kind is EventKind.REJECTED:
-                log(
-                    logger,
-                    logging.WARNING,
-                    "fill_watch_register_retry",
-                    target=_connection_spec(watch).realtime_url,
-                    type=list(watch),
-                    wait_seconds=delay,
+    async def _work(self) -> None:
+        while True:
+            fill = await self._fills.get()
+            # 체결 feed가 붙인 요청 ID로 수신부터 알림까지 로그를 묶는다.
+            environment_var.set(fill.spec.environment.value)
+            request_id_var.set(fill.request_id)
+            try:
+                await self._handle(fill)
+            except Exception as exc:
+                # 한 체결의 처리 오류로 다음 체결을 놓치지 않게 한다.
+                logger.error(
+                    "fill_handle_failed",
+                    exc_info=exc,
+                    extra={"fields": {"error_type": type(exc).__name__}},
                 )
-                if retry is not None:
-                    retry.cancel()
-                retry = self._retry(channel.share, types, delay)
-                delay = min(delay * 2, REGISTER_RETRY_MAX_SECONDS)
 
-        channel = self._hub.channel(_connection_spec(watch), "fill_watch", "체결 감시", on_event)
-        channel.share(types)
-
-    def _retry(
-        self, share: Callable[[list[str]], None], types: list[str], delay: float
-    ) -> asyncio.Task[None]:
-        """밀려나 멈춘 연결이면 다시 구독해도 연결을 열지 않는다."""
-
-        async def later() -> None:
-            await asyncio.sleep(delay)
-            share(types)
-
-        task = asyncio.create_task(later())
-        self._retries.add(task)
-        task.add_done_callback(self._retries.discard)
-        return task
-
-    async def _handle(self, watch: Watch, item: Any, event: RealtimeEvent) -> None:
-        # 체결 하나의 수신·처리·알림 로그를 같은 ID로 묶는다.
-        request_id_var.set(uuid.uuid4().hex[:12])
-        values = item.get("values") if isinstance(item, dict) else None
-        realtime_type = item.get("type") if isinstance(item, dict) else None
-        spec = watch.get(realtime_type) if isinstance(realtime_type, str) else None
-        if not isinstance(values, dict) or spec is None or realtime_type not in FILL_STATUSES:
-            log(logger, logging.DEBUG, "realtime_item_skipped", type=realtime_type)
-            return
-        # 실전 연결은 국내·미국 이벤트가 섞여 오므로 이벤트마다 투자 환경을 정한다.
-        environment_var.set(spec.environment.value)
-        status = values.get("913")
-        if status not in FILL_STATUSES[realtime_type]:
-            log(logger, logging.DEBUG, "fill_skipped", type=realtime_type, status=status)
-            return
-        fill = _domestic_fill(values) if realtime_type == "00" else _us_fill(values)
-        log(
-            logger,
-            logging.INFO,
-            "fill_received",
-            order_no=fill.order_no,
-            code=fill.code,
-            side=fill.side,
-            price=_plain(fill.price),
-            quantity=_plain(fill.quantity),
-            remaining=_plain(fill.remaining),
-            filled_quantity=_plain(fill.filled_quantity),
-            average_price=_plain(fill.average_price),
-            realized_cost=_plain(fill.realized_cost),
-        )
-        auto_sell = await self._auto_sell_of(spec, fill, event)
+    async def _handle(self, fill: Fill) -> None:
+        spec = fill.spec
+        auto_sell = await self._auto_sell_of(spec, fill)
         profit = await self._sell_profit(spec, fill) if fill.side == "sell" else None
         open_orders = await self._open_orders(spec)
         embed = _fill_embed(fill, profit, open_orders, auto_sell)
@@ -221,9 +142,7 @@ class FillWatcher:
             trigger_request_id=auto_sell.trigger_request_id if auto_sell else None,
         )
 
-    async def _auto_sell_of(
-        self, spec: EnvironmentSpec, fill: Fill, event: RealtimeEvent
-    ) -> AutoSellMatch | None:
+    async def _auto_sell_of(self, spec: EnvironmentSpec, fill: Fill) -> AutoSellMatch | None:
         """이 체결을 낸 자동 매도. 자동 매도의 것이 아니면 None이다.
 
         체결 처리의 요청 ID는 체결마다 따로 두고, 트리거 ID로 찾으면 부분 체결까지 나오게 한다.
@@ -231,7 +150,7 @@ class FillWatcher:
         if fill.side != "sell" or fill.code is None or fill.order_no is None:
             return None
         return await self._auto_sell.match(
-            spec.environment, fill.code, fill.order_no, event.received_clock
+            spec.environment, fill.code, fill.order_no, fill.received_clock
         )
 
     async def _sell_profit(self, spec: EnvironmentSpec, fill: Fill) -> SellProfit:
@@ -445,111 +364,6 @@ class SellProfit:
     rate: Decimal | None = None  # %, 소수 둘째 자리
     purchase: Decimal | None = None
     failure: str | None = None
-
-
-@dataclass(frozen=True)
-class Fill:
-    """체결 이벤트 하나. 읽지 못한 값은 None이다."""
-
-    market: Market
-    code: str | None
-    name: str | None
-    order_no: str | None
-    side: str | None  # "buy" | "sell"
-    price: Decimal | None
-    quantity: Decimal | None
-    ordered: Decimal | None
-    remaining: Decimal | None
-    time: str | None
-    # 미국 매도 체결분의 매입 금액(F5 50724). 국내는 None이다.
-    realized_cost: Decimal | None = None
-    # 국내만: 이 주문의 지금까지 체결 수량(911)과 평균 체결가(910). 미국은 None이다.
-    filled_quantity: Decimal | None = None
-    average_price: Decimal | None = None
-
-
-def _domestic_fill(values: dict[str, Any]) -> Fill:
-    return Fill(
-        market=Market.DOMESTIC,
-        code=_text(values, "9001"),
-        name=_text(values, "302"),
-        order_no=_text(values, "9203"),
-        side=_side(values),
-        # 910·911은 이 주문의 평균 체결가·누적 체결 수량으로 온다. 이번 체결분은 914·915다.
-        price=_number(values, "914"),
-        quantity=_number(values, "915"),
-        ordered=_number(values, "900"),
-        remaining=_number(values, "902"),
-        time=_time(values, "908"),
-        filled_quantity=_number(values, "911"),
-        average_price=_number(values, "910"),
-    )
-
-
-def _us_fill(values: dict[str, Any]) -> Fill:
-    side = _side(values)
-    return Fill(
-        market=Market.US,
-        code=_text(values, "9001"),
-        name=_text(values, "302"),
-        order_no=_text(values, "9203"),
-        side=side,
-        price=_number(values, "910"),
-        quantity=_number(values, "911"),
-        ordered=_number(values, "900"),
-        remaining=_number(values, "902"),
-        # 미국 체결시각도 한국 시간이다.
-        time=_time(values, "908"),
-        realized_cost=_number(values, "50724") if side == "sell" else None,
-    )
-
-
-def _text(values: dict[str, Any], key: str) -> str | None:
-    value = values.get(key)
-    text = "" if value is None else str(value).strip()
-    if not text:
-        log(logger, logging.WARNING, "fill_value_unreadable", key=key, raw=value)
-        return None
-    return text
-
-
-def _number(values: dict[str, Any], key: str) -> Decimal | None:
-    """키움은 색 표시용으로 가격 앞에 +/-를 붙인다. 부호를 떼고 읽는다."""
-    raw = values.get(key)
-    text = "" if raw is None else str(raw).strip().lstrip("+-")
-    try:
-        number = Decimal(text)
-    except InvalidOperation:
-        number = None
-    if number is None or not number.is_finite():
-        log(logger, logging.WARNING, "fill_value_unreadable", key=key, raw=str(raw)[:40])
-        return None
-    return number
-
-
-def _side(values: dict[str, Any]) -> str | None:
-    """매도수구분. 국내는 1·2, 미국은 01·02로 온다."""
-    side = {"1": "sell", "2": "buy"}.get(str(values.get("907", "")).strip().lstrip("0"))
-    if side is None:
-        log(logger, logging.WARNING, "fill_value_unreadable", key="907", raw=values.get("907"))
-    return side
-
-
-def _time(values: dict[str, Any], key: str) -> str | None:
-    text = _text(values, key)
-    if text is None:
-        return None
-    formatted = _hhmmss(text)
-    if formatted is None:
-        log(logger, logging.WARNING, "fill_value_unreadable", key=key, raw=text[:40])
-    return formatted
-
-
-def _hhmmss(text: str) -> str | None:
-    """키움의 HHmmss를 HH:MM:SS로 바꾼다. 형식이 다르면 None이다."""
-    if len(text) != 6 or not text.isdigit():
-        return None
-    return f"{text[:2]}:{text[2:4]}:{text[4:]}"
 
 
 def _fill_embed(

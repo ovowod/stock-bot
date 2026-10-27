@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from stock_bot.auto_sell import AutoSell
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
-from stock_bot.fill_watch import FILL_STATUSES
+from stock_bot.fill_feed import FILL_STATUSES
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import DiscordNotifier, Embed, EmbedField

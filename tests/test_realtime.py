@@ -12,6 +12,7 @@ from stock_bot import realtime as realtime_module
 from stock_bot.account import AccountService
 from stock_bot.auto_sell import AutoSell
 from stock_bot.config import ENVIRONMENTS, Environment
+from stock_bot.fill_feed import FillFeed
 from stock_bot.fill_watch import FillWatcher
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.notification import DiscordNotifier
@@ -195,7 +196,7 @@ async def test_slow_fill_lookup_does_not_delay_another_features_events():
     hub = RealtimeHub(client, notifier, realtime, Clock())
     open_orders = OpenOrderService(client)
     orders = OrderService(client, AccountService(client).holding, open_orders.orders)
-    fills = FillWatcher(client, open_orders, notifier, hub, AutoSell(orders))
+    fills = FillWatcher(client, open_orders, notifier, FillFeed(hub), AutoSell(orders))
     quotes = Recorder()
     try:
         fills.start()
