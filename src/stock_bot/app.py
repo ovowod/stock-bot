@@ -109,7 +109,9 @@ def create_app(
     feed = FillFeed(realtime)
     fills = FillWatcher(kiwoom, open_orders, notifier, feed, auto_sell)
     sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
-    sl_tp_watch = SlTpWatcher(kiwoom, sl_tp, accounts.positions, auto_sell, realtime, notifier, now)
+    sl_tp_watch = SlTpWatcher(
+        kiwoom, sl_tp, accounts.positions, auto_sell, realtime, feed, notifier, now
+    )
     sl_tp.on_saved = sl_tp_watch.settings_saved
 
     @asynccontextmanager

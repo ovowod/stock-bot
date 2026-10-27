@@ -112,7 +112,8 @@ class Channel:
         immediate: ImmediateHandler | None = None,
     ) -> None:
         self.feature = feature
-        self.label = label
+        # 밀려남 중단 알림에 쓰는 기능 이름. 여러 기능이 함께 쓰는 채널은 이름이 여럿이다.
+        self.labels = [label] if label else []
         self.subscription: Subscription | None = None
         # 다른 기능과 함께 받는 계좌 단위 실시간 항목. 연결이 한 번만 등록한다.
         self.shared: list[str] = []
@@ -364,7 +365,9 @@ class _Link:
                 features=[c.feature for c in stopped],
             )
             self._broadcast(EventKind.STOPPED, self._connection_no)
-            await self._hub._notify_replaced(self, [c.label for c in stopped])
+            # 한 기능이 채널 여럿을 쓰면 이름이 겹치므로 한 번만 적는다.
+            names = dict.fromkeys(name for c in stopped for name in c.labels)
+            await self._hub._notify_replaced(self, list(names))
 
     async def _session(self) -> bool:
         """연결 하나가 끝날 때까지 받는다. LOGIN에 성공하고 응답 시간 초과 없이 끝났으면 True다.

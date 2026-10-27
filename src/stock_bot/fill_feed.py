@@ -171,7 +171,7 @@ class _Line:
 
     def _register(self) -> bool:
         """신청들의 항목을 합쳐 다시 등록하거나 해지한다. 합친 항목이 바뀌었으면 True다."""
-        self._channel.label = "·".join(dict.fromkeys(s.label for s in self._subscribers))
+        self._channel.labels = list(dict.fromkeys(s.label for s in self._subscribers))
         types = list(dict.fromkeys(FILL_TYPES[s.spec.environment] for s in self._subscribers))
         if types == self._types:
             return False
