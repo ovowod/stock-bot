@@ -1,6 +1,7 @@
 """SL / TP 보유종목 다시 읽기: 내 계좌 체결과 재연결 때, 조회 실패 뒤 재시도(국내 모의)."""
 
 import asyncio
+import json
 from datetime import timedelta
 from typing import Any
 
@@ -467,6 +468,19 @@ async def test_session_starting_while_disconnected_reads_holdings_after_reconnec
     assert second is realtime.connections[1]
     # 다시 붙은 연결로 한 번 읽었고, 그 연결의 CONNECTED로 또 읽지 않았다.
     assert len(kiwoom.calls("kt00018")) == 1
+
+
+async def test_replaced_connection_names_sl_tp_once_when_it_is_alone(data_dir, caplog):
+    # Discord가 꺼져 있어 중단 알림은 가지 않는다. SL / TP는 시세와 체결 feed 두 채널을 쓴다.
+    write_settings(data_dir)
+    realtime = FakeRealtime()
+    async with running(realtime, sl_tp_kiwoom(), data_dir):
+        connection = await watching(realtime)
+        connection.push(REPLACED)
+        await wait_until(lambda: "realtime_session_replaced" in messages(caplog))
+
+    replaced = next(r for r in caplog.records if r.getMessage() == "realtime_session_replaced")
+    assert json.loads(replaced.fields["names"]) == ["SL / TP"]
 
 
 async def test_replaced_connection_stops_the_read_retries(data_dir, caplog):

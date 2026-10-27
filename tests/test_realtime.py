@@ -19,7 +19,7 @@ from stock_bot.notification import DiscordNotifier
 from stock_bot.open_order import OpenOrderService
 from stock_bot.order import OrderService
 from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
-from tests.fake_kiwoom import FakeKiwoom
+from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom
 from tests.fake_realtime import OK_REG, FakeRealtime, fill_event
 from tests.test_fill_notifications import (
     DISCORD_ENV,
@@ -227,6 +227,33 @@ async def test_immediate_handler_error_is_logged_and_receiving_continues(caplog)
     failed = [r for r in caplog.records if r.getMessage() == "realtime_handler_failed"]
     assert len(failed) == 1
     assert failed[0].fields["feature"] == "fill_feed"
+
+
+def ignore(value: object) -> None:
+    pass
+
+
+async def test_fill_feed_registers_only_the_real_markets_that_are_subscribed():
+    # 실전 연결은 국내·미국이 하나다. 가짜 서버만 쓰고 주문 TR은 부르지 않는다.
+    realtime = FakeRealtime()
+    kiwoom = KiwoomClient(FAKE_ENV, transport=httpx.MockTransport(FakeKiwoom()))
+    hub = RealtimeHub(kiwoom, DiscordNotifier({}), realtime, Clock())
+    feed = FillFeed(hub)
+    try:
+        domestic = feed.subscribe(ENVIRONMENTS[Environment.DOMESTIC_REAL], "체결 감시", ignore)
+        [connection] = await realtime.wait_registered()
+        us = feed.subscribe(ENVIRONMENTS[Environment.US_REAL], "체결 감시", ignore)
+        await wait_until(lambda: len(connection.requests("REG")) == 2)
+        domestic()
+        us()
+        await wait_until(lambda: connection.closed)
+    finally:
+        await feed.stop()
+        await hub.stop()
+
+    assert [m["data"][0]["type"] for m in connection.requests("REG")] == [["00"], ["00", "F5"]]
+    # 마지막 신청이 빠지면 해지하고, 다른 구독이 없으니 연결을 닫는다.
+    assert [m["grp_no"] for m in connection.requests("REMOVE")] == ["1"]
 
 
 async def test_slow_fill_lookup_does_not_delay_another_features_events():

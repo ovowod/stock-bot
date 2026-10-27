@@ -16,10 +16,14 @@ from typing import Any
 
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.logging_setup import environment_var, log, request_id_var
-from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub
+from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
 
 logger = logging.getLogger("stock_bot.fill_feed")
 
+# 공유 연결에서 내 계좌 체결이 쓰는 그룹 번호. SL / TP의 시세 구독은 그룹 2를 쓴다.
+# 같은 항목을 그룹 둘에 등록하면 키움이 이벤트를 두 번 보내는지 확인하지 못해,
+# 체결을 받는 기능이 여럿이어도 이 그룹 하나로 한 번만 등록한다.
+GROUP_NO = "1"
 # 등록이 거부되면 연결은 그대로 두고 이 간격으로 다시 등록한다.
 # 실패가 이어지면 두 배씩 늘리고, 등록에 성공하면 처음으로 되돌린다.
 REGISTER_RETRY_INITIAL_SECONDS = 1.0
@@ -180,8 +184,12 @@ class _Line:
         self._status = None
         self._cancel_retry()
         self._delay = REGISTER_RETRY_INITIAL_SECONDS
-        self._channel.share(types or None)
+        self._subscribe()
         return True
+
+    def _subscribe(self) -> None:
+        """지금 항목으로 등록한다. 항목이 같아도 REG를 다시 보내고, 항목이 없으면 해지한다."""
+        self._channel.subscribe(Subscription(GROUP_NO, [""], self._types) if self._types else None)
 
     def _cancel_retry(self) -> None:
         if self._retry is not None:
@@ -229,7 +237,7 @@ class _Line:
         await asyncio.sleep(delay)
         self._retry = None
         if self._types:
-            self._channel.share(self._types)
+            self._subscribe()
 
     def _set_status(self, status: FeedStatus) -> None:
         self._status = status
