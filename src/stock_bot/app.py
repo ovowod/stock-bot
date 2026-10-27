@@ -36,7 +36,7 @@ from stock_bot.kiwoom import KST, KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
 from stock_bot.notification import DiscordNotifier, Embed, EmbedField
-from stock_bot.open_order import OpenOrderService
+from stock_bot.open_order import OpenOrder, OpenOrderService
 from stock_bot.order import OrderService
 from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
@@ -105,7 +105,7 @@ def create_app(
     realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
     # 자동 매도 공통 장치. 체결 알림이 자동 매도의 체결을 알아보는 데도 쓴다.
     guard = AutoSellGuard()
-    fills = FillWatcher(kiwoom, notifier, realtime, guard)
+    fills = FillWatcher(kiwoom, open_orders, notifier, realtime, guard)
     sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
     sl_tp_watch = SlTpWatcher(
         kiwoom, sl_tp, accounts.positions, orders, guard, realtime, notifier, now
@@ -375,7 +375,7 @@ def _access_embed(title: str, color: int, client: ClientInfo, extra: list[EmbedF
     )
 
 
-def _cancel_embed(spec: EnvironmentSpec, order: dict[str, Any], result: dict[str, Any]) -> Embed:
+def _cancel_embed(spec: EnvironmentSpec, order: OpenOrder, result: dict[str, Any]) -> Embed:
     """접수된 주문 취소의 Discord 알림."""
     quantity = result["cancel_quantity"]
     return Embed(
@@ -383,8 +383,8 @@ def _cancel_embed(spec: EnvironmentSpec, order: dict[str, Any], result: dict[str
         color=_CANCEL_COLOR,
         fields=(
             EmbedField("투자 환경", spec.label, inline=True),
-            EmbedField("종목", f"{order['name']} ({order['code']})", inline=True),
-            EmbedField("원래 주문", order["side_label"], inline=True),
+            EmbedField("종목", f"{order.name} ({order.code})", inline=True),
+            EmbedField("원래 주문", order.side_label, inline=True),
             # 잔량 전부로 보내 키움이 수량을 확정해 주지 않으면 null이다.
             EmbedField(
                 "취소 수량",

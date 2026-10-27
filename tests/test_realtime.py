@@ -14,6 +14,7 @@ from stock_bot.config import ENVIRONMENTS, Environment
 from stock_bot.fill_watch import FillWatcher
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.notification import DiscordNotifier
+from stock_bot.open_order import OpenOrderService
 from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
 from tests.fake_kiwoom import FakeKiwoom
 from tests.fake_realtime import OK_REG, FakeRealtime, fill_event
@@ -190,7 +191,7 @@ async def test_slow_fill_lookup_does_not_delay_another_features_events():
     client = KiwoomClient(DOMESTIC_PAPER_ENV, transport=httpx.MockTransport(slow_kiwoom))
     notifier = DiscordNotifier(DISCORD_ENV, transport=httpx.MockTransport(discord))
     hub = RealtimeHub(client, notifier, realtime, Clock())
-    fills = FillWatcher(client, notifier, hub, AutoSellGuard())
+    fills = FillWatcher(client, OpenOrderService(client), notifier, hub, AutoSellGuard())
     quotes = Recorder()
     try:
         fills.start()

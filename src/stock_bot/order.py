@@ -20,6 +20,7 @@ from stock_bot.config import Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError, response_format_error
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
+from stock_bot.open_order import OpenOrder
 from stock_bot.quote import US_EXCHANGE_CODES
 from stock_bot.reader import Reader
 
@@ -70,9 +71,9 @@ TRADE_TYPES: dict[Market, dict[str, str]] = {
 
 
 HoldingLookup = Callable[[EnvironmentSpec, str], Awaitable[dict[str, Any]]]
-OpenOrderLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
+OpenOrderLookup = Callable[[EnvironmentSpec], Awaitable[list[OpenOrder]]]
 # 취소가 접수되면 (투자 환경, 취소한 미체결 주문, 접수 응답)으로 부른다. 기다리지 않는다.
-CancelListener = Callable[[EnvironmentSpec, dict[str, Any], dict[str, Any]], None]
+CancelListener = Callable[[EnvironmentSpec, OpenOrder, dict[str, Any]], None]
 
 
 AutoSellOutcome = Literal["skipped", "cancelled", "accepted", "rejected", "unknown"]
@@ -236,9 +237,7 @@ class OrderService:
             )
         seen.add(order_key)
 
-    async def _check_open_order(
-        self, spec: EnvironmentSpec, cancel: dict[str, str]
-    ) -> dict[str, Any]:
+    async def _check_open_order(self, spec: EnvironmentSpec, cancel: dict[str, str]) -> OpenOrder:
         """취소 직전에 미체결을 다시 조회해 그 주문을 찾는다. 취소할 수 없으면 보내지 않는다."""
         fields = {"order_key": cancel["order_key"], "order_no": cancel["order_no"]}
         try:
@@ -259,19 +258,19 @@ class OrderService:
                 502,
                 {"api_id": error.detail.get("api_id")},
             ) from error
-        order = next((o for o in orders if o["order_no"] == cancel["order_no"]), None)
+        order = next((o for o in orders if o.order_no == cancel["order_no"]), None)
         if order is None:
             log(logger, logging.WARNING, "cancel_blocked", **fields, reason="not_found")
             raise AppError("open_order_not_found", "이미 체결되었거나 취소된 주문입니다.", 400)
-        remaining = order["remaining_quantity"]
+        remaining = order.remaining_quantity
         log(logger, logging.INFO, "open_order_checked", **fields, remaining_quantity=remaining)
-        if not order["cancelable"]:
+        if not order.cancelable:
             log(
                 logger,
                 logging.WARNING,
                 "cancel_blocked",
                 **fields,
-                reason=order["blocked_reason"],
+                reason=order.blocked_reason,
             )
             raise AppError(
                 "cancel_not_supported",
@@ -314,26 +313,27 @@ class OrderService:
         return order
 
     async def _send_cancel(
-        self, spec: EnvironmentSpec, cancel: dict[str, str], order: dict[str, Any]
+        self, spec: EnvironmentSpec, cancel: dict[str, str], order: OpenOrder
     ) -> dict[str, Any]:
         """취소 TR을 한 번만 호출한다. 국내는 남은 수량 전부면 0(잔량 전부)으로 보낸다."""
-        all_remaining = int(cancel["quantity"]) == order["remaining_quantity"]
+        all_remaining = int(cancel["quantity"]) == order.remaining_quantity
         if spec.market is Market.DOMESTIC:
             path, quantity_key = DOMESTIC_ORDER_PATH, "cncl_qty"
             body = {
                 "dmst_stex_tp": "KRX",
                 "orig_ord_no": cancel["order_no"],
-                "stk_cd": order["code"],
+                "stk_cd": order.code,
                 "cncl_qty": "0" if all_remaining else cancel["quantity"],
             }
         else:
             # 미체결 응답에는 거래소가 없어 종목 목록에서 찾은 거래소를 쓴다.
             # 거래소를 못 찾은 주문은 취소 가능 판단에서 이미 막혔다.
+            assert order.exchange is not None
             path, quantity_key = US_ORDER_PATH, "cncl_ord_qty"
             body = {
                 "orig_ord_no": cancel["order_no"],
-                "stex_tp": US_EXCHANGE_CODES[order["exchange"]],
-                "stk_cd": order["code"],
+                "stex_tp": US_EXCHANGE_CODES[order.exchange],
+                "stk_cd": order.code,
             }
         data, order_no = await self._call_order(
             spec,
