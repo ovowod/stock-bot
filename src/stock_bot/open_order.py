@@ -1,7 +1,9 @@
-"""미체결 주문 조회: 국내 ka10075, 미국 ust21050을 불러 화면과 취소에 필요한 필드만 정리한다."""
+"""미체결 주문 조회: 국내 ka10075, 미국 ust21050을 불러 화면·취소·체결 알림에 쓸 필드만 정리한다."""
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from stock_bot.account import DOMESTIC_ACCOUNT_PATH, US_ACCOUNT_PATH, StockListings
@@ -37,6 +39,31 @@ def is_us_no_open_orders(exc: AppError) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class OpenOrder:
+    """미체결 주문 한 건. 계좌 화면, 취소 재확인, 체결 알림이 같은 목록을 쓴다."""
+
+    order_no: str
+    code: str
+    name: str
+    side: str | None  # "buy" | "sell"
+    side_label: str  # 매수, 매도정정 등
+    order_type: str
+    # 시장가 등 가격이 없는 주문은 None이다.
+    price: Decimal | None
+    ordered_quantity: int | None
+    remaining_quantity: int
+    time: str  # HH:MM:SS로 바꾸지 못하면 받은 그대로
+    exchange: str | None
+    # 이 앱에서 취소할 수 없는 이유. 취소할 수 있으면 None이다.
+    blocked_reason: str | None
+    market: Market
+
+    @property
+    def cancelable(self) -> bool:
+        return self.blocked_reason is None
+
+
 class OpenOrderService:
     def __init__(self, kiwoom: KiwoomClient, listings: StockListings | None = None) -> None:
         self._kiwoom = kiwoom
@@ -46,13 +73,13 @@ class OpenOrderService:
 
     async def fetch(self, spec: EnvironmentSpec) -> dict[str, Any]:
         return {
-            "orders": await self.orders(spec),
+            "orders": [_json(order) for order in await self.orders(spec)],
             "fetched_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
 
     async def orders(
         self, spec: EnvironmentSpec, listing_required: bool = False
-    ) -> list[dict[str, Any]]:
+    ) -> list[OpenOrder]:
         """그 투자 환경의 미체결 주문 전부.
 
         listing_required면 미국 종목 목록을 받지 못했을 때 오류를 던진다. 취소 재확인은 이것을 써서,
@@ -65,9 +92,7 @@ class OpenOrderService:
         log(logger, logging.INFO, "open_orders_fetched", api_id=API_ID, count=len(orders))
         return orders
 
-    async def _us_orders(
-        self, spec: EnvironmentSpec, listing_required: bool
-    ) -> list[dict[str, Any]]:
+    async def _us_orders(self, spec: EnvironmentSpec, listing_required: bool) -> list[OpenOrder]:
         try:
             data = await self._kiwoom.call(spec, US_API_ID, US_ACCOUNT_PATH, US_REQUEST_BODY)
         except AppError as exc:
@@ -82,7 +107,7 @@ class OpenOrderService:
         ]
         listings = await self._us_listings(spec, listing_required)
         orders = [_us_order(row, spec, listings) for row in rows]
-        unlisted = sorted({o["code"] for o in orders if o["exchange"] is None})
+        unlisted = sorted({o.code for o in orders if o.exchange is None})
         if unlisted:
             # 조회마다 한 줄만 남긴다. 그 주문의 취소가 막힌 이유다.
             log(
@@ -118,7 +143,29 @@ class OpenOrderService:
             return {}
 
 
-def _order(row: Reader, spec: EnvironmentSpec) -> dict[str, Any]:
+def _json(order: OpenOrder) -> dict[str, Any]:
+    """화면에 보내는 미체결 주문. 가격은 국내는 정수, 미국은 소수로 보낸다."""
+    price: int | float | None = None
+    if order.price is not None:
+        price = int(order.price) if order.market is Market.DOMESTIC else float(order.price)
+    return {
+        "order_no": order.order_no,
+        "code": order.code,
+        "name": order.name,
+        "side": order.side,
+        "side_label": order.side_label,
+        "order_type": order.order_type,
+        "price": price,
+        "ordered_quantity": order.ordered_quantity,
+        "remaining_quantity": order.remaining_quantity,
+        "time": order.time,
+        "exchange": order.exchange,
+        "cancelable": order.cancelable,
+        "blocked_reason": order.blocked_reason,
+    }
+
+
+def _order(row: Reader, spec: EnvironmentSpec) -> OpenOrder:
     order_no = row.text("ord_no")
     code = row.text("stk_cd")
     remaining = row.integer("oso_qty")
@@ -127,31 +174,28 @@ def _order(row: Reader, spec: EnvironmentSpec) -> dict[str, Any]:
     # +, -는 색 표시용이다.
     side_label = row.text("io_tp_nm").lstrip("+-")
     order_type = row.text("trde_tp")
-    price = _optional_integer(row, "ord_pric")
+    price = _optional_number(row, "ord_pric")
     tm = row.text("tm")
-    blocked = _blocked_reason(row, spec, side_label)
-    return {
-        "order_no": order_no,
-        "code": code,
-        "name": row.text("stk_nm"),
-        "side": "buy" if "매수" in side_label else "sell" if "매도" in side_label else None,
-        "side_label": side_label,
+    return OpenOrder(
+        order_no=order_no,
+        code=code,
+        name=row.text("stk_nm"),
+        side="buy" if "매수" in side_label else "sell" if "매도" in side_label else None,
+        side_label=side_label,
         # 키움 국내 문서의 "보통"은 이 프로젝트에서 지정가라고 부른다.
-        "order_type": "지정가" if order_type == "보통" else order_type,
+        order_type="지정가" if order_type == "보통" else order_type,
         # 시장가 등 가격이 없는 주문은 0으로 온다.
-        "price": abs(price) if price else None,
-        "ordered_quantity": _optional_integer(row, "ord_qty"),
-        "remaining_quantity": remaining,
-        "time": _hhmmss(tm) or tm,
-        "exchange": row.text("stex_tp_txt"),
-        "cancelable": blocked is None,
-        "blocked_reason": blocked,
-    }
+        price=abs(price) if price else None,
+        ordered_quantity=_optional_integer(row, "ord_qty"),
+        remaining_quantity=remaining,
+        time=_hhmmss(tm) or tm,
+        exchange=row.text("stex_tp_txt"),
+        blocked_reason=_blocked_reason(row, spec, side_label),
+        market=Market.DOMESTIC,
+    )
 
 
-def _us_order(
-    row: Reader, spec: EnvironmentSpec, listings: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
+def _us_order(row: Reader, spec: EnvironmentSpec, listings: dict[str, dict[str, Any]]) -> OpenOrder:
     order_no = row.text("ord_no")
     code = row.text("stk_cd")
     remaining = row.integer("ord_remnq")
@@ -162,7 +206,7 @@ def _us_order(
     modified = "정정" if row.optional("ord_cntr_tp") == US_MODIFY_ORDER else ""
     listing = listings.get(code, {})
     exchange = listing.get("exchange")
-    price = _optional_decimal(row, "ord_uv")
+    price = _optional_number(row, "ord_uv")
     if spec.is_real:
         blocked: str | None = "real"
     elif row.optional("rsrv_tp") in US_RESERVED:
@@ -172,28 +216,28 @@ def _us_order(
         blocked = "exchange"
     else:
         blocked = None
-    return {
-        "order_no": order_no,
-        "code": code,
-        "name": listing.get("name") or row.text("frgn_stk_nm"),
-        "side": "sell" if slby_tp == "1" else "buy" if slby_tp == "2" else None,
-        "side_label": row.text("slby_tp_nm") + modified,
-        "order_type": row.text("frgn_trde_nm"),
-        "price": price or None,
-        "ordered_quantity": _optional_integer(row, "ord_qty"),
-        "remaining_quantity": remaining,
+    return OpenOrder(
+        order_no=order_no,
+        code=code,
+        name=listing.get("name") or row.text("frgn_stk_nm"),
+        side="sell" if slby_tp == "1" else "buy" if slby_tp == "2" else None,
+        side_label=row.text("slby_tp_nm") + modified,
+        order_type=row.text("frgn_trde_nm"),
+        price=price or None,
+        ordered_quantity=_optional_integer(row, "ord_qty"),
+        remaining_quantity=remaining,
         # 이미 HH:mm:ss(KST)로 온다.
-        "time": row.text("ord_time"),
-        "exchange": exchange,
-        "cancelable": blocked is None,
-        "blocked_reason": blocked,
-    }
+        time=row.text("ord_time"),
+        exchange=exchange,
+        blocked_reason=blocked,
+        market=Market.US,
+    )
 
 
-def _optional_decimal(row: Reader, key: str) -> float | None:
-    """화면에 보여주기만 하는 소수 칸. 깨진 값이면 그 칸만 비운다."""
+def _optional_number(row: Reader, key: str) -> Decimal | None:
+    """화면에 보여주기만 하는 가격 칸. 깨진 값이면 그 칸만 비운다."""
     try:
-        return row.decimal(key)
+        return row.number(key)
     except AppError:
         log(logger, logging.WARNING, "open_order_value_unreadable", key=key)
         return None

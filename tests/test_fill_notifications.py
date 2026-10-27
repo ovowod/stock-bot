@@ -11,7 +11,14 @@ from stock_bot import fill_watch
 from stock_bot import realtime as realtime_module
 from stock_bot.app import create_app
 from stock_bot.notification import DiscordNotifier
-from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, body_of, kiwoom_error, page_response
+from tests.fake_kiwoom import (
+    FAKE_ENV,
+    FakeKiwoom,
+    body_of,
+    kiwoom_error,
+    page_response,
+    usa10099_row,
+)
 from tests.fake_realtime import (
     OK_LOGIN,
     OK_REG,
@@ -76,6 +83,7 @@ def fill_kiwoom(*open_order_pages: dict | httpx.Response) -> FakeKiwoom:
         .reply("ka10075", *(open_order_pages or ({"oso": []},)))
         .reply("ka10077", {"tdy_rlzt_pl": "0", "tdy_rlzt_pl_dtl": []})
         .reply("ust21050", {"result_list": []})
+        .reply("usa10099", {"list": []})
     )
 
 
@@ -305,8 +313,8 @@ async def test_connection_and_fill_steps_are_logged_without_secrets(caplog):
         await discord.wait_for(1)
         await wait_until(lambda: "fill_notified" in [r.getMessage() for r in caplog.records])
 
-    # 연결 단계는 공유 실시간 연결이, 체결 단계는 체결 감시가 남긴다.
-    watched = ("stock_bot.fill_watch", "stock_bot.realtime")
+    # 연결 단계는 공유 실시간 연결이, 체결 단계는 체결 감시와 미체결 조회가 남긴다.
+    watched = ("stock_bot.fill_watch", "stock_bot.realtime", "stock_bot.open_order")
     events = [r.getMessage() for r in caplog.records if r.name in watched]
     assert events == [
         "fill_watch_started",
@@ -673,6 +681,8 @@ async def test_open_orders_follow_continuation_pages():
         {"return_code": 1, "return_msg": "조회 오류"},
         httpx.Response(500, text="oops"),
         {"oso": "not a list"},
+        # 계좌 화면과 같은 규칙: 취소에 필요한 값이 빈 줄이 있으면 목록 전체를 믿지 않는다.
+        {"oso": [open_order(ord_no="")]},
     ],
 )
 async def test_open_order_lookup_failure_still_sends_the_fill(reply, caplog):
@@ -860,6 +870,32 @@ async def test_us_buy_fill_is_sent_in_usd_with_us_open_orders():
     }
     assert kiwoom.calls("ust21050")[0].url.host == "mockapi.kiwoom.com"
     assert kiwoom.calls("ka10075") == []
+
+
+async def test_us_open_orders_match_the_account_screen():
+    # 취소주문 줄(ord_cntr_tp 12)은 미체결이 아니다. 정정 주문은 국내처럼 "정정"을 붙인다.
+    kiwoom = (
+        fill_kiwoom()
+        .reply(
+            "ust21050",
+            {
+                "result_list": [
+                    us_open_order(),
+                    us_open_order(ord_no="000002625", ord_cntr_tp="11", ord_time="23:22:30"),
+                    us_open_order(ord_no="000002626", ord_cntr_tp="12", ord_time="23:22:40"),
+                ]
+            },
+        )
+        .reply("usa10099", {"list": [usa10099_row("F", "포드", "FORD MOTOR CO", "NY")]})
+    )
+    [payload] = await us_fills(kiwoom, us_fill_event())
+
+    assert fields(payload)["미체결 주문 (2건)"] == "\n".join(
+        [
+            "포드 · 매수 · 지정가 $1 · 미체결 1/1주 · 23:22:11",
+            "포드 · 매수정정 · 지정가 $1 · 미체결 1/1주 · 23:22:30",
+        ]
+    )
 
 
 async def test_us_order_events_other_than_fills_are_ignored():
@@ -1123,10 +1159,12 @@ async def test_real_events_are_labeled_by_market_and_use_real_lookups():
     assert us["content"] == "[미국 실전]"
     looked_up = [(r.headers.get("api-id"), r.url.host) for r in kiwoom.requests[1:]]
     # 국내 체결에는 국내 조회만, 미국 체결에는 미국 조회만 실전 도메인으로 나간다.
+    # 미국 미체결은 종목 목록(usa10099)에서 이름을 찾는다.
     assert looked_up == [
         ("ka10077", "api.kiwoom.com"),
         ("ka10075", "api.kiwoom.com"),
         ("ust21050", "api.kiwoom.com"),
+        ("usa10099", "api.kiwoom.com"),
     ]
 
 
@@ -1147,7 +1185,7 @@ async def test_fill_watch_never_calls_order_trs():
     await notify_fills(kiwoom, fill_event(), sell(), us_fill_event(), us_sell(), environ=REAL_ENV)
 
     called = {r.headers.get("api-id") for r in kiwoom.requests} - {None}
-    assert called <= {"ka10075", "ka10077", "ust21050"}
+    assert called <= {"ka10075", "ka10077", "ust21050", "usa10099"}
     assert not called & ORDER_API_IDS
 
 

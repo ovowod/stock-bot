@@ -8,19 +8,19 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
-from stock_bot.account import DOMESTIC_ACCOUNT_PATH, US_ACCOUNT_PATH
-from stock_bot.auto_sell import AutoSellGuard
+from stock_bot.account import DOMESTIC_ACCOUNT_PATH
+from stock_bot.auto_sell import AutoSell, AutoSellMatch
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import FIELD_VALUE_LIMIT, DiscordNotifier, Embed, EmbedField
-from stock_bot.open_order import is_us_no_open_orders
+from stock_bot.open_order import OpenOrder, OpenOrderService
 from stock_bot.reader import Reader
 from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub
 
@@ -39,12 +39,6 @@ LOOKUP_RETRY_SECONDS = 1.0
 # 일부만 체결된 채 끝난 주문이 쌓이지 않게 하기 위해서다.
 # 날짜로 지우지 않는 건 미국 장이 한국 자정을 넘기 때문이다.
 FILL_MEMORY_SECONDS = 24 * 3600
-
-# 매도 체결이 온 종목에 진행 중인 자동 매도가 있으면, 체결 이벤트를 받은 때부터
-# 이만큼 그 주문 결과를 기다린 뒤 주문번호를 맞춰 본다.
-# 시장가는 주문 응답보다 체결 통보가 먼저 올 수 있다.
-AUTO_SELL_RESULT_WAIT_SECONDS = 5.0
-AUTO_SELL_MARK = "SL / TP 자동 매도"
 
 # 실시간 연결 하나에 구독할 실시간 항목과 그 이벤트의 투자 환경.
 # 00은 국내 주문체결, F5는 미국 실시간 체결이다.
@@ -73,15 +67,18 @@ class FillWatcher:
     def __init__(
         self,
         kiwoom: KiwoomClient,
+        open_orders: OpenOrderService,
         notifier: DiscordNotifier,
         hub: RealtimeHub,
-        guard: AutoSellGuard,
+        auto_sell: AutoSell,
     ) -> None:
         self._kiwoom = kiwoom
+        # 계좌 화면과 같은 미체결 목록을 알림에 담는다.
+        self._open_order_service = open_orders
         self._notifier = notifier
         self._hub = hub
-        # 자동 매도 공통 장치. 접수된 자동 매도의 주문번호로 체결에 표시를 붙인다.
-        self._guard = guard
+        # 접수된 자동 매도의 주문번호로 체결에 표시를 붙인다.
+        self._auto_sell = auto_sell
         # 거부된 구독을 다시 등록하려고 기다리는 작업. 감시마다 많아야 하나다.
         self._retries: set[asyncio.Task[None]] = set()
         # (투자 환경, 주문번호)별로 지금까지 받은 미국 매도 체결. 서버를 재시작하면 사라진다.
@@ -210,10 +207,10 @@ class FillWatcher:
             average_price=_plain(fill.average_price),
             realized_cost=_plain(fill.realized_cost),
         )
-        trigger_request_id = await self._auto_sell(spec, fill, event)
+        auto_sell = await self._auto_sell_of(spec, fill, event)
         profit = await self._sell_profit(spec, fill) if fill.side == "sell" else None
         open_orders = await self._open_orders(spec)
-        embed = _fill_embed(fill, profit, open_orders, auto_sell=trigger_request_id is not None)
+        embed = _fill_embed(fill, profit, open_orders, auto_sell)
         sent = await self._notifier.send(embed=embed, spec=spec)
         log(
             logger,
@@ -221,43 +218,21 @@ class FillWatcher:
             "fill_notified",
             order_no=fill.order_no,
             sent=sent,
-            trigger_request_id=trigger_request_id,
+            trigger_request_id=auto_sell.trigger_request_id if auto_sell else None,
         )
 
-    async def _auto_sell(
+    async def _auto_sell_of(
         self, spec: EnvironmentSpec, fill: Fill, event: RealtimeEvent
-    ) -> str | None:
-        """이 체결이 SL / TP 자동 매도의 것이면 그 트리거 요청 ID다.
+    ) -> AutoSellMatch | None:
+        """이 체결을 낸 자동 매도. 자동 매도의 것이 아니면 None이다.
 
         체결 처리의 요청 ID는 체결마다 따로 두고, 트리거 ID로 찾으면 부분 체결까지 나오게 한다.
         """
         if fill.side != "sell" or fill.code is None or fill.order_no is None:
             return None
-        waited = time.monotonic() - event.received_clock
-        settled = await self._guard.settled(
-            spec.environment, fill.code, AUTO_SELL_RESULT_WAIT_SECONDS - waited
+        return await self._auto_sell.match(
+            spec.environment, fill.code, fill.order_no, event.received_clock
         )
-        accepted = self._guard.accepted(spec.environment, fill.order_no)
-        if accepted is None:
-            if not settled:
-                log(
-                    logger,
-                    logging.WARNING,
-                    "fill_auto_sell_wait_timeout",
-                    order_no=fill.order_no,
-                    # 큐에서 기다린 시간을 포함해 체결 이벤트를 받은 뒤 지난 시간이다.
-                    waited_seconds=round(time.monotonic() - event.received_clock, 3),
-                    limit_seconds=AUTO_SELL_RESULT_WAIT_SECONDS,
-                )
-            return None
-        log(
-            logger,
-            logging.INFO,
-            "fill_auto_sell_matched",
-            order_no=fill.order_no,
-            trigger_request_id=accepted.trigger_request_id,
-        )
-        return accepted.trigger_request_id
 
     async def _sell_profit(self, spec: EnvironmentSpec, fill: Fill) -> SellProfit:
         """지금까지 체결된 수량 전체의 매도 손익. 수수료·세금은 빼지 않는다."""
@@ -347,7 +322,9 @@ class FillWatcher:
     async def _purchase_price(self, spec: EnvironmentSpec, code: str) -> Decimal | None:
         """당일 실현손익 상세(ka10077)에서 그 종목의 매입가를 찾는다. 못 찾으면 None이다."""
         try:
-            data = await self._lookup(spec, "ka10077", DOMESTIC_ACCOUNT_PATH, {"stk_cd": code})
+            data = await self._lookup(
+                lambda: self._kiwoom.call(spec, "ka10077", DOMESTIC_ACCOUNT_PATH, {"stk_cd": code})
+            )
             prices = {
                 row.number("buy_uv")
                 # 응답 종목코드에는 A가 붙어 온다(A005930).
@@ -380,11 +357,9 @@ class FillWatcher:
         log(logger, logging.INFO, "purchase_price_fetched", api_id="ka10077", price=_plain(price))
         return price
 
-    async def _lookup(
-        self, spec: EnvironmentSpec, api_id: str, path: str, body: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _lookup[T](self, call: Callable[[], Awaitable[T]]) -> T:
         try:
-            return await self._kiwoom.call(spec, api_id, path, body)
+            return await call()
         except AppError as exc:
             if exc.kind != "connection_error":
                 raise
@@ -392,47 +367,27 @@ class FillWatcher:
                 logger,
                 logging.WARNING,
                 "lookup_retry",
-                api_id=api_id,
+                api_id=exc.detail.get("api_id"),
                 wait_seconds=LOOKUP_RETRY_SECONDS,
                 cause=exc.message,
             )
         await asyncio.sleep(LOOKUP_RETRY_SECONDS)
-        return await self._kiwoom.call(spec, api_id, path, body)
+        return await call()
 
     async def _open_orders(self, spec: EnvironmentSpec) -> list[OpenOrder] | None:
         """그 투자 환경의 미체결 주문. 조회하지 못하면 None이다."""
-        if spec.market is Market.DOMESTIC:
-            # stex_tp=0(통합)은 문서의 허용값이다. 모의투자에서 받아들이는지는 아직 확인하지 못했다.
-            api_id, path, list_key = "ka10075", DOMESTIC_ACCOUNT_PATH, "oso"
-            body = {"all_stk_tp": "0", "trde_tp": "0", "stk_cd": "", "stex_tp": "0"}
-            parse = _domestic_open_order
-        else:
-            api_id, path, list_key = "ust21050", US_ACCOUNT_PATH, "result_list"
-            body = {"ord_dt": "", "slby_tp": "0", "stex_tp": "", "stk_cd": ""}
-            parse = _us_open_order
         try:
-            try:
-                data = await self._lookup(spec, api_id, path, body)
-            except AppError as exc:
-                if spec.market is not Market.US or not is_us_no_open_orders(exc):
-                    raise
-                log(
-                    logger, logging.INFO, "open_orders_none_reply", api_id=api_id, cause=exc.message
-                )
-                data = {list_key: []}
-            orders = [parse(row) for row in Reader(data, api_id).rows(list_key)]
+            return await self._lookup(lambda: self._open_order_service.orders(spec))
         except AppError as exc:
             log(
                 logger,
                 logging.WARNING,
                 "open_orders_failed",
-                api_id=api_id,
+                api_id=exc.detail.get("api_id"),
                 kind=exc.kind,
                 cause=exc.message,
             )
             return None
-        log(logger, logging.INFO, "open_orders_fetched", api_id=api_id, count=len(orders))
-        return orders
 
 
 # 한국 증권 앱 관례: 빨강은 매수·이익, 파랑은 손실.
@@ -511,53 +466,6 @@ class Fill:
     # 국내만: 이 주문의 지금까지 체결 수량(911)과 평균 체결가(910). 미국은 None이다.
     filled_quantity: Decimal | None = None
     average_price: Decimal | None = None
-
-
-@dataclass(frozen=True)
-class OpenOrder:
-    name: str
-    side: str  # 매수, 매도, 매수정정 등
-    order_type: str
-    price: Decimal | None
-    remaining: Decimal | None
-    ordered: Decimal | None
-    time: str  # HH:MM:SS로 바꾸지 못하면 받은 그대로
-    market: Market
-
-
-def _domestic_open_order(row: Reader) -> OpenOrder:
-    tm = row.text("tm")
-    order_type = row.text("trde_tp")
-    return OpenOrder(
-        name=row.text("stk_nm"),
-        # +, -는 색 표시용이다.
-        side=row.text("io_tp_nm").lstrip("+-"),
-        # 키움 국내 문서의 "보통"은 이 프로젝트에서 지정가라고 부른다.
-        order_type="지정가" if order_type == "보통" else order_type,
-        price=_absolute(row.number("ord_pric")),
-        remaining=row.number("oso_qty"),
-        ordered=row.number("ord_qty"),
-        time=_hhmmss(tm) or tm,
-        market=Market.DOMESTIC,
-    )
-
-
-def _us_open_order(row: Reader) -> OpenOrder:
-    return OpenOrder(
-        name=row.text("frgn_stk_nm"),
-        side=row.text("slby_tp_nm"),
-        order_type=row.text("frgn_trde_nm"),
-        price=row.number("ord_uv"),
-        remaining=row.number("ord_remnq"),
-        ordered=row.number("ord_qty"),
-        # 이미 HH:mm:ss로 온다.
-        time=row.text("ord_time"),
-        market=Market.US,
-    )
-
-
-def _absolute(value: Decimal | None) -> Decimal | None:
-    return None if value is None else abs(value)
 
 
 def _domestic_fill(values: dict[str, Any]) -> Fill:
@@ -648,7 +556,7 @@ def _fill_embed(
     fill: Fill,
     profit: SellProfit | None,
     open_orders: list[OpenOrder] | None,
-    auto_sell: bool = False,
+    auto_sell: AutoSellMatch | None = None,
 ) -> Embed:
     side = {"buy": "매수", "sell": "매도"}.get(fill.side or "")
     title = f"체결 · {side}" if side else "체결"
@@ -670,7 +578,7 @@ def _fill_embed(
     return Embed(
         title=title,
         # 사용자가 직접 낸 매도와 구분한다.
-        description=AUTO_SELL_MARK if auto_sell else "",
+        description=f"{auto_sell.source} 자동 매도" if auto_sell else "",
         color=color,
         fields=(
             EmbedField("종목", stock or UNKNOWN),
@@ -736,10 +644,10 @@ def _open_orders_field(orders: list[OpenOrder] | None) -> EmbedField:
 def _open_order_line(order: OpenOrder) -> str:
     price = PRICE_FORMATS[order.market](order.price)
     pricing = order.order_type if order.order_type == "시장가" else f"{order.order_type} {price}"
-    remaining = UNKNOWN if order.remaining is None else f"{order.remaining:,.0f}"
-    ordered = UNKNOWN if order.ordered is None else f"{order.ordered:,.0f}"
+    ordered = UNKNOWN if order.ordered_quantity is None else f"{order.ordered_quantity:,}"
     return (
-        f"{order.name} · {order.side} · {pricing} · 미체결 {remaining}/{ordered}주 · {order.time}"
+        f"{order.name} · {order.side_label} · {pricing} · "
+        f"미체결 {order.remaining_quantity:,}/{ordered}주 · {order.time}"
     )
 
 
