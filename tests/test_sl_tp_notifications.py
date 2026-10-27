@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import pytest
 
-from stock_bot import fill_watch, sl_tp_watch
+from stock_bot import auto_sell, sl_tp_watch
 from stock_bot import realtime as realtime_module
 from tests.fake_kiwoom import kiwoom_error, page_response
 from tests.fake_realtime import OK_REG, FakeRealtime, fill_event
@@ -279,7 +279,7 @@ async def test_fill_before_the_order_reply_is_marked_when_accepted_in_time(data_
 async def test_fill_is_sent_without_the_mark_when_the_reply_is_too_late(
     data_dir, caplog, monkeypatch
 ):
-    monkeypatch.setattr(fill_watch, "AUTO_SELL_RESULT_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(auto_sell, "RESULT_WAIT_SECONDS", 0.1)
     write_settings(data_dir)
     realtime = FakeRealtime()
     discord = FakeDiscord()

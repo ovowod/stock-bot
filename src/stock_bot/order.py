@@ -76,14 +76,15 @@ OpenOrderLookup = Callable[[EnvironmentSpec], Awaitable[list[OpenOrder]]]
 CancelListener = Callable[[EnvironmentSpec, OpenOrder, dict[str, Any]], None]
 
 
-AutoSellOutcome = Literal["skipped", "cancelled", "accepted", "rejected", "unknown"]
+AutoSellOutcome = Literal["in_progress", "skipped", "cancelled", "accepted", "rejected", "unknown"]
 
 
 @dataclass(frozen=True)
 class AutoSellResult:
     """자동 매도 결과.
 
-    보내지 않은 것: skipped(매도 가능 수량 0), cancelled(보내기 전 취소).
+    보내지 않은 것: in_progress(그 종목의 자동 매도가 진행 중), skipped(매도 가능 수량 0),
+    cancelled(보내기 전 취소).
     보낸 것: accepted(주문번호 받음), rejected(키움 오류, 잔고 확인 실패 포함),
     unknown(접수 여부 모름).
     """

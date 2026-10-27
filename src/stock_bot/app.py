@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from stock_bot.account import AccountService
 from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
-from stock_bot.auto_sell import AutoSellGuard
+from stock_bot.auto_sell import AutoSell
 from stock_bot.config import (
     DATA_DIR,
     ENVIRONMENTS,
@@ -103,13 +103,11 @@ def create_app(
     )
     now = now or (lambda: datetime.now(UTC))
     realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
-    # 자동 매도 공통 장치. 체결 알림이 자동 매도의 체결을 알아보는 데도 쓴다.
-    guard = AutoSellGuard()
-    fills = FillWatcher(kiwoom, open_orders, notifier, realtime, guard)
+    # 자동 매도는 SL / TP가 내고, 체결 알림이 그 체결을 알아본다.
+    auto_sell = AutoSell(orders)
+    fills = FillWatcher(kiwoom, open_orders, notifier, realtime, auto_sell)
     sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
-    sl_tp_watch = SlTpWatcher(
-        kiwoom, sl_tp, accounts.positions, orders, guard, realtime, notifier, now
-    )
+    sl_tp_watch = SlTpWatcher(kiwoom, sl_tp, accounts.positions, auto_sell, realtime, notifier, now)
     sl_tp.on_saved = sl_tp_watch.settings_saved
 
     @asynccontextmanager

@@ -15,14 +15,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from stock_bot.auto_sell import AutoSellGuard
+from stock_bot.auto_sell import AutoSell
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.fill_watch import FILL_STATUSES
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import DiscordNotifier, Embed, EmbedField
-from stock_bot.order import AutoSellResult, OrderService
 from stock_bot.quote import US_EXCHANGE_CODES
 from stock_bot.realtime import (
     SHARED_GROUP_NO,
@@ -45,6 +44,8 @@ logger = logging.getLogger("stock_bot.sl_tp_watch")
 
 # 지켜볼 투자 환경. 실전은 넣지 않는다. 국내 모의와 미국 모의는 인증정보·연결·설정이 따로다.
 WATCHED = (ENVIRONMENTS[Environment.DOMESTIC_PAPER], ENVIRONMENTS[Environment.US_PAPER])
+# 체결 알림에 "SL / TP 자동 매도"로 표시된다.
+AUTO_SELL_SOURCE = "SL / TP"
 # 시세 실시간 항목. 0B는 국내 주식체결, FE는 미국주식 실시간 체결가다.
 QUOTE_TYPES = {Market.DOMESTIC: "0B", Market.US: "FE"}
 # 내 계좌 체결 실시간 항목(00 국내 주문체결, F5 미국 실시간 체결).
@@ -126,8 +127,7 @@ class SlTpWatcher:
         kiwoom: KiwoomClient,
         settings: SlTpSettingsStore,
         positions: PositionLookup,
-        orders: OrderService,
-        guard: AutoSellGuard,
+        auto_sell: AutoSell,
         hub: RealtimeHub,
         notifier: DiscordNotifier,
         now: Callable[[], datetime],
@@ -137,8 +137,7 @@ class SlTpWatcher:
         self.notifier = notifier
         self.settings = settings
         self.positions = positions
-        self.orders = orders
-        self.guard = guard
+        self.auto_sell = auto_sell
         self.hub = hub
         self.now = now
         self._watches: list[_Watch] = []
@@ -659,9 +658,6 @@ class _Watch:
                 rate=str(rate),
                 threshold=str(threshold),
             )
-            if not self._owner.guard.claim(self.spec.environment, code):
-                log(logger, logging.INFO, "auto_sell_skipped", code=code, reason="in_progress")
-                return
             # 시세 처리는 주문 결과를 기다리지 않는다.
             self._spawn(self._sell(run, fired, request_id))
         finally:
@@ -712,42 +708,15 @@ class _Watch:
 
     async def _sell(self, run: _Run, trigger: AutoSellTrigger, request_id: str) -> None:
         """트리거 때 읽은 거래소로 판다. 국내는 거래소가 없어 빈 값으로 보낸다."""
-        environment = self.spec.environment
         code = trigger.code
-        try:
-            result = await self._owner.orders.sell_all_at_market(
-                self.spec,
-                code,
-                exchange=trigger.exchange or "",
-                order_key=f"sl-tp-{request_id}",
-                ready=lambda: self._may_send(run, code),
-            )
-            if result.outcome == "accepted" and result.order_no:
-                # 공통 장치를 놓기 전에 기억해야, 결과를 기다리던 체결 알림이 이 주문번호를 찾는다.
-                self._owner.guard.remember(environment, result.order_no, request_id)
-        except asyncio.CancelledError:
-            # 서버가 꺼지면 기다리지 않는다. 키움에 이미 보냈는지는 모른다.
-            log(
-                logger,
-                logging.WARNING,
-                "sl_tp_auto_sell_interrupted",
-                code=code,
-                run=run.number,
-                cause="server_shutdown",
-            )
-            raise
-        except Exception as exc:
-            logger.error(
-                "sl_tp_auto_sell_failed",
-                exc_info=exc,
-                extra={
-                    "fields": {"code": code, "run": run.number, "error_type": type(exc).__name__}
-                },
-            )
-            # 어디서 멈췄는지 모르므로 키움에 이미 보냈을 수 있다. 결과 확인 불가로 알린다.
-            result = AutoSellResult("unknown", cause=type(exc).__name__)
-        finally:
-            self._owner.guard.release(environment, code)
+        result = await self._owner.auto_sell.sell(
+            self.spec,
+            code,
+            trigger.exchange or "",
+            source=AUTO_SELL_SOURCE,
+            request_id=request_id,
+            ready=lambda: self._may_send(run, code),
+        )
         log(
             logger,
             logging.INFO if result.outcome in ("accepted", "skipped") else logging.WARNING,
