@@ -123,6 +123,8 @@ export interface HoldingView {
   /** 평가금액 아래 줄(예: 원화 환산 평가금액). */
   valueSub?: ReactNode;
   change: ReactNode;
+  /** 이름 옆 배지(예: "거래소 확인 불가"). */
+  badge?: string;
   /** 있으면 매도 버튼을 보여준다. */
   onSell?: () => void;
 }
@@ -149,7 +151,10 @@ export function HoldingsList({ items }: { items: HoldingView[] }) {
             {/* 왼쪽은 종목 정보, 오른쪽은 평가금액과 손익이다. 두 칸은 각자 위에서부터 쌓아, 이름이 길어도 어긋나지 않는다. */}
             <div className="min-w-0 flex-1">
               {/* 한글 이름은 띄어쓰기 자리에서만 줄을 바꾼다("아이셰어/즈"처럼 끊지 않는다). */}
-              <p className="text-[15px] font-semibold break-words break-keep">{item.name}</p>
+              <p className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[15px] font-semibold break-words break-keep">{item.name}</span>
+                <Badge text={item.badge} />
+              </p>
               <Parts parts={item.position} className={SUB_TEXT} />
               <Parts parts={item.info} className={SUB_TEXT} />
             </div>
@@ -184,7 +189,9 @@ function MobileHolding({ item }: { item: HoldingView }) {
         <Avatar name={item.name} />
         {/* 이름은 평가금액과, 수량은 손익과 짝을 지어 한 줄씩 둔다. 긴 손익이 이름 칸을 좁히지 않는다. */}
         <span className="grid min-w-0 flex-1 grid-cols-[1fr_auto] items-baseline gap-x-3">
-          <span className="min-w-0 text-[15px] font-semibold break-words break-keep">{item.name}</span>
+          <span className="min-w-0 text-[15px] font-semibold break-words break-keep">
+            {item.name} <Badge text={item.badge} />
+          </span>
           <span className="text-right text-[15px] font-bold">{item.value}</span>
           <span className="text-[13px] text-muted">{item.quantity}</span>
           <span className="text-right text-[13px] font-medium">{item.change}</span>
@@ -235,6 +242,12 @@ function Avatar({ name }: { name: string }) {
 const SUB_TEXT = "text-[13px] text-muted";
 
 /** 가운뎃점으로 이은 한 줄. 좁으면 가운뎃점 자리에서만 줄을 바꾸고, 각 덩어리 안에서는 끊지 않는다. */
+/** 미체결 패널의 취소 불가 배지와 같은 모양이다. */
+function Badge({ text }: { text?: string }) {
+  if (!text) return null;
+  return <span className="rounded-full bg-canvas px-2 py-0.5 text-[11px] font-bold text-sub">{text}</span>;
+}
+
 function Parts({ parts, className }: { parts: string[]; className: string }) {
   return (
     <p className={`min-w-0 ${className}`}>

@@ -54,7 +54,8 @@ def test_us_account_is_converted_for_the_screen(make_client):
         {
             "code": "AAPL",
             "name": "애플",
-            "exchange": "미국",
+            # 기본 가짜 종목 목록이 비어 있어 거래소를 모른다.
+            "exchange": None,
             "currency": "USD",
             "quantity": 395,
             "sellable_quantity": 395,
@@ -76,21 +77,6 @@ def test_empty_us_holdings_is_a_normal_result(make_client):
 
     assert response.status_code == 200
     assert response.json()["holdings"] == []
-
-
-def test_us_holding_exchange_names_match_the_ranking_and_search_names(make_client):
-    """잔고 TR은 거래소를 한글명(뉴욕·나스닥·아멕스)으로 준다. 순위·검색의 영문명으로 바꾼다."""
-    names = {"IONQ": "뉴욕", "NVDA": "나스닥", "SPY": "아멕스", "ABCD": "미국"}
-    holdings = [
-        {**UST21070_HOLDING, "stk_cd": code, "stex_nm": name} for code, name in names.items()
-    ]
-    fake = us_fake().reply("ust21070", {**UST21070_REPLY, "result_list": holdings})
-
-    body = make_client(fake).get(URL).json()
-
-    exchanges = {h["code"]: h["exchange"] for h in body["holdings"]}
-    # 모르는 이름은 받은 그대로 보여준다.
-    assert exchanges == {"IONQ": "NYSE", "NVDA": "NASDAQ", "SPY": "AMEX", "ABCD": "미국"}
 
 
 def test_us_holding_names_and_exchanges_come_from_the_stock_list(make_client):
@@ -121,20 +107,28 @@ def test_us_holding_names_and_exchanges_come_from_the_stock_list(make_client):
     body = make_client(fake).get(URL).json()
 
     shown = {h["code"]: (h["name"], h["exchange"]) for h in body["holdings"]}
-    # 목록에 없는 종목은 잔고 TR의 이름과 거래소(영문으로 바꾼 값)를 쓴다.
+    # 목록에 없는 종목은 잔고 TR의 이름을 쓰고, 잔고 TR의 거래소는 주문과 다를 수 있어 쓰지 않는다.
     assert shown == {
         "SOXL": ("미국 반도체 3배 디렉시온 ETF", "NYSE"),
-        "ZZZZ": ("목록에 없는 종목", "NASDAQ"),
+        "ZZZZ": ("목록에 없는 종목", None),
     }
 
 
-def test_us_holding_names_fall_back_when_the_stock_list_fails(make_client):
-    fake = us_fake().reply("usa10099", kiwoom_error(1700, "허용된 요청 개수를 초과하였습니다"))
+def test_us_holdings_have_no_exchange_when_the_stock_list_fails(make_client, caplog):
+    caplog.set_level(logging.INFO, logger="stock_bot")
+    holdings = [{**UST21070_HOLDING, "stex_nm": "나스닥"}]
+    fake = (
+        us_fake()
+        .reply("ust21070", {**UST21070_REPLY, "result_list": holdings})
+        .reply("usa10099", kiwoom_error(1700, "허용된 요청 개수를 초과하였습니다"))
+    )
 
     response = make_client(fake).get(URL)
 
     assert response.status_code == 200
-    assert response.json()["holdings"][0]["name"] == UST21070_HOLDING["frgn_stk_nm"]
+    holding = response.json()["holdings"][0]
+    assert (holding["name"], holding["exchange"]) == (UST21070_HOLDING["frgn_stk_nm"], None)
+    assert any(r.getMessage() == "stock_list_unavailable" for r in caplog.records)
 
 
 def test_a_broken_holding_number_is_shown_as_empty_instead_of_failing(make_client, caplog):

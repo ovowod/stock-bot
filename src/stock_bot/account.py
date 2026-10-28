@@ -16,11 +16,6 @@ from stock_bot.reader import Reader, required
 
 logger = logging.getLogger("stock_bot.account")
 
-# 잔고 TR(ust21070)은 거래소를 한글명으로 준다. 순위·검색과 같은 영문명으로 바꾸고,
-# 모르는 이름은 그대로 둔다. 이름은 모의 서버 응답에서 확인했다.
-# 시세 데이터가 NYSE로 주는 NYSE Arca ETF(SPY 등)를 잔고는 아멕스로 준다.
-US_EXCHANGE_NAMES = {"뉴욕": "NYSE", "나스닥": "NASDAQ", "아멕스": "AMEX"}
-
 
 class AccountService:
     def __init__(self, kiwoom: KiwoomClient, holdings: Holdings) -> None:
@@ -155,8 +150,8 @@ class AccountService:
                 {
                     "code": h.code,
                     "name": h.name,
-                    "exchange": h.exchange
-                    or US_EXCHANGE_NAMES.get(raw.text("stex_nm"), raw.text("stex_nm")),
+                    # 종목 목록에 없으면 None이다. 화면은 "거래소 확인 불가"로 보이고 매도를 막는다.
+                    "exchange": h.exchange,
                     "currency": h.currency,
                     "quantity": h.quantity,
                     "sellable_quantity": h.sellable_quantity,
@@ -169,7 +164,7 @@ class AccountService:
                     "evaluation_amount_krw": _integer(h.evaluation_amount_krw),
                     "profit_loss_krw": _integer(h.profit_loss_krw),
                 }
-                for h, raw in zip(snapshot.rows, b.rows("result_list"), strict=True)
+                for h in snapshot.rows
             ],
         }
 

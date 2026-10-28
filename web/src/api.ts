@@ -39,8 +39,9 @@ export interface DomesticAccount {
 export interface UsHolding {
   code: string;
   name: string;
-  exchange: string;
-  currency: string;
+  /** 종목 목록에서 찾지 못하면 null이다. 화면은 "거래소 확인 불가"로 보이고 매도를 막는다. */
+  exchange: string | null;
+  currency: string | null;
   quantity: number | null;
   sellable_quantity: number | null;
   purchase_price: number | null;
