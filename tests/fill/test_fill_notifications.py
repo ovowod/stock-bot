@@ -1,6 +1,5 @@
 import asyncio
-import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
@@ -12,8 +11,13 @@ from stock_bot.core.notification import DiscordNotifier
 from stock_bot.fill import feed as fill_feed
 from stock_bot.fill import watch as fill_watch
 from stock_bot.kiwoom import realtime as realtime_module
+from tests.fake_discord import BLUE, DISCORD_ENV, GRAY, RED, FakeDiscord, SlowDiscord, fields
 from tests.fake_kiwoom import (
+    DOMESTIC_PAPER_ENV,
     FAKE_ENV,
+    PAPER_ENV,
+    REAL_ENV,
+    US_PAPER_ENV,
     FakeKiwoom,
     body_of,
     kiwoom_error,
@@ -23,6 +27,7 @@ from tests.fake_kiwoom import (
 from tests.fake_realtime import (
     OK_LOGIN,
     OK_REG,
+    REPLACED,
     FakeRealtime,
     fill_event,
     open_order,
@@ -30,63 +35,14 @@ from tests.fake_realtime import (
     us_fill_event,
     us_open_order,
 )
+from tests.fill.helpers import fill_kiwoom
 from tests.log_capture import JsonLines
+from tests.support import wait_until
 
 pytestmark = pytest.mark.anyio
 
-# 기본은 국내 모의 인증정보만 둔다. 다른 투자 환경 연결은 그 환경을 다루는 테스트에서 연다.
-DOMESTIC_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_US_", "REAL_"))}
-US_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_KR_", "REAL_"))}
-PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith("REAL_")}
-REAL_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith("PAPER_")}
 REAL_REALTIME = "wss://api.kiwoom.com:10000/api/websocket"
-DISCORD_ENV = {"DISCORD_BOT_TOKEN": "discord-token-ZZZZ9999", "DISCORD_CHANNEL_ID": "123456789"}
 PAPER_REALTIME = "wss://mockapi.kiwoom.com:10000/api/websocket"
-RED = 0xE42939
-BLUE = 0x2F6FEB
-GRAY = 0x8B8F98
-
-
-def fields(payload: dict) -> dict[str, str]:
-    return {field["name"]: field["value"] for field in payload["embeds"][0]["fields"]}
-
-
-class FakeDiscord:
-    def __init__(self, *responses: httpx.Response) -> None:
-        self.responses = list(responses)
-        self.payloads: list[dict] = []
-
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        self.payloads.append(json.loads(request.content))
-        if self.responses:
-            return self.responses.pop(0)
-        return httpx.Response(200, json={"id": "1"})
-
-    async def wait_for(self, count: int) -> None:
-        for _ in range(200):
-            if len(self.payloads) >= count:
-                return
-            await asyncio.sleep(0.01)
-        raise AssertionError(f"Discord 요청 {count}개를 기다렸지만 {len(self.payloads)}개")
-
-
-async def wait_until(condition: Callable[[], bool]) -> None:
-    for _ in range(200):
-        if condition():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError("조건을 기다렸지만 만족하지 않았습니다.")
-
-
-def fill_kiwoom(*open_order_pages: dict | httpx.Response) -> FakeKiwoom:
-    """체결 알림이 부르는 조회 TR의 응답. 기본은 미체결 주문과 당일 실현손익이 없다."""
-    return (
-        FakeKiwoom()
-        .reply("ka10075", *(open_order_pages or ({"oso": []},)))
-        .reply("ka10077", {"tdy_rlzt_pl": "0", "tdy_rlzt_pl_dtl": []})
-        .reply("ust21050", {"result_list": []})
-        .reply("usa10099", {"list": []})
-    )
 
 
 @asynccontextmanager
@@ -369,21 +325,6 @@ async def test_fill_logs_share_one_request_id_from_receipt_to_alert(json_logs: J
     assert received[0]["request_id"] != received[1]["request_id"]
 
 
-class SlowDiscord(FakeDiscord):
-    """첫 요청의 응답을 gate가 열릴 때까지 늦춘다."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.gate = asyncio.Event()
-
-    async def __call__(self, request: httpx.Request) -> httpx.Response:  # type: ignore[override]
-        if not self.payloads:
-            self.payloads.append(json.loads(request.content))
-            await self.gate.wait()
-            return httpx.Response(200, json={"id": "1"})
-        return super().__call__(request)
-
-
 async def test_fills_reach_the_feed_while_an_alert_waits_and_alerts_keep_order(caplog):
     realtime = FakeRealtime()
     discord = SlowDiscord()
@@ -607,13 +548,6 @@ async def test_malformed_fill_time_is_logged(caplog):
         r.fields["key"] for r in caplog.records if r.getMessage() == "fill_value_unreadable"
     ]
     assert unreadable == ["908"]
-
-
-REPLACED = {
-    "trnm": "SYSTEM",
-    "code": "R10001",
-    "message": "동일한 App key로 접속이 되었습니다. 기존 세션은 종료가 됩니다",
-}
 
 
 async def test_stops_watching_when_another_connection_takes_the_app_key(fast_reconnect, caplog):

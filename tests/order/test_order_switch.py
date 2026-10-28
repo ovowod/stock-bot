@@ -11,18 +11,10 @@ import pytest
 from stock_bot.core.config import ENVIRONMENTS, Environment
 from stock_bot.core.errors import AppError
 from stock_bot.kiwoom.kiwoom import KiwoomClient
-from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom
+from tests.fake_kiwoom import FAKE_ENV, REAL_ENV, FakeKiwoom
 from tests.fake_realtime import FakeRealtime
-from tests.fill.test_fill_notifications import REAL_ENV
-from tests.order.test_open_orders import OPEN_ORDER
-from tests.order.test_orders import domestic_order
-from tests.sl_tp.test_sl_tp_auto_sell import (
-    running,
-    session,
-    sl_tp_kiwoom,
-    watching,
-    write_settings,
-)
+from tests.order.helpers import OPEN_ORDER, domestic_order
+from tests.sl_tp.helpers import running, session, sl_tp_kiwoom, watching, write_settings
 
 DOMESTIC_REAL = ENVIRONMENTS[Environment.DOMESTIC_REAL]
 ORDER_REPLY = {"ord_no": "00024", "return_code": 0, "return_msg": "정상"}

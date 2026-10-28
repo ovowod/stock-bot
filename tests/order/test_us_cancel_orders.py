@@ -7,7 +7,7 @@ import pytest
 from stock_bot import app as app_module
 from stock_bot.core.notification import Embed
 from tests.fake_kiwoom import FakeKiwoom, body_of, kiwoom_error
-from tests.order.test_us_open_orders import LISTING, US_OPEN_ORDER, us_open_order
+from tests.order.helpers import LISTING, US_OPEN_ORDER, us_open_order
 
 URL = "/api/environments/us_paper/cancellations"
 # kra-docs ust20003 responseExample 모양.

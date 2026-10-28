@@ -10,26 +10,28 @@ from fastapi import FastAPI
 
 from stock_bot.kiwoom import kiwoom as kiwoom_module
 from stock_bot.sl_tp import watch as sl_tp_watch
+from tests.fake_discord import FakeDiscord
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, body_of
 from tests.fake_realtime import OK_REG, FakeConnection, FakeRealtime, fill_event
-from tests.fill.test_fill_notifications import FakeDiscord, wait_until
-from tests.sl_tp.test_sl_tp_auto_sell import (
+from tests.sl_tp.helpers import (
     AT_10,
     Clock,
     Gate,
-    api,
     balance,
     messages,
+    nth_call_gate,
     position,
     quote,
     quote_regs,
     running,
+    save,
     session,
     settle,
     sl_tp_kiwoom,
     watching,
     write_settings,
 )
+from tests.support import wait_until
 
 pytestmark = pytest.mark.anyio
 
@@ -41,37 +43,8 @@ def fast_session_check(monkeypatch):
     monkeypatch.setattr(sl_tp_watch, "SESSION_CHECK_SECONDS", 0.01)
 
 
-async def save(app: FastAPI, *sessions: dict[str, Any], excluded: tuple[str, ...] = ()) -> None:
-    """SL / TP 화면처럼 저장 API로 설정을 저장한다."""
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
-        response = await client.put(
-            "/api/environments/domestic_paper/sl-tp",
-            json={
-                "excluded": [{"code": c, "name": "제외", "exchange": None} for c in excluded],
-                "sessions": list(sessions),
-            },
-        )
-    assert response.status_code == 200, response.text
-
-
 def latest(realtime: FakeRealtime) -> FakeConnection:
     return realtime.connections[-1]
-
-
-def nth_call_gate(kiwoom: FakeKiwoom, api_id: str, n: int) -> Gate:
-    """api_id의 n번째 호출만 붙잡는다."""
-    seen = {"count": 0}
-
-    def match(request: httpx.Request) -> bool:
-        if api(request) != api_id:
-            return False
-        seen["count"] += 1
-        return seen["count"] == n
-
-    return Gate(kiwoom, match)
 
 
 def finished(caplog) -> list[dict[str, Any]]:

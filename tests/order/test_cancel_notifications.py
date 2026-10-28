@@ -6,9 +6,9 @@ import pytest
 
 from stock_bot.app import create_app
 from stock_bot.core.notification import DiscordNotifier
-from tests.auth.test_login_notifications import DISCORD_ENV, FakeDiscord
+from tests.fake_discord import DISCORD_ENV, FakeDiscord
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, kiwoom_error
-from tests.order.test_cancel_orders import CANCEL_REPLY, LIMIT_SELL, cancel
+from tests.order.helpers import CANCEL_REPLY, LIMIT_SELL, cancel
 
 pytestmark = pytest.mark.anyio
 
@@ -126,7 +126,7 @@ async def test_duplicate_cancel_sends_one_discord_message():
 
 
 async def test_failed_discord_does_not_fail_the_cancel():
-    discord = FakeDiscord(status=500)
+    discord = FakeDiscord(httpx.Response(500), httpx.Response(500))
     async with _client(_kiwoom(), discord) as client:
         await _login(client)
         response = await client.post(URL, json=cancel())

@@ -11,35 +11,32 @@ from stock_bot.fill import feed as fill_feed
 from stock_bot.kiwoom import realtime as realtime_module
 from stock_bot.order import auto_sell
 from stock_bot.sl_tp import watch as sl_tp_watch
-from tests.fake_kiwoom import kiwoom_error, page_response
-from tests.fake_realtime import OK_REG, FakeRealtime, fill_event
-from tests.fill.test_fill_notifications import (
-    BLUE,
-    GRAY,
-    RED,
-    REPLACED,
-    US_PAPER_ENV,
-    FakeDiscord,
-    fields,
-    wait_until,
-)
+from tests.fake_discord import BLUE, GRAY, RED, FakeDiscord, fields
+from tests.fake_kiwoom import US_PAPER_ENV, kiwoom_error, page_response
+from tests.fake_realtime import OK_REG, REPLACED, FakeRealtime, fill_event
 from tests.log_capture import JsonLines
-from tests.sl_tp.test_sl_tp_auto_sell import (
+from tests.sl_tp.helpers import (
     AT_10,
+    NY_10,
     Clock,
     balance,
     messages,
+    nth_call_gate,
     position,
     quote,
     running,
+    save,
     session,
     settle,
     sl_tp_kiwoom,
+    us_kiwoom,
+    us_quote,
     watching,
+    watching_us,
     write_settings,
+    write_us_settings,
 )
-from tests.sl_tp.test_sl_tp_sessions import nth_call_gate, save
-from tests.sl_tp.test_sl_tp_us import NY_10, us_kiwoom, us_quote, watching_us, write_us_settings
+from tests.support import wait_until
 
 pytestmark = pytest.mark.anyio
 

@@ -7,6 +7,7 @@ import pytest
 from stock_bot.app import create_app
 from stock_bot.auth.auth import describe_device
 from stock_bot.core.notification import DiscordNotifier
+from tests.fake_discord import DISCORD_ENV, FakeDiscord
 from tests.fake_kiwoom import FAKE_ENV, domestic_fake
 
 pytestmark = pytest.mark.anyio
@@ -17,24 +18,6 @@ CHROME_WINDOWS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
-DISCORD_ENV = {"DISCORD_BOT_TOKEN": "discord-token-ZZZZ9999", "DISCORD_CHANNEL_ID": "123456789"}
-
-
-class FakeDiscord:
-    def __init__(self, status: int = 200) -> None:
-        self.status = status
-        self.payloads: list[dict] = []
-
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        self.payloads.append(json.loads(request.content))
-        return httpx.Response(self.status, json={"id": "1"})
-
-    async def wait_for(self, count: int) -> None:
-        for _ in range(100):
-            if len(self.payloads) >= count:
-                return
-            await asyncio.sleep(0.01)
-        raise AssertionError(f"Discord 요청 {count}개를 기다렸지만 {len(self.payloads)}개")
 
 
 def _client(discord: FakeDiscord) -> httpx.AsyncClient:
@@ -94,7 +77,7 @@ async def test_lock_sends_one_notification_without_the_typed_password():
 
 
 async def test_failed_discord_does_not_block_login():
-    discord = FakeDiscord(status=500)
+    discord = FakeDiscord(httpx.Response(500))
     async with _client(discord) as client:
         response = await client.post(LOGIN, json={"password": PASSWORD})
         await discord.wait_for(1)

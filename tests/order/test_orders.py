@@ -7,21 +7,10 @@ import pytest
 
 from stock_bot.app import create_app
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, ThreadedTransport, body_of, kiwoom_error
+from tests.order.helpers import domestic_order
 
 DOMESTIC_URL = "/api/environments/domestic_paper/orders"
 ORDER_REPLY = {"ord_no": "00024"}
-
-
-def domestic_order(**overrides: object) -> dict[str, object]:
-    return {
-        "order_key": "key-1",
-        "side": "buy",
-        "code": "005930",
-        "order_type": "limit",
-        "quantity": "3",
-        "price": "61300",
-        **overrides,
-    }
 
 
 def test_domestic_limit_order_is_sent_to_kt10000_on_the_paper_domain(make_client):

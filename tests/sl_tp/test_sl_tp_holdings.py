@@ -10,15 +10,16 @@ import pytest
 from stock_bot.fill import feed as fill_feed
 from stock_bot.kiwoom import realtime as realtime_module
 from stock_bot.sl_tp import watch as sl_tp_watch
+from tests.fake_discord import FakeDiscord, SlowDiscord
 from tests.fake_kiwoom import kiwoom_error
-from tests.fake_realtime import FakeConnection, FakeRealtime, fill_event
-from tests.fill.test_fill_notifications import REPLACED, FakeDiscord, SlowDiscord, wait_until
+from tests.fake_realtime import REPLACED, FakeConnection, FakeRealtime, fill_event
 from tests.log_capture import JsonLines
-from tests.sl_tp.test_sl_tp_auto_sell import (
+from tests.sl_tp.helpers import (
     AT_10,
     Clock,
     balance,
     messages,
+    nth_call_gate,
     position,
     quote,
     quote_regs,
@@ -29,7 +30,7 @@ from tests.sl_tp.test_sl_tp_auto_sell import (
     watching,
     write_settings,
 )
-from tests.sl_tp.test_sl_tp_sessions import nth_call_gate
+from tests.support import wait_until
 
 pytestmark = pytest.mark.anyio
 

@@ -1,8 +1,6 @@
 """SL / TP 자동 매도(미국 모의): FE 체결가, ust20001 시장가, 뉴욕시간, 종목 목록의 거래소."""
 
-import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -11,45 +9,32 @@ from fastapi import FastAPI
 
 from stock_bot.kiwoom import realtime as realtime_module
 from stock_bot.sl_tp import watch as sl_tp_watch
-from tests.fake_kiwoom import (
-    FAKE_ENV,
-    UST21070_HOLDING,
-    UST21070_REPLY,
-    FakeKiwoom,
-    body_of,
-    kiwoom_error,
-    usa10099_row,
-)
-from tests.fake_realtime import FakeConnection, FakeRealtime, us_fill_event
-from tests.fill.test_fill_notifications import (
-    PAPER_ENV,
-    REPLACED,
-    US_PAPER_ENV,
-    wait_until,
-)
-from tests.sl_tp.test_sl_tp_auto_sell import (
+from tests.fake_kiwoom import FAKE_ENV, PAPER_ENV, US_PAPER_ENV, body_of, kiwoom_error
+from tests.fake_realtime import REPLACED, FakeRealtime, us_fill_event
+from tests.sl_tp.helpers import (
     KST,
+    LISTING,
+    NY_10,
     Clock,
     messages,
+    nth_call_gate,
     quote,
     running,
-    session,
     settle,
     sl_tp_kiwoom,
+    us_balance,
+    us_kiwoom,
+    us_position,
+    us_quote,
+    us_quote_regs,
+    us_session,
+    watching_us,
     write_settings,
+    write_us_settings,
 )
-from tests.sl_tp.test_sl_tp_sessions import nth_call_gate
+from tests.support import wait_until
 
 pytestmark = pytest.mark.anyio
-
-# 2026-10-26 14:00 UTC는 뉴욕 10:00(서머타임), 한국 23:00이다.
-NY_10 = datetime(2026, 10, 26, 14, 0, tzinfo=UTC)
-US_SELL_REPLY = {"ord_no": "000000300"}
-LISTING = [
-    usa10099_row("AAPL", "애플", "APPLE INC", "ND"),
-    usa10099_row("SPY", "SPDR S&P 500", "SPDR S&P 500 ETF", "NY"),
-    usa10099_row("MSFT", "마이크로소프트", "MICROSOFT CORP", "ND"),
-]
 
 
 @pytest.fixture(autouse=True)
@@ -57,74 +42,6 @@ def fast_waits(monkeypatch):
     monkeypatch.setattr(sl_tp_watch, "SESSION_CHECK_SECONDS", 0.01)
     monkeypatch.setattr(sl_tp_watch, "HOLDINGS_RETRY_INITIAL_SECONDS", 0.01)
     monkeypatch.setattr(realtime_module, "RECONNECT_INITIAL_SECONDS", 0.01)
-
-
-def us_session(start: str = "09:30", end: str = "16:00", **overrides: Any) -> dict[str, Any]:
-    return session(start=start, end=end, **overrides)
-
-
-def write_us_settings(
-    data_dir: Path, *sessions: dict[str, Any], excluded: tuple[str, ...] = ()
-) -> None:
-    path = data_dir / "sl-tp" / "us_paper.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = {
-        "version": 1,
-        "updated_at": None,
-        "excluded": [{"code": c, "name": "제외", "exchange": "NASDAQ"} for c in excluded],
-        "sessions": list(sessions or (us_session(),)),
-    }
-    path.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
-
-
-def us_position(code: str = "AAPL", **overrides: str) -> dict[str, str]:
-    """ust21070 보유종목 한 줄. 기본은 매입단가 $200, 매도 가능 3주다."""
-    return {
-        **UST21070_HOLDING,
-        "stk_cd": code,
-        "frgn_stk_book_uv": "200.0000",
-        "poss_qty": "000000000003",
-        "sell_alowq": "000000000003",
-        **overrides,
-    }
-
-
-def us_balance(*rows: dict[str, str]) -> dict[str, Any]:
-    return {**UST21070_REPLY, "result_list": list(rows or (us_position(),))}
-
-
-def us_kiwoom(*balances: dict[str, Any] | httpx.Response) -> FakeKiwoom:
-    return (
-        FakeKiwoom()
-        .reply("ust21070", *(balances or (us_balance(),)))
-        .reply("usa10099", {"list": LISTING})
-        .reply("ust20001", US_SELL_REPLY)
-    )
-
-
-def us_quote(code: str = "AAPL", price: str = "-194.0000", market: str = "0") -> dict[str, Any]:
-    """FE 미국주식 실시간 체결가. 체결가(10)의 부호는 등락 방향이다."""
-    return {
-        "trnm": "REAL",
-        "data": [
-            {
-                "type": "FE",
-                "name": "미국주식 실시간 체결가",
-                "stexTp": "ND",
-                "item": code,
-                "values": {"10": price, "290": market, "20": "100000", "22": "20261026"},
-            }
-        ],
-    }
-
-
-def us_quote_regs(connection: FakeConnection) -> list[dict[str, Any]]:
-    return [m for m in connection.requests("REG") if m["data"][0]["type"] == ["FE"]]
-
-
-async def watching_us(realtime: FakeRealtime) -> FakeConnection:
-    await wait_until(lambda: any(us_quote_regs(c) for c in realtime.connections))
-    return next(c for c in realtime.connections if us_quote_regs(c))
 
 
 def us_running(realtime, kiwoom, data_dir, clock=None, environ=US_PAPER_ENV, discord=None):

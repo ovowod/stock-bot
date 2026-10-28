@@ -278,3 +278,10 @@ def us_open_order(**overrides: str) -> dict[str, str]:
     }
     row.update(overrides)
     return row
+
+
+REPLACED = {
+    "trnm": "SYSTEM",
+    "code": "R10001",
+    "message": "동일한 App key로 접속이 되었습니다. 기존 세션은 종료가 됩니다",
+}

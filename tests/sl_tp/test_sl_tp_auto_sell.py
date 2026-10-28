@@ -1,187 +1,45 @@
 """SL / TP 자동 매도(국내 모의): 앱을 띄운 채 체결가를 넣고 키움에 나가는 요청을 본다."""
 
 import asyncio
-import json
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any
-from zoneinfo import ZoneInfo
+from datetime import timedelta
 
 import httpx
 import pytest
-from fastapi import FastAPI
 
-from stock_bot.app import create_app
 from stock_bot.core.config import ENVIRONMENTS, Environment
-from stock_bot.core.notification import DiscordNotifier
 from stock_bot.kiwoom import kiwoom as kiwoom_module
 from stock_bot.kiwoom.kiwoom import KiwoomClient
 from stock_bot.order.order import OrderService
+from tests.fake_discord import FakeDiscord
 from tests.fake_kiwoom import (
+    DOMESTIC_PAPER_ENV,
     FAKE_ENV,
-    KT00018_HOLDING,
-    KT00018_REPLY,
+    REAL_ENV,
     FakeKiwoom,
     body_of,
     kiwoom_error,
 )
-from tests.fake_realtime import FakeConnection, FakeRealtime
-from tests.fill.test_fill_notifications import (
-    DISCORD_ENV,
-    DOMESTIC_PAPER_ENV,
-    REAL_ENV,
-    REPLACED,
-    FakeDiscord,
-    wait_until,
+from tests.fake_realtime import REPLACED, FakeRealtime
+from tests.sl_tp.helpers import (
+    AT_10,
+    Clock,
+    Gate,
+    api,
+    balance,
+    messages,
+    position,
+    quote,
+    quote_regs,
+    running,
+    session,
+    settle,
+    sl_tp_kiwoom,
+    watching,
+    write_settings,
 )
+from tests.support import wait_until
 
 pytestmark = pytest.mark.anyio
-
-KST = ZoneInfo("Asia/Seoul")
-# 월요일 한국 장중.
-AT_10 = datetime(2026, 10, 26, 10, 0, tzinfo=KST)
-SELL_REPLY = {"ord_no": "0000138", "dmst_stex_tp": "KRX"}
-
-
-class Clock:
-    def __init__(self, at: datetime = AT_10) -> None:
-        self.at = at
-
-    def __call__(self) -> datetime:
-        return self.at
-
-
-def session(
-    start: str = "09:00",
-    end: str = "15:30",
-    enabled: bool = True,
-    take_profit: str | None = None,
-    stop_loss: str | None = "3",
-) -> dict[str, Any]:
-    return {
-        "start": start,
-        "end": end,
-        "enabled": enabled,
-        "take_profit": take_profit,
-        "stop_loss": stop_loss,
-    }
-
-
-def write_settings(
-    data_dir: Path,
-    *sessions: dict[str, Any],
-    excluded: tuple[str, ...] = (),
-    environment: str = "domestic_paper",
-) -> None:
-    path = data_dir / "sl-tp" / f"{environment}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = {
-        "version": 1,
-        "updated_at": None,
-        "excluded": [{"code": c, "name": "제외", "exchange": None} for c in excluded],
-        "sessions": list(sessions or (session(),)),
-    }
-    path.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
-
-
-def position(code: str = "005930", **overrides: str) -> dict[str, str]:
-    """kt00018 보유종목 한 줄. 기본은 매입가 60,000원, 매도 가능 3주의 현금잔고다."""
-    return {
-        **KT00018_HOLDING,
-        "stk_cd": f"A{code}",
-        "pur_pric": "000000000060000",
-        "rmnd_qty": "000000000000003",
-        "trde_able_qty": "000000000000003",
-        **overrides,
-    }
-
-
-def balance(*rows: dict[str, str]) -> dict[str, Any]:
-    return {**KT00018_REPLY, "acnt_evlt_remn_indv_tot": list(rows or (position(),))}
-
-
-def sl_tp_kiwoom(*balances: dict[str, Any]) -> FakeKiwoom:
-    return FakeKiwoom().reply("kt00018", *(balances or (balance(),))).reply("kt10001", SELL_REPLY)
-
-
-def quote(code: str = "005930", price: str = "-58200", market: str = "2") -> dict[str, Any]:
-    """국내 0B 주식체결 메시지. 체결가(10)의 부호는 등락 방향이다."""
-    return {
-        "trnm": "REAL",
-        "data": [
-            {
-                "type": "0B",
-                "name": "주식체결",
-                "item": code,
-                "values": {"20": "100000", "10": price, "290": market, "9081": "KRX"},
-            }
-        ],
-    }
-
-
-class Gate:
-    """match에 맞는 요청을 open이 열릴 때까지 붙잡아 둔다."""
-
-    def __init__(self, kiwoom: FakeKiwoom, match: Callable[[httpx.Request], bool]) -> None:
-        self.kiwoom = kiwoom
-        self.match = match
-        self.open = asyncio.Event()
-        self.hit = asyncio.Event()
-
-    async def __call__(self, request: httpx.Request) -> httpx.Response:
-        if self.match(request) and not self.open.is_set():
-            self.hit.set()
-            await self.open.wait()
-        return self.kiwoom(request)
-
-
-def api(request: httpx.Request) -> str | None:
-    return request.headers.get("api-id")
-
-
-@asynccontextmanager
-async def running(
-    realtime: FakeRealtime,
-    kiwoom: Callable[[httpx.Request], Any],
-    data_dir: Path,
-    clock: Clock | None = None,
-    environ: dict[str, str] = DOMESTIC_PAPER_ENV,
-    discord: FakeDiscord | None = None,
-) -> AsyncIterator[FastAPI]:
-    app = create_app(
-        environ=environ,
-        transport=httpx.MockTransport(kiwoom),
-        static_dir=None,
-        log_dir=None,
-        data_dir=data_dir,
-        notifier=DiscordNotifier(
-            DISCORD_ENV if discord else {}, transport=httpx.MockTransport(discord or FakeDiscord())
-        ),
-        realtime_connect=realtime,
-        now=clock or Clock(),
-    )
-    async with app.router.lifespan_context(app):
-        yield app
-
-
-def quote_regs(connection: FakeConnection) -> list[dict[str, Any]]:
-    return [m for m in connection.requests("REG") if m["data"][0]["type"] == ["0B"]]
-
-
-async def watching(realtime: FakeRealtime) -> FakeConnection:
-    """SL / TP의 0B 구독이 등록된 연결."""
-    await wait_until(lambda: any(quote_regs(c) for c in realtime.connections))
-    return next(c for c in realtime.connections if quote_regs(c))
-
-
-async def settle() -> None:
-    await asyncio.sleep(0.05)
-
-
-def messages(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records]
 
 
 async def test_subscribes_watched_holdings_when_started_inside_a_session(data_dir):

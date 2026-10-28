@@ -8,25 +8,9 @@ import pytest
 from stock_bot import app as app_module
 from stock_bot.app import create_app
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, ThreadedTransport, body_of, kiwoom_error
-from tests.order.test_open_orders import open_order
+from tests.order.helpers import CANCEL_REPLY, LIMIT_SELL, cancel, open_order
 
 URL = "/api/environments/domestic_paper/cancellations"
-# kra-docs kt10003 responseExample 모양.
-CANCEL_REPLY = {"ord_no": "0000141", "base_orig_ord_no": "0000070", "cncl_qty": "000000000003"}
-LIMIT_SELL = open_order(
-    ord_no="0000070",
-    stk_cd="000660",
-    stk_nm="SK하이닉스",
-    io_tp_nm="-매도",
-    trde_tp="보통",
-    ord_pric="-201000",
-    ord_qty="10",
-    oso_qty="3",
-)
-
-
-def cancel(**overrides: object) -> dict[str, object]:
-    return {"order_key": "cancel-1", "order_no": "0000070", "quantity": "3", **overrides}
 
 
 def kiwoom(*orders: dict[str, object]) -> FakeKiwoom:

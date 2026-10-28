@@ -3,47 +3,9 @@ import logging
 import pytest
 
 from tests.fake_kiwoom import FakeKiwoom, body_of, kiwoom_error, usa10099_row
+from tests.order.helpers import LISTING, US_OPEN_ORDER, us_open_order
 
 URL = "/api/environments/us_paper/open-orders"
-
-# kra-docs ust21050 responseExample의 한 줄.
-US_OPEN_ORDER = {
-    "ord_cntr_tp": "10",
-    "ord_no": "000000282",
-    "orig_ord_no": "000000000",
-    "frgn_ord_id": "NF.19ef9aa9-6f51-0000-19ef-9aa96f510000",
-    "stex_nm": "미국",
-    "crnc_code": "USD",
-    "stk_cd": "NVDA",
-    "frgn_stk_nm": "엔비디아",
-    "frgn_trde_tp": "00",
-    "frgn_trde_nm": "지정가",
-    "slby_tp": "2",
-    "slby_tp_nm": "매수",
-    "ord_qty": "000000000005",
-    "ord_uv": "200.0000",
-    "stop_pric": "0.0000",
-    "cntr_qty": "000000000000",
-    "cntr_uv": "0.0000",
-    "mdfy_qty": "000000000000",
-    "mdfy_uv": "0.0000",
-    "cncl_qty": "000000000000",
-    "ord_remnq": "000000000005",
-    "ord_time": "21:46:06",
-    "ord_resp_time": "21:46:07",
-    "ord_stat": "접수",
-    "rsrv_tp": "일반",
-    "natn_nm": "미국",
-}
-
-LISTING = [
-    usa10099_row("NVDA", "엔비디아", "NVIDIA CORP"),
-    usa10099_row("EWZ", "아이셰어즈 MSCI 브라질 ETF", "ISHARES MSCI BRAZIL ETF", "NY"),
-]
-
-
-def us_open_order(**overrides: object) -> dict[str, object]:
-    return {**US_OPEN_ORDER, **overrides}
 
 
 def us_kiwoom(*orders: dict[str, object], listing: object = None) -> FakeKiwoom:
