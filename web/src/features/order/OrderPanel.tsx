@@ -11,6 +11,7 @@ import {
 } from "../../api";
 import { findEnvironment, type EnvironmentOption } from "../../environments";
 import { formatCount, formatForeign, formatKrw } from "../../format";
+import { ORDER_PERMISSION_FAILED, useOrderPermission } from "../../orderPermission";
 import { useToast } from "../toast/Toasts";
 import {
   ORDER_TYPES,
@@ -188,6 +189,7 @@ function OrderForm({
   onSendingChange: (sending: boolean) => void;
 }) {
   const market = env.market;
+  const permission = useOrderPermission(env.value);
   const showToast = useToast();
   const sell = target.sell;
   const side = sell ? "매도" : "매수";
@@ -228,7 +230,7 @@ function OrderForm({
     (type === "market" || price.text !== null);
 
   const openConfirm = () => {
-    if (!ready || env.isReal) return;
+    if (!ready || permission !== "allowed") return;
     // 최종 확인을 열 때마다 새 주문 키를 만든다. 이 확인에서 나가는 요청은 이 키를 쓴다.
     orderKey.current = newOrderKey();
     setStep("confirm");
@@ -497,15 +499,15 @@ function OrderForm({
 
       {/* 패널이 화면 높이를 채우는 태블릿·데스크톱에서는 주문 버튼을 패널 맨 아래에 둔다. */}
       <div className="sticky bottom-0 mt-auto space-y-2 bg-surface pt-2">
-        {env.isReal ? (
+        {permission === "blocked" || permission === "failed" ? (
           <p className="flex items-center justify-center gap-1.5 rounded-2xl bg-real-soft py-3.5 text-sm font-bold text-real">
             <ShieldAlert className="size-4" aria-hidden />
-            실전투자에서는 주문할 수 없습니다.
+            {permission === "blocked" ? "실전투자에서는 주문할 수 없습니다." : ORDER_PERMISSION_FAILED}
           </p>
         ) : (
           <button
             type="submit"
-            disabled={!ready}
+            disabled={!ready || permission === "loading"}
             className={`w-full rounded-2xl py-3.5 text-[15px] font-bold text-white disabled:opacity-40 ${sell ? "bg-loss" : "bg-gain"}`}
           >
             {side}

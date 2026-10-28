@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openDashboard } from "./support";
+import { openDashboard, setEnvironments } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 키움 서버는 호출되지 않는다.
 
@@ -232,6 +232,24 @@ test("실전투자에서는 목록만 보이고 취소할 수 없다는 안내�
   await expect(panel(page).getByText("실전투자에서는 주문 취소를 할 수 없습니다.")).toHaveCount(1);
   await expect(row(page, "SK하이닉스")).toBeVisible();
   await expect(panel(page).getByText("키움 앱에서 취소하세요")).toHaveCount(0);
+  await expect(panel(page).getByRole("button", { name: /취소/ })).toHaveCount(0);
+});
+
+test("주문 허용이 켜진 실전에서는 취소 버튼이 보인다", async ({ page }) => {
+  await mockApi(page, { openOrders: () => listed([openOrder()]) });
+  setEnvironments(page, { domestic_real: true });
+  await open(page, "국내 실전");
+
+  await expect(row(page, "SK하이닉스").getByRole("button", { name: "SK하이닉스 주문 취소" })).toBeVisible();
+  await expect(panel(page).getByText("실전투자에서는 주문 취소를 할 수 없습니다.")).toHaveCount(0);
+});
+
+test("주문 가능 여부를 받지 못하면 취소 버튼 대신 안내가 보인다", async ({ page }) => {
+  await mockApi(page, { openOrders: () => listed([openOrder()]) });
+  setEnvironments(page, "fail");
+  await open(page);
+
+  await expect(panel(page).getByText("주문 가능 여부를 불러오지 못했습니다. 새로고침하세요.")).toBeVisible();
   await expect(panel(page).getByRole("button", { name: /취소/ })).toHaveCount(0);
 });
 

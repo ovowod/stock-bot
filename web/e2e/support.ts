@@ -2,14 +2,42 @@ import { expect, type Page } from "@playwright/test";
 
 export const PASSWORD = "e2e-password";
 
+/** 서버의 주문 허용 기본값. 실전은 꺼져 있다. */
+const ORDERS_ALLOWED: Record<string, boolean> = {
+  domestic_real: false,
+  us_real: false,
+  domestic_paper: true,
+  us_paper: true,
+};
+
+const environmentReplies = new WeakMap<Page, Record<string, boolean> | "fail">();
+
+/** /api/environments의 응답을 바꾼다. 로그인하기(openDashboard·mockAuth) 전에 부른다. "fail"이면 500이다. */
+export function setEnvironments(page: Page, reply: Partial<Record<string, boolean>> | "fail"): void {
+  environmentReplies.set(page, reply === "fail" ? reply : { ...ORDERS_ALLOWED, ...reply });
+}
+
+async function mockEnvironments(page: Page): Promise<void> {
+  await page.route("**/api/environments", (route) => {
+    const reply = environmentReplies.get(page) ?? ORDERS_ALLOWED;
+    if (reply === "fail") {
+      return route.fulfill({ status: 500, json: { error: { kind: "unknown", message: "test" } } });
+    }
+    return route.fulfill({
+      json: Object.entries(reply).map(([value, allowed]) => ({ value, orders_allowed: allowed })),
+    });
+  });
+}
+
 /**
- * /api/auth/*를 가짜로 응답하게 한다. 로그인하기 전 세션 확인은 401, 맞는 비밀번호로 로그인한 뒤는 200이다.
+ * /api/auth/*와 로그인 뒤 부르는 /api/environments를 가짜로 응답하게 한다. 로그인하기 전 세션 확인은 401, 맞는 비밀번호로 로그인한 뒤는 200이다.
  * 다른 /api 경로보다 나중에 등록해야 /api/**를 통째로 가로채는 가짜 응답보다 먼저 받는다.
  */
 export async function mockAuth(page: Page): Promise<{ loginRequests: string[]; logoutRequests: () => number }> {
   const loginRequests: string[] = [];
   let logouts = 0;
   let loggedIn = false;
+  await mockEnvironments(page);
   await page.route("**/api/auth/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/login") {

@@ -455,6 +455,12 @@ export async function saveSlTp(environment: EnvironmentValue, draft: SlTpDraft):
   return (await response.json()) as SlTpSettings;
 }
 
+/** 투자 환경별 주문 허용. 서버의 주문 허용 스위치다. */
+export async function fetchOrdersAllowed(signal: AbortSignal): Promise<Record<string, boolean>> {
+  const environments = await getJson<{ value: string; orders_allowed: boolean }[]>("/api/environments", signal);
+  return Object.fromEntries(environments.map((env) => [env.value, env.orders_allowed]));
+}
+
 async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
   let response: Response;
   try {
