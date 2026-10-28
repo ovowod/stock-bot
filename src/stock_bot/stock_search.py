@@ -17,6 +17,7 @@ from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
 from stock_bot.reader import Reader
+from stock_bot.us_exchange import US_EXCHANGE_NAMES
 
 logger = logging.getLogger("stock_bot.stock_search")
 
@@ -29,8 +30,6 @@ US_STOCK_INFO_PATH = "/api/us/stkinfo"
 DOMESTIC_MARKETS = ("0", "10")
 # ka10099는 코스피 주식의 시장명을 "거래소"로 준다. 용어집의 거래소와 헷갈리지 않게 바꿔 보여준다.
 DOMESTIC_CATEGORY_NAMES = {"거래소": "코스피"}
-# 문서에 있는 미국 거래소만 남긴다. 모의 서버는 문서에 없는 NP도 보냈다.
-US_EXCHANGE_NAMES = {"NY": "NYSE", "ND": "NASDAQ", "NA": "AMEX"}
 
 
 def today_kst() -> date:
@@ -164,6 +163,7 @@ def _us(rows: list[Reader]) -> list[_Stock]:
     stocks, seen = [], set()
     for row in rows:
         code, name = row.text("stk_cd"), row.text("stk_nm")
+        # 문서에 있는 미국 거래소만 남긴다. 모의 서버는 문서에 없는 NP도 보냈다.
         exchange = US_EXCHANGE_NAMES.get(row.optional("stex_tp") or "")
         if exchange is None or (exchange, code) in seen:
             continue

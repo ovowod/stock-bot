@@ -37,13 +37,14 @@ Status: ready-for-agent
 **거래소 표 (`us_exchange.py`)**
 
 - 새 module `us_exchange.py`에 둔다.
-  - `CODES = {"NYSE": "NY", "NASDAQ": "ND", "AMEX": "NA"}`: 화면 이름 -> 키움 `stex_tp`
-  - `NAMES`: `CODES`를 뒤집은 코드 -> 이름
-  - `EXCHANGES`: 허용하는 이름 목록(`tuple(CODES)`)
+  - `US_EXCHANGE_CODES = {"NYSE": "NY", "NASDAQ": "ND", "AMEX": "NA"}`: 화면 이름 -> 키움 `stex_tp`
+  - `US_EXCHANGE_NAMES`: 코드 -> 이름(뒤집은 표)
+  - `US_EXCHANGES`: 허용하는 이름 목록
+  - 이름은 지금 쓰는 곳의 이름을 그대로 써서, 쓰는 곳은 import만 바꾼다.
 - 쓰는 곳을 바꾼다.
-  - `quote`, `order`, `sl_tp_watch`: `quote.US_EXCHANGE_CODES` -> `us_exchange.CODES`
-  - `ranking`, `stock_search`: 각자의 `US_EXCHANGE_NAMES` -> `us_exchange.NAMES`. 순위가 모르는 코드를 받은 그대로 보여 주는 동작은 둔다.
-  - `sl_tp`: `US_EXCHANGES` -> `us_exchange.EXCHANGES`
+  - `quote`, `order`, `sl_tp_watch`: `quote.US_EXCHANGE_CODES` -> `us_exchange.US_EXCHANGE_CODES`
+  - `ranking`, `stock_search`: 각자의 `US_EXCHANGE_NAMES` -> `us_exchange.US_EXCHANGE_NAMES`. 순위가 모르는 코드를 받은 그대로 보여 주는 동작은 둔다.
+  - `sl_tp`: `US_EXCHANGES` -> `us_exchange.US_EXCHANGES`
 - 순위 화면의 거래소 필터 코드(`ranking.EXCHANGES`의 1/2/3)는 순위 TR만 쓰는 다른 번호 체계라 그대로 둔다.
 - `account.US_EXCHANGE_NAMES`(한글명 표)는 지운다.
 
