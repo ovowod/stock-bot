@@ -241,13 +241,13 @@ function Avatar({ name }: { name: string }) {
 // 이름·평가금액보다 한 단계 작은 보조 정보.
 const SUB_TEXT = "text-[13px] text-muted";
 
-/** 가운뎃점으로 이은 한 줄. 좁으면 가운뎃점 자리에서만 줄을 바꾸고, 각 덩어리 안에서는 끊지 않는다. */
 /** 미체결 패널의 취소 불가 배지와 같은 모양이다. */
 function Badge({ text }: { text?: string }) {
   if (!text) return null;
   return <span className="rounded-full bg-canvas px-2 py-0.5 text-[11px] font-bold text-sub">{text}</span>;
 }
 
+/** 가운뎃점으로 이은 한 줄. 좁으면 가운뎃점 자리에서만 줄을 바꾸고, 각 덩어리 안에서는 끊지 않는다. */
 function Parts({ parts, className }: { parts: string[]; className: string }) {
   return (
     <p className={`min-w-0 ${className}`}>

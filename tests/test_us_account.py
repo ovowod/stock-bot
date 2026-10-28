@@ -79,8 +79,9 @@ def test_empty_us_holdings_is_a_normal_result(make_client):
     assert response.json()["holdings"] == []
 
 
-def test_us_holding_names_and_exchanges_come_from_the_stock_list(make_client):
+def test_us_holding_names_and_exchanges_come_from_the_stock_list(make_client, caplog):
     """잔고 TR은 ETF를 영문명으로, NYSE Arca ETF를 아멕스로 준다. 종목 목록 값으로 맞춘다."""
+    caplog.set_level(logging.INFO, logger="stock_bot")
     holdings = [
         {
             **UST21070_HOLDING,
@@ -107,6 +108,8 @@ def test_us_holding_names_and_exchanges_come_from_the_stock_list(make_client):
     body = make_client(fake).get(URL).json()
 
     shown = {h["code"]: (h["name"], h["exchange"]) for h in body["holdings"]}
+    unlisted = [r for r in caplog.records if r.getMessage() == "holding_tickers_unlisted"]
+    assert unlisted[0].fields["tickers"] == "ZZZZ"  # type: ignore[attr-defined]
     # 목록에 없는 종목은 잔고 TR의 이름을 쓰고, 잔고 TR의 거래소는 주문과 다를 수 있어 쓰지 않는다.
     assert shown == {
         "SOXL": ("미국 반도체 3배 디렉시온 ETF", "NYSE"),
@@ -116,7 +119,10 @@ def test_us_holding_names_and_exchanges_come_from_the_stock_list(make_client):
 
 def test_us_holdings_have_no_exchange_when_the_stock_list_fails(make_client, caplog):
     caplog.set_level(logging.INFO, logger="stock_bot")
-    holdings = [{**UST21070_HOLDING, "stex_nm": "나스닥"}]
+    holdings = [
+        {**UST21070_HOLDING, "stex_nm": "나스닥"},
+        {**UST21070_HOLDING, "stk_cd": "SPY", "frgn_stk_nm": "SPDR S&P500", "stex_nm": "아멕스"},
+    ]
     fake = (
         us_fake()
         .reply("ust21070", {**UST21070_REPLY, "result_list": holdings})
@@ -126,8 +132,8 @@ def test_us_holdings_have_no_exchange_when_the_stock_list_fails(make_client, cap
     response = make_client(fake).get(URL)
 
     assert response.status_code == 200
-    holding = response.json()["holdings"][0]
-    assert (holding["name"], holding["exchange"]) == (UST21070_HOLDING["frgn_stk_nm"], None)
+    shown = [(h["name"], h["exchange"]) for h in response.json()["holdings"]]
+    assert shown == [("애플", None), ("SPDR S&P500", None)]
     assert any(r.getMessage() == "stock_list_unavailable" for r in caplog.records)
 
 

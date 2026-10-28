@@ -71,7 +71,14 @@ class _HoldingReader(Reader):
         try:
             return super().number(key)
         except AppError:
-            log(logger, logging.WARNING, "holding_value_unreadable", key=key, raw=raw[:40])
+            log(
+                logger,
+                logging.WARNING,
+                "holding_value_unreadable",
+                api_id=self._api_id,
+                key=key,
+                raw=raw[:40],
+            )
             return None
 
 
@@ -107,16 +114,27 @@ class Holdings:
         balance = self._kiwoom.call(
             spec, "ust21070", US_ACCOUNT_PATH, {"stex_tp": "", "stk_cd": ""}, patient=patient
         )
-        listings: dict[str, dict[str, Any]] | None = {}
-        if with_listings:
-            # 서로 다른 TR은 호출 간격을 기다리지 않으므로 함께 보낸다.
-            data, listings = await asyncio.gather(balance, self._stock_listings(spec))
-        else:
+        if not with_listings:
             data = await balance
+            rows = Reader(data, "ust21070").rows("result_list", _HoldingReader)
+            return HoldingsSnapshot([_us(row, {}) for row in rows], data)
+        # 서로 다른 TR은 호출 간격을 기다리지 않으므로 함께 보낸다.
+        data, listings = await asyncio.gather(balance, self._stock_listings(spec))
         rows = Reader(data, "ust21070").rows("result_list", _HoldingReader)
-        return HoldingsSnapshot(
-            [_us(row, listings or {}) for row in rows], data, listings_ok=listings is not None
-        )
+        holdings = [_us(row, listings or {}) for row in rows]
+        if listings is not None:
+            unlisted = sorted({h.code for h in holdings if h.exchange is None})
+            if unlisted:
+                # 미체결 조회처럼 조회 한 번에 한 줄로 남긴다.
+                log(
+                    logger,
+                    logging.WARNING,
+                    "holding_tickers_unlisted",
+                    api_id="ust21070",
+                    tickers=",".join(unlisted),
+                    count=len(unlisted),
+                )
+        return HoldingsSnapshot(holdings, data, listings_ok=listings is not None)
 
     async def holding(self, spec: EnvironmentSpec, code: str) -> dict[str, Any]:
         """한 종목의 보유수량과 매도 가능 수량. 매도 주문 직전 확인에 쓴다.

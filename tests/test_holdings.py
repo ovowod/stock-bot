@@ -183,11 +183,19 @@ async def test_sl_tp_positions_ignore_a_missing_screen_only_cell():
 
 
 @pytest.mark.anyio
-async def test_sl_tp_positions_fail_on_a_missing_quantity():
-    holdings = _holdings(_domestic_with(_without(KT00018_HOLDING, "rmnd_qty")))
+@pytest.mark.parametrize(
+    ("spec", "fake"),
+    [
+        (DOMESTIC_PAPER, lambda: _domestic_with(_without(KT00018_HOLDING, "rmnd_qty"))),
+        (US_PAPER, lambda: _us_with(_without(UST21070_HOLDING, "poss_qty"))),
+    ],
+    ids=["domestic", "us"],
+)
+async def test_sl_tp_positions_fail_on_a_missing_quantity(spec, fake):
+    holdings = _holdings(fake(), _us_listing)
 
     with pytest.raises(AppError) as error:
-        await holdings.positions(DOMESTIC_PAPER)
+        await holdings.positions(spec)
     assert error.value.kind == "response_format_error"
 
 

@@ -155,6 +155,9 @@ Status: ready-for-agent
 ## Implementation Notes
 
 - 2026-10-28 국내 계좌 화면은 원래 깨진 숫자 칸이 있으면 화면 전체가 응답 형식 오류였다(미국 화면과 SL / TP만 `_HoldingReader`를 썼다). 공통 한 줄을 쓰면서 국내 화면도 그 칸만 비운다. Q10의 "화면 전용 칸 때문에 화면 전체가 실패하지 않는다"와 같은 방향이다.
+- 수량과 매도 가능 수량은 `Decimal`이 아니라 `int | None`으로 두었다. 쓰는 곳이 모두 정수를 원한다.
+- 2026-10-28 코드 리뷰를 반영해, 계좌 화면에서 종목 목록에 없는 미국 티커를 조회 한 번에 한 줄로 남긴다(`holding_tickers_unlisted`, 미체결의 `open_order_tickers_unlisted`와 같은 모양). `holding_value_unreadable`에 `api_id`를 더했다.
+- 매도 확인은 이제 모든 줄의 꼭 필요한 칸을 읽는다. 다른 종목 줄에 수량이 빠져도 매도 확인이 응답 형식 오류다. 예전에는 매도할 종목 줄의 수량만 봤다. Q10의 결과다.
 - 꼭 필요한 수량 칸을 읽는 함수는 `_HoldingReader`의 메서드가 아니라 module 함수 `_count`로 두었다. `Reader.rows`가 `list[Reader]`를 돌려줘 type check를 통과하기 위해서다.
 
 ## Review Log
