@@ -1,16 +1,18 @@
 """SL / TP 보유종목 다시 읽기: 내 계좌 체결과 재연결 때, 조회 실패 뒤 재시도(국내 모의)."""
 
 import asyncio
+import json
 from datetime import timedelta
 from typing import Any
 
 import pytest
 
+from stock_bot import fill_feed, sl_tp_watch
 from stock_bot import realtime as realtime_module
-from stock_bot import sl_tp_watch
 from tests.fake_kiwoom import kiwoom_error
 from tests.fake_realtime import FakeConnection, FakeRealtime, fill_event
-from tests.test_fill_notifications import REPLACED, FakeDiscord, wait_until
+from tests.log_capture import JsonLines
+from tests.test_fill_notifications import REPLACED, FakeDiscord, SlowDiscord, wait_until
 from tests.test_sl_tp_auto_sell import (
     AT_10,
     Clock,
@@ -308,43 +310,64 @@ def rejecting_fills(times: int | None = None) -> FakeRealtime:
     return FakeRealtime(responder=respond)
 
 
-async def test_rejected_fill_registration_pauses_judging_until_registered_again(data_dir, caplog):
-    write_settings(data_dir)
+@pytest.fixture
+def fast_register_retry(monkeypatch):
+    monkeypatch.setattr(fill_feed, "REGISTER_RETRY_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(fill_feed, "REGISTER_RETRY_MAX_SECONDS", 0.04)
+
+
+async def test_rejected_fill_registration_is_retried_and_rereads_before_judging(
+    data_dir, caplog, fast_register_retry
+):
+    # Discord가 꺼져 있어 체결 알림 없이 SL / TP만 체결을 신청한다.
+    write_settings(data_dir, session(stop_loss="3"))
     realtime = rejecting_fills(times=1)
-    kiwoom = sl_tp_kiwoom(
-        balance(position("005930"), position("000660")), balance(position("005930"))
-    )
+    # 거부된 동안 추가 매수로 평균 매입가가 60,000원에서 50,000원으로 내려갔다.
+    kiwoom = sl_tp_kiwoom(balance(at_price("60000")), balance(at_price("50000")))
+    async with running(realtime, kiwoom, data_dir):
+        connection = await watching(realtime)
+        await wait_until(lambda: "sl_tp_subscription_rejected" in messages(caplog))
+        # 체결 feed가 스스로 다시 등록하고, SL / TP는 보유종목을 다시 읽은 뒤 판정을 잇는다.
+        await wait_until(lambda: len(fill_regs(connection)) == 2)
+        await wait_until(lambda: len(kiwoom.calls("kt00018")) == 2)
+        await wait_until(lambda: resumed(caplog) == 2)
+        connection.push(quote(price="-58200"))  # 60,000원 기준이면 -3%지만 50,000원 기준은 +16.4%
+        await settle()
+        assert kiwoom.calls("kt10001") == []
+        connection.push(quote(price="-48500"))  # 50,000원 기준 -3%
+        await wait_until(lambda: len(kiwoom.calls("kt10001")) == 1)
+
+    rejected = next(r for r in caplog.records if r.getMessage() == "sl_tp_subscription_rejected")
+    assert rejected.fields["subscription"] == "fills"
+    reread = next(r for r in caplog.records if r.getMessage() == "sl_tp_holdings_refreshed")
+    assert reread is not None
+
+
+async def test_quotes_are_not_judged_while_fill_registration_is_rejected(data_dir, caplog):
+    write_settings(data_dir)
+    realtime = rejecting_fills()
+    kiwoom = sl_tp_kiwoom()
     async with running(realtime, kiwoom, data_dir):
         connection = await watching(realtime)
         await wait_until(lambda: "sl_tp_subscription_rejected" in messages(caplog))
         connection.push(quote())
         await settle()
-        # 체결을 받지 못하면 바뀐 매입가를 모르므로 판정하지 않는다.
-        assert kiwoom.calls("kt10001") == []
-        # 보유종목 변경으로 구독을 다시 맞출 때 주문체결 등록도 다시 시도한다.
-        connection.push(fill_event())
-        await wait_until(lambda: len(fill_regs(connection)) == 1)
-        await wait_until(lambda: resumed(caplog) == 2)
-        connection.push(quote())
-        await wait_until(lambda: len(kiwoom.calls("kt10001")) == 1)
 
-    rejected = next(r for r in caplog.records if r.getMessage() == "sl_tp_subscription_rejected")
-    assert rejected.fields["group"] == "1"
+    # 체결을 받지 못하면 바뀐 매입가를 모르므로 판정하지 않는다.
+    assert kiwoom.calls("kt10001") == []
 
 
 async def test_joining_a_rejected_fill_registration_learns_the_rejection(
     data_dir, caplog, monkeypatch
 ):
     # 체결 알림의 주문체결 등록이 거부돼 재시도를 기다리는 동안 SL/TP 세션이 시작된다.
-    from stock_bot import fill_watch
-
-    monkeypatch.setattr(fill_watch, "REGISTER_RETRY_INITIAL_SECONDS", 30)
+    monkeypatch.setattr(fill_feed, "REGISTER_RETRY_INITIAL_SECONDS", 30)
     write_settings(data_dir, session(start="10:00", end="11:00"))
     clock = Clock(AT_10 - timedelta(seconds=1))
     realtime = rejecting_fills()
     kiwoom = sl_tp_kiwoom().reply("ka10075", {"oso": []})
     async with running(realtime, kiwoom, data_dir, clock, discord=FakeDiscord()):
-        await wait_until(lambda: "fill_watch_register_retry" in messages(caplog))
+        await wait_until(lambda: "fill_feed_register_retry" in messages(caplog))
         clock.at = AT_10
         connection = await watching(realtime)
         await wait_until(lambda: "sl_tp_subscription_rejected" in messages(caplog))
@@ -352,8 +375,74 @@ async def test_joining_a_rejected_fill_registration_learns_the_rejection(
         await settle()
 
     assert kiwoom.calls("kt10001") == []
-    # 함께 받기 시작할 때 다시 등록해 지금 등록 결과를 받았다.
-    assert len(fill_regs(connection)) == 2
+    # 다시 등록하지 않고 체결 feed가 기억한 거부 상태를 바로 받았다.
+    assert len(fill_regs(connection)) == 1
+
+
+async def test_quote_before_a_fill_in_one_message_is_not_judged_with_the_old_price(
+    data_dir, caplog
+):
+    write_settings(data_dir, session(stop_loss="3"))
+    realtime = FakeRealtime()
+    kiwoom = sl_tp_kiwoom(balance(at_price("60000")), balance(at_price("50000")))
+    async with running(realtime, kiwoom, data_dir):
+        connection = await watching(realtime)
+        # 60,000원 기준 -3%인 시세 체결과 매입가를 바꾼 내 계좌 체결이 한 메시지로 온다.
+        mixed = quote(price="-58200")
+        mixed["data"] = [*mixed["data"], *fill_event()["data"]]
+        connection.push(mixed)
+        await wait_until(lambda: len(kiwoom.calls("kt00018")) == 2)
+        await wait_until(lambda: resumed(caplog) == 2)
+        assert kiwoom.calls("kt10001") == []
+        connection.push(quote(price="-48500"))  # 50,000원 기준 -3%
+        await wait_until(lambda: len(kiwoom.calls("kt10001")) == 1)
+
+
+async def test_quote_waiting_before_a_fill_is_skipped_while_rereading(data_dir, caplog):
+    write_settings(data_dir, session(stop_loss="3"))
+    realtime = FakeRealtime()
+    kiwoom = sl_tp_kiwoom(balance(at_price("60000")), balance(at_price("50000")))
+    async with running(realtime, kiwoom, data_dir):
+        connection = await watching(realtime)
+        # 시세 체결이 SL / TP 대기열에서 처리되기 전에 내 계좌 체결이 먼저 처리된다.
+        connection.push(quote(price="-58200"))
+        connection.push(fill_event())
+        await wait_until(lambda: resumed(caplog) == 2)
+
+    assert kiwoom.calls("kt10001") == []
+    skipped = [r for r in caplog.records if r.getMessage() == "sl_tp_judge_skipped"]
+    assert [r.fields["reason"] for r in skipped] == ["holdings_pending"]
+
+
+async def test_slow_fill_alert_does_not_delay_the_reread(data_dir):
+    write_settings(data_dir)
+    realtime = FakeRealtime()
+    discord = SlowDiscord()
+    kiwoom = sl_tp_kiwoom().reply("ka10075", {"oso": []})
+    async with running(realtime, kiwoom, data_dir, discord=discord):
+        connection = await watching(realtime)
+        connection.push(fill_event())
+        await discord.wait_for(1)
+        # 체결 알림이 Discord 응답을 기다리는 동안 다음 체결이 와도 SL / TP는 바로 다시 읽는다.
+        connection.push(fill_event())
+        await wait_until(lambda: len(kiwoom.calls("kt00018")) >= 2)
+        assert len(discord.payloads) == 1
+        discord.gate.set()
+
+
+async def test_fill_seen_log_carries_the_fill_request_id(data_dir, json_logs: JsonLines):
+    write_settings(data_dir)
+    realtime = FakeRealtime()
+    async with running(realtime, sl_tp_kiwoom(), data_dir):
+        connection = await watching(realtime)
+        connection.push(fill_event())
+        await wait_until(
+            lambda: any(line["event"] == "sl_tp_fill_seen" for line in json_logs.lines)
+        )
+
+    received = next(line for line in json_logs.lines if line["event"] == "fill_received")
+    seen = next(line for line in json_logs.lines if line["event"] == "sl_tp_fill_seen")
+    assert seen["request_id"] == received["request_id"] != "-"
 
 
 async def test_session_starting_while_disconnected_reads_holdings_after_reconnecting(
@@ -379,6 +468,50 @@ async def test_session_starting_while_disconnected_reads_holdings_after_reconnec
     assert second is realtime.connections[1]
     # 다시 붙은 연결로 한 번 읽었고, 그 연결의 CONNECTED로 또 읽지 않았다.
     assert len(kiwoom.calls("kt00018")) == 1
+
+
+async def test_reconnect_registers_fills_before_quotes(data_dir):
+    # Discord가 꺼져 있어도 예전처럼 체결(그룹 1)을 시세(그룹 2)보다 먼저 다시 등록한다.
+    write_settings(data_dir)
+    realtime = FakeRealtime()
+    async with running(realtime, sl_tp_kiwoom(), data_dir):
+        first = await watching(realtime)
+        first.drop()
+        await wait_until(lambda: len(realtime.connections) == 2)
+        second = realtime.connections[1]
+        await wait_until(lambda: len(second.requests("REG")) == 2)
+
+    assert [m["grp_no"] for m in second.requests("REG")] == ["1", "2"]
+
+
+async def test_reread_logs_do_not_carry_the_fill_request_id(data_dir, json_logs: JsonLines):
+    write_settings(data_dir)
+    realtime = FakeRealtime()
+    kiwoom = sl_tp_kiwoom()
+    async with running(realtime, kiwoom, data_dir):
+        connection = await watching(realtime)
+        connection.push(fill_event())
+        await wait_until(lambda: len(kiwoom.calls("kt00018")) == 2)
+        await settle()
+
+    # 다시 읽기는 여러 체결을 합치므로 어느 한 체결의 요청 ID로 남기지 않는다.
+    received = next(line for line in json_logs.lines if line["event"] == "fill_received")
+    refreshed = [line for line in json_logs.lines if line["event"] == "sl_tp_holdings_refreshed"]
+    assert len(refreshed) == 2
+    assert all(line["request_id"] != received["request_id"] for line in refreshed)
+
+
+async def test_replaced_connection_names_sl_tp_once_when_it_is_alone(data_dir, caplog):
+    # Discord가 꺼져 있어 중단 알림은 가지 않는다. SL / TP는 시세와 체결 feed 두 채널을 쓴다.
+    write_settings(data_dir)
+    realtime = FakeRealtime()
+    async with running(realtime, sl_tp_kiwoom(), data_dir):
+        connection = await watching(realtime)
+        connection.push(REPLACED)
+        await wait_until(lambda: "realtime_session_replaced" in messages(caplog))
+
+    replaced = next(r for r in caplog.records if r.getMessage() == "realtime_session_replaced")
+    assert json.loads(replaced.fields["names"]) == ["SL / TP"]
 
 
 async def test_replaced_connection_stops_the_read_retries(data_dir, caplog):

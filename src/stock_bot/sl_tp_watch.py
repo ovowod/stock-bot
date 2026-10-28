@@ -18,18 +18,12 @@ from zoneinfo import ZoneInfo
 from stock_bot.auto_sell import AutoSell
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
-from stock_bot.fill_watch import FILL_STATUSES
+from stock_bot.fill_feed import FeedState, FeedStatus, Fill, FillFeed
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import DiscordNotifier, Embed, EmbedField
 from stock_bot.quote import US_EXCHANGE_CODES
-from stock_bot.realtime import (
-    SHARED_GROUP_NO,
-    EventKind,
-    RealtimeEvent,
-    RealtimeHub,
-    Subscription,
-)
+from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
 from stock_bot.sl_tp import TIMEZONES, SlTpSettingsStore
 from stock_bot.sl_tp_alerts import (
     AutoSellTrigger,
@@ -48,15 +42,10 @@ WATCHED = (ENVIRONMENTS[Environment.DOMESTIC_PAPER], ENVIRONMENTS[Environment.US
 AUTO_SELL_SOURCE = "SL / TP"
 # 시세 실시간 항목. 0B는 국내 주식체결, FE는 미국주식 실시간 체결가다.
 QUOTE_TYPES = {Market.DOMESTIC: "0B", Market.US: "FE"}
-# 내 계좌 체결 실시간 항목(00 국내 주문체결, F5 미국 실시간 체결).
-# 체결을 뜻하는 주문상태는 체결 알림과 같다.
-# 체결되면 매입가·보유수량이 바뀌므로 보유종목을 다시 읽는다.
-FILL_TYPES = {Market.DOMESTIC: "00", Market.US: "F5"}
 # 장구분(290)의 정규장 값. 국내 2는 장중, 미국 0은 정규장이다.
 # 국내 장전·장후 시간외, 미국 프리마켓·애프터마켓·주간거래 체결은 판정하지 않는다.
 REGULAR_MARKET = {Market.DOMESTIC: "2", Market.US: "0"}
-# 공유 연결에서 SL / TP의 시세 구독이 쓰는 그룹 번호.
-# 주문체결은 공유 연결이 SHARED_GROUP_NO(1)로 한 번만 등록해 체결 감시와 함께 받는다.
+# 공유 연결에서 SL / TP의 시세 구독이 쓰는 그룹 번호. 내 계좌 체결은 체결 feed가 그룹 1로 받는다.
 GROUP_NO = "2"
 # 지금 켜진 SL/TP 세션을 다시 계산하는 간격. 설정을 저장할 때도 다시 계산한다.
 SESSION_CHECK_SECONDS = 1.0
@@ -65,6 +54,8 @@ HOLDINGS_RETRY_INITIAL_SECONDS = 1.0
 HOLDINGS_RETRY_MAX_SECONDS = 60.0
 # 보유종목 읽기가 첫 실패부터 이만큼 계속 실패하면 판정 중단 알림을 한 번 보낸다.
 HOLDINGS_ALERT_AFTER = timedelta(minutes=5)
+# 체결 등록 거부 알림을 거부가 이어지는 동안 한 번만 보내려고 쓰는 키. 시세는 그룹 번호를 쓴다.
+FILLS_ALERT = "fills"
 # 자동 매도 결과 알림. 매도를 보내지 않은 결과(건너뜀·보내기 전 취소)는 알리지 않는다.
 RESULT_EMBEDS = {"accepted": accepted_embed, "rejected": failed_embed, "unknown": unknown_embed}
 
@@ -129,6 +120,7 @@ class SlTpWatcher:
         positions: PositionLookup,
         auto_sell: AutoSell,
         hub: RealtimeHub,
+        feed: FillFeed,
         notifier: DiscordNotifier,
         now: Callable[[], datetime],
     ) -> None:
@@ -139,6 +131,8 @@ class SlTpWatcher:
         self.positions = positions
         self.auto_sell = auto_sell
         self.hub = hub
+        # 내 계좌 체결. 체결되면 매입가·보유수량이 바뀌므로 보유종목을 다시 읽는다.
+        self.feed = feed
         self.now = now
         self._watches: list[_Watch] = []
 
@@ -192,8 +186,11 @@ class _Watch:
         # 연결이 LOGIN까지 되면 깨운다. 보유종목은 연결이 있을 때 읽어야 그 뒤 체결을 놓치지 않는다.
         self._wake = asyncio.Event()
         self._rejected = False
+        # 체결 feed가 체결 등록이 거부됐다고 알렸다. 다시 등록될 때까지 판정하지 않는다.
         self._fills_rejected = False
-        # 판정 중단을 알린 구독 거부의 그룹.
+        # 켜진 세션 동안 체결 feed에 낸 신청의 해지 함수.
+        self._unsubscribe_fills: Callable[[], None] | None = None
+        # 판정 중단을 알린 구독 거부(시세는 그룹 번호, 체결은 FILLS_ALERT).
         # 등록에 성공하거나 새 세션 실행이 시작되면 다시 알릴 수 있다.
         self._rejection_alerted: set[str | None] = set()
         # 같은 이유의 건너뜀·잘못된 체결가 로그를 반복해 남기지 않으려고
@@ -312,7 +309,9 @@ class _Watch:
             if run is not None:
                 self._subscribed = None
                 self._channel.subscribe(None)
-                self._channel.share(None)
+                if self._unsubscribe_fills is not None:
+                    self._unsubscribe_fills()
+                    self._unsubscribe_fills = None
             return
         day, session = found
         self._runs += 1
@@ -329,13 +328,12 @@ class _Watch:
             **self._run_fields(new),
             previous_run=None if run is None else run.number,
         )
-        if self._channel.shared != self._fill_types() or self._fills_rejected:
-            # 새로 함께 받으면 지금 등록 결과를 받는다. 거부됐던 등록은 여기서 다시 시도한다.
-            self._channel.share(self._fill_types())
+        if self._unsubscribe_fills is None:
+            # 거부된 등록은 체결 feed가 다시 시도한다. 이미 알고 있는 상태는 바로 받는다.
+            self._unsubscribe_fills = self._owner.feed.subscribe(
+                self.spec, "sl_tp", "SL / TP", self._on_feed
+            )
         self._request_refresh(new, "session_started")
-
-    def _fill_types(self) -> list[str]:
-        return [FILL_TYPES[self.spec.market]]
 
     def _end_run(self, run: _Run) -> None:
         log(logger, logging.INFO, "sl_tp_session_ended", **self._run_fields(run))
@@ -362,6 +360,9 @@ class _Watch:
             run.refresh = self._spawn(self._refresh(run))
 
     async def _refresh(self, run: _Run) -> None:
+        # 체결 feed 안에서 시작되면 그 체결의 요청 ID를 이어받는다. 다시 읽기는 여러 체결을
+        # 합치므로 어느 한 체결의 ID로 남기지 않는다. 이 작업의 context만 바뀐다.
+        request_id_var.set("-")
         delay = HOLDINGS_RETRY_INITIAL_SECONDS
         while True:
             # 연결이 없으면 읽지 않고 기다린다. 읽은 뒤 연결되면 그사이 체결을 놓친다.
@@ -489,9 +490,6 @@ class _Watch:
         if codes == self._subscribed:
             return
         self._subscribed = codes
-        if self._fills_rejected:
-            # 거부됐던 주문체결 등록은 보유종목 변경으로 구독을 다시 맞출 때도 다시 시도한다.
-            self._channel.share(self._fill_types())
         log(logger, logging.INFO, "sl_tp_subscription_changed", codes=codes)
         if not codes:
             self._channel.subscribe(None)
@@ -531,67 +529,94 @@ class _Watch:
                 )
         elif event.kind is EventKind.REGISTERED:
             self._rejection_alerted.discard(event.group)
-            if event.group == SHARED_GROUP_NO:
-                self._fills_rejected = False
-            else:
-                self._rejected = False
+            self._rejected = False
         elif event.kind is EventKind.REJECTED:
             log(
                 logger,
                 logging.WARNING,
                 "sl_tp_subscription_rejected",
+                subscription="quotes",
                 group=event.group,
                 **event.detail,
             )
-            if event.group == SHARED_GROUP_NO:
-                # 체결을 받지 못하면 바뀐 매입가를 모른 채 판정하게 되므로 판정도 멈춘다.
-                self._fills_rejected = True
-                what = (
-                    "주문체결 실시간 등록이 거부되어 판정을 멈췄습니다. "
-                    "체결을 받지 못하면 바뀐 매입가를 알 수 없습니다."
-                )
-            else:
-                self._rejected = True
-                what = "실시간 시세 구독이 거부되어 판정을 멈췄습니다."
-            if event.group not in self._rejection_alerted:
-                # 거부가 이어지는 동안은 한 번만 알린다.
-                self._rejection_alerted.add(event.group)
-                self._alert(
-                    "subscription_rejected",
-                    stopped_embed(
-                        self.spec,
-                        f"{what} 다음 세션 시작이나 감시 종목이 바뀔 때 다시 시도합니다.",
-                        EmbedField("원인", str(event.detail.get("return_msg") or "확인 불가")),
-                    ),
-                )
+            self._rejected = True
+            self._alert_rejected(
+                event.group,
+                "실시간 시세 구독이 거부되어 판정을 멈췄습니다. "
+                "다음 세션 시작이나 감시 종목이 바뀔 때 다시 시도합니다.",
+                event.detail,
+            )
         elif event.kind is EventKind.STOPPED:
             self._stopped = True
             self._wake.set()
             log(logger, logging.ERROR, "sl_tp_watch_stopped", reason="session_replaced")
         elif event.kind is EventKind.REAL:
             for item in event.items:
-                if item.get("type") == FILL_TYPES[self.spec.market]:
-                    self._on_fill(item, event)
-                else:
-                    self._judge(item, event)
+                self._judge(item, event)
 
-    def _on_fill(self, item: dict[str, Any], event: RealtimeEvent) -> None:
+    def _alert_rejected(self, key: str | None, what: str, detail: dict[str, Any]) -> None:
+        if key in self._rejection_alerted:
+            # 거부가 이어지는 동안은 한 번만 알린다.
+            return
+        self._rejection_alerted.add(key)
+        self._alert(
+            "subscription_rejected",
+            stopped_embed(
+                self.spec,
+                what,
+                EmbedField("원인", str(detail.get("return_msg") or "확인 불가")),
+            ),
+        )
+
+    def _on_feed(self, value: Fill | FeedStatus) -> None:
+        """체결 feed가 받는 자리에서 바로 부른다. 그래서 그 뒤의 시세보다 먼저 판정을 멈춘다."""
+        environment_var.set(self.spec.environment.value)
+        if isinstance(value, Fill):
+            self._on_fill(value)
+        elif value.state is FeedState.LIVE:
+            self._on_fills_registered()
+        else:
+            self._on_fills_rejected(value.detail)
+
+    def _on_fill(self, fill: Fill) -> None:
         """내 계좌 체결(앱 밖 MTS·HTS 주문 포함). 매입가·보유수량이 바뀌었으니 다시 읽는다."""
         run = self._run
-        values = item.get("values")
-        values = values if isinstance(values, dict) else {}
-        status = values.get("913")
         if run is None:
             reason = "outside_session"
-        elif event.connection != self._channel.connection:
+        elif fill.connection != self._channel.connection:
             reason = "old_connection"
-        elif status not in FILL_STATUSES[FILL_TYPES[self.spec.market]]:
-            reason = "not_a_fill"
         else:
-            log(logger, logging.INFO, "sl_tp_fill_seen", run=run.number, code=values.get("9001"))
+            # 요청 ID는 체결 feed가 붙인 것이라 체결 수신 로그와 이어진다.
+            log(logger, logging.INFO, "sl_tp_fill_seen", run=run.number, code=fill.code)
             self._request_refresh(run, "fill")
             return
-        log(logger, logging.DEBUG, "sl_tp_fill_ignored", reason=reason, status=status)
+        log(logger, logging.DEBUG, "sl_tp_fill_ignored", reason=reason)
+
+    def _on_fills_registered(self) -> None:
+        was_rejected = self._fills_rejected
+        self._fills_rejected = False
+        self._rejection_alerted.discard(FILLS_ALERT)
+        run = self._run
+        if was_rejected and run is not None:
+            # 거부된 동안의 체결은 받지 못했다. 바뀐 매입가를 반영한 뒤 판정한다.
+            self._request_refresh(run, "fills_registered")
+
+    def _on_fills_rejected(self, detail: dict[str, Any]) -> None:
+        log(
+            logger,
+            logging.WARNING,
+            "sl_tp_subscription_rejected",
+            subscription="fills",
+            **detail,
+        )
+        # 체결을 받지 못하면 바뀐 매입가를 모른 채 판정하게 되므로 판정도 멈춘다.
+        self._fills_rejected = True
+        self._alert_rejected(
+            FILLS_ALERT,
+            "주문체결 실시간 등록이 거부되어 판정을 멈췄습니다. "
+            "체결을 받지 못하면 바뀐 매입가를 알 수 없습니다. 자동으로 다시 시도합니다.",
+            detail,
+        )
 
     def _judge(self, item: dict[str, Any], event: RealtimeEvent) -> None:
         code = str(item.get("item") or "").strip()

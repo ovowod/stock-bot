@@ -5,9 +5,11 @@
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -42,9 +44,6 @@ RECONNECT_MAX_SECONDS = 60.0
 
 # 같은 앱 키로 다른 연결이 들어왔을 때 키움이 기존 연결에 보내는 SYSTEM 코드(모의 서버에서 확인).
 SESSION_REPLACED_CODE = "R10001"
-# 여러 기능이 함께 받는 계좌 단위 실시간 항목(주문체결 00·F5)을 한 번만 등록하는 그룹 번호.
-# 같은 항목을 그룹 둘에 등록하면 키움이 이벤트를 두 번 보내는지 확인하지 못해 겹쳐 등록하지 않는다.
-SHARED_GROUP_NO = "1"
 
 NEUTRAL_COLOR = 0x8B8F98
 
@@ -83,50 +82,34 @@ class RealtimeEvent:
     items: list[dict[str, Any]] = field(default_factory=list)
     # REJECTED의 return_code·return_msg.
     detail: dict[str, Any] = field(default_factory=dict)
-    # REGISTERED·REJECTED가 어느 그룹의 등록 결과인지. 함께 받는 항목은 SHARED_GROUP_NO다.
+    # REGISTERED·REJECTED가 어느 그룹의 등록 결과인지.
     group: str | None = None
     # 받은 때의 경과 시간 시계(time.monotonic). 큐에서 기다린 시간까지 재는 데 쓴다.
     received_clock: float = field(default_factory=time.monotonic)
 
 
 EventHandler = Callable[[RealtimeEvent], Awaitable[None]]
+# 대기열 없이 받는 채널의 handler. 받는 자리에서 바로 부르므로 기다리지 않고 빨리 끝나야 한다.
+ImmediateHandler = Callable[[RealtimeEvent], None]
 
 
-class Channel:
-    """한 기능이 한 연결에 내는 구독. 이벤트는 채널마다 따로 큐에 쌓아 순서대로 handler에 넘긴다.
+class Channel(ABC):
+    """한 기능이 한 연결에 내는 구독. 이벤트를 넘기는 방식은 아래 두 채널이 정한다."""
 
-    채널마다 큐가 따로라서 한 기능의 처리가 늦어도 다른 기능의 이벤트는 늦어지지 않는다.
-    """
-
-    def __init__(self, link: _Link, feature: str, label: str, handler: EventHandler) -> None:
+    def __init__(self, link: _Link, feature: str, label: str) -> None:
         self.feature = feature
-        self.label = label
+        # 밀려남 중단 알림에 쓰는 기능 이름. 여러 기능이 함께 쓰는 채널은 이름이 여럿이다.
+        self.labels = [label] if label else []
         self.subscription: Subscription | None = None
-        # 다른 기능과 함께 받는 계좌 단위 실시간 항목. 연결이 한 번만 등록한다.
-        self.shared: list[str] = []
         # 구독을 바꿀 때마다 는다. 연결은 보낸 버전과 비교해 다시 보낼지 정한다.
         self.version = 0
         self._link = link
-        self._handler = handler
-        self._queue: asyncio.Queue[RealtimeEvent] = asyncio.Queue()
-        self._worker = asyncio.create_task(self._work())
 
     def subscribe(self, subscription: Subscription | None) -> None:
         """구독을 바꾼다. None이면 해지한다. 같은 구독을 다시 넣으면 REG를 다시 보낸다."""
         self.subscription = subscription
         self.version += 1
         self._link.changed()
-
-    def share(self, types: list[str] | None) -> None:
-        """계좌 단위 실시간 항목(item이 빈 값)을 다른 기능과 함께 받는다. None이면 그만 받는다.
-
-        넣을 때마다 REG를 다시 보낸다. 새로 함께 받는 기능도 지금 등록 결과
-        (REGISTERED·REJECTED)를 받게 하고, 거부 뒤 재시도도 같은 호출로 한다.
-        그만 받을 때는 합친 항목이 바뀔 때만 다시 등록한다.
-        """
-        wanted = list(types or [])
-        self.shared = wanted
-        self._link.share_changed(resend=bool(wanted))
 
     @property
     def stopped(self) -> bool:
@@ -144,6 +127,37 @@ class Channel:
         """
         return self._link.connection
 
+    @abstractmethod
+    def put(self, event: RealtimeEvent) -> None: ...
+
+    async def close(self) -> None:
+        return None
+
+    def _failed(self, event: RealtimeEvent, exc: Exception) -> None:
+        logger.error(
+            "realtime_handler_failed",
+            exc_info=exc,
+            extra={
+                "fields": {
+                    "feature": self.feature,
+                    "kind": event.kind.value,
+                    "error_type": type(exc).__name__,
+                }
+            },
+        )
+
+
+class _QueuedChannel(Channel):
+    """이벤트를 채널마다 따로 큐에 쌓아 순서대로 handler에 넘긴다.
+
+    채널마다 큐가 따로라서 한 기능의 처리가 늦어도 다른 기능의 이벤트는 늦어지지 않는다.
+    """
+
+    def __init__(self, link: _Link, feature: str, label: str, handler: EventHandler) -> None:
+        super().__init__(link, feature, label)
+        self._queue: asyncio.Queue[RealtimeEvent] = asyncio.Queue()
+        self._worker = asyncio.create_task(self._work(handler))
+
     def put(self, event: RealtimeEvent) -> None:
         self._queue.put_nowait(event)
 
@@ -151,24 +165,33 @@ class Channel:
         self._worker.cancel()
         await asyncio.gather(self._worker, return_exceptions=True)
 
-    async def _work(self) -> None:
+    async def _work(self, handler: EventHandler) -> None:
         while True:
             event = await self._queue.get()
             try:
-                await self._handler(event)
+                await handler(event)
             except Exception as exc:
                 # 이벤트 하나의 처리 오류로 작업자가 멈추면 그 뒤 이벤트를 모두 놓친다.
-                logger.error(
-                    "realtime_handler_failed",
-                    exc_info=exc,
-                    extra={
-                        "fields": {
-                            "feature": self.feature,
-                            "kind": event.kind.value,
-                            "error_type": type(exc).__name__,
-                        }
-                    },
-                )
+                self._failed(event, exc)
+
+
+class _ImmediateChannel(Channel):
+    """큐 없이 받는 자리에서 바로 handler에 넘긴다.
+
+    그래서 같은 메시지의 다른 항목이 다른 채널의 큐에서 처리되기 전에 끝난다.
+    """
+
+    def __init__(self, link: _Link, feature: str, label: str, handler: ImmediateHandler) -> None:
+        super().__init__(link, feature, label)
+        self._handler = handler
+
+    def put(self, event: RealtimeEvent) -> None:
+        try:
+            # handler가 바꾼 요청 ID 같은 로그 context가 받는 쪽의 다음 로그에 남지 않게 한다.
+            contextvars.copy_context().run(self._handler, event)
+        except Exception as exc:
+            # 받는 자리에서 오류가 새면 연결이 끊긴다. 남기고 다음 이벤트를 받는다.
+            self._failed(event, exc)
 
 
 class RealtimeHub:
@@ -190,12 +213,21 @@ class RealtimeHub:
         self, spec: EnvironmentSpec, feature: str, label: str, handler: EventHandler
     ) -> Channel:
         """spec의 인증정보 연결에 채널을 연다. 연결은 구독이 생길 때 연다."""
+        link = self._link(spec)
+        return link.add(_QueuedChannel(link, feature, label, handler))
+
+    def immediate_channel(
+        self, spec: EnvironmentSpec, feature: str, label: str, handler: ImmediateHandler
+    ) -> Channel:
+        """큐 없이 받는 자리에서 바로 handler를 부르는 채널을 연다."""
+        link = self._link(spec)
+        return link.add(_ImmediateChannel(link, feature, label, handler))
+
+    def _link(self, spec: EnvironmentSpec) -> _Link:
         link = self._links.get(spec.credential_prefix)
         if link is None:
             link = self._links[spec.credential_prefix] = _Link(self, spec)
-        channel = Channel(link, feature, label, handler)
-        link.channels.append(channel)
-        return channel
+        return link
 
     async def stop(self) -> None:
         for link in self._links.values():
@@ -230,9 +262,6 @@ class _Link:
         self.labels = "·".join(s.label for s in specs)
         self.channels: list[Channel] = []
         self._changed = asyncio.Event()
-        # 여러 채널이 함께 받는 항목을 대신 등록하는 채널. 등록 결과는 함께 받는 채널에 넘긴다.
-        self._shared = Channel(self, "shared", "", self._forward_shared)
-        self.channels.append(self._shared)
         self._task: asyncio.Task[None] | None = None
         self._connection_no = 0
         # 지금 LOGIN까지 된 연결의 번호. 끊겨 있으면 None이다.
@@ -240,6 +269,10 @@ class _Link:
         self.stopped = False
         # 마지막 구독이 해지돼 연결을 닫았다. 그사이 새 구독이 생겼으면 기다리지 않고 다시 연다.
         self._closed_idle = False
+
+    def add(self, channel: Channel) -> Channel:
+        self.channels.append(channel)
+        return channel
 
     def changed(self) -> None:
         """구독이 바뀌었다. 구독이 하나라도 생기면 그때 연결을 연다."""
@@ -251,31 +284,9 @@ class _Link:
         """구독이 하나도 없다. 같은 앱 키의 다른 서버를 끊지 않게 연결해 두지 않는다."""
         return all(c.subscription is None for c in self.channels)
 
-    def share_changed(self, resend: bool) -> None:
-        """함께 받는 항목을 다시 맞춘다. 합친 항목이 그대로면 resend일 때만 다시 등록한다."""
-        sharing = self._sharing()
-        types = list(dict.fromkeys(t for c in sharing for t in c.shared))
-        self._shared.feature = "+".join(c.feature for c in sharing) or "shared"
-        current = self._shared.subscription
-        if not resend and (current.types if current else []) == types:
-            return
-        self._shared.subscribe(Subscription(SHARED_GROUP_NO, [""], types) if types else None)
-
-    def _sharing(self) -> list[Channel]:
-        return [c for c in self.channels if c is not self._shared and c.shared]
-
     def _features(self) -> list[Channel]:
         """지금 이 연결로 무언가를 받고 있는 기능."""
-        return [
-            c
-            for c in self.channels
-            if c is not self._shared and (c.subscription is not None or c.shared)
-        ]
-
-    async def _forward_shared(self, event: RealtimeEvent) -> None:
-        if event.kind in (EventKind.REGISTERED, EventKind.REJECTED):
-            for channel in self._sharing():
-                channel.put(event)
+        return [c for c in self.channels if c.subscription is not None]
 
     async def stop(self) -> None:
         self.stopped = True
@@ -318,6 +329,8 @@ class _Link:
             # 나중에 연결한 쪽이 지켜보도록 이 서버는 멈추고, 조용히 끊기지 않게 알린다.
             self.stopped = True
             stopped = self._features()
+            # 한 기능이 채널 여럿을 쓰면 이름이 겹치므로 한 번만 적는다.
+            names = list(dict.fromkeys(name for c in stopped for name in c.labels))
             log(
                 logger,
                 logging.ERROR,
@@ -325,9 +338,10 @@ class _Link:
                 code=replaced.code,
                 message=replaced.message,
                 features=[c.feature for c in stopped],
+                names=names,
             )
             self._broadcast(EventKind.STOPPED, self._connection_no)
-            await self._hub._notify_replaced(self, [c.label for c in stopped])
+            await self._hub._notify_replaced(self, names)
 
     async def _session(self) -> bool:
         """연결 하나가 끝날 때까지 받는다. LOGIN에 성공하고 응답 시간 초과 없이 끝났으면 True다.
@@ -432,10 +446,8 @@ class _Link:
         ]
         routed: set[int] = set()
         for channel in self.channels:
-            if channel is self._shared:
-                continue
             subscription = channel.subscription
-            types = {*(subscription.types if subscription else []), *channel.shared}
+            types = set(subscription.types if subscription else [])
             mine = [item for item in items if item.get("type") in types]
             routed.update(id(item) for item in mine)
             if mine:
@@ -451,6 +463,8 @@ class _Link:
         replies: asyncio.Queue[dict[str, Any]],
     ) -> None:
         """구독 변경을 하나씩 보낸다. 새 연결은 살아 있는 구독을 모두 다시 등록한다.
+
+        다시 등록은 채널을 연 순서대로 한다.
 
         키움의 REG/REMOVE 응답에는 어느 요청의 응답인지 알 단서가 없어,
         응답을 받은 뒤 다음을 보낸다.

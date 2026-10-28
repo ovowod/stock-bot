@@ -7,7 +7,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from stock_bot import fill_watch
+from stock_bot import fill_feed, fill_watch
 from stock_bot import realtime as realtime_module
 from stock_bot.app import create_app
 from stock_bot.notification import DiscordNotifier
@@ -29,6 +29,7 @@ from tests.fake_realtime import (
     us_fill_event,
     us_open_order,
 )
+from tests.log_capture import JsonLines
 
 pytestmark = pytest.mark.anyio
 
@@ -313,19 +314,29 @@ async def test_connection_and_fill_steps_are_logged_without_secrets(caplog):
         await discord.wait_for(1)
         await wait_until(lambda: "fill_notified" in [r.getMessage() for r in caplog.records])
 
-    # 연결 단계는 공유 실시간 연결이, 체결 단계는 체결 감시와 미체결 조회가 남긴다.
-    watched = ("stock_bot.fill_watch", "stock_bot.realtime", "stock_bot.open_order")
+    # 연결 단계는 공유 실시간 연결이, 체결 수신은 체결 feed가,
+    # 알림 단계는 체결 감시와 미체결 조회가 남긴다.
+    watched = (
+        "stock_bot.fill_watch",
+        "stock_bot.fill_feed",
+        "stock_bot.realtime",
+        "stock_bot.open_order",
+    )
     events = [r.getMessage() for r in caplog.records if r.name in watched]
     assert events == [
         "fill_watch_started",
+        "fill_feed_subscribed",
         "fill_watch_skipped",
         "fill_watch_skipped",
         "realtime_connected",
         "realtime_logged_in",
         "realtime_registered",
+        "fill_feed_status_changed",
         "fill_received",
         "open_orders_fetched",
         "fill_notified",
+        # 서버를 끄며 연결이 끊겨 등록 상태를 모름으로 되돌린다.
+        "fill_feed_status_changed",
     ]
     received = next(r for r in caplog.records if r.getMessage() == "fill_received")
     assert received.fields["order_no"] == "0000018"
@@ -333,6 +344,63 @@ async def test_connection_and_fill_steps_are_logged_without_secrets(caplog):
     logged = caplog.text + "".join(str(getattr(r, "fields", "")) for r in caplog.records)
     assert FAKE_ENV["PAPER_KR_ACCOUNT_NO"] not in logged
     assert kiwoom.issued_tokens[0] not in logged
+
+
+async def test_fill_logs_share_one_request_id_from_receipt_to_alert(json_logs: JsonLines):
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    async with running(realtime, discord, fill_kiwoom()):
+        [connection] = await realtime.wait_registered()
+        connection.push(fill_event())
+        connection.push(fill_event(**{"9203": "0000019"}))
+        await discord.wait_for(2)
+        await wait_until(
+            lambda: [line["event"] for line in json_logs.lines].count("fill_notified") == 2
+        )
+
+    # 체결 feed가 받은 때 붙인 요청 ID를 체결 알림의 조회·전송 로그가 이어 쓴다.
+    received = [line for line in json_logs.lines if line["event"] == "fill_received"]
+    assert [line["order_no"] for line in received] == ["0000018", "0000019"]
+    for line in received:
+        events = [e["event"] for e in json_logs.lines if e["request_id"] == line["request_id"]]
+        assert "open_orders_fetched" in events
+        assert events.count("fill_notified") == 1
+    assert received[0]["request_id"] != received[1]["request_id"]
+
+
+class SlowDiscord(FakeDiscord):
+    """첫 요청의 응답을 gate가 열릴 때까지 늦춘다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:  # type: ignore[override]
+        if not self.payloads:
+            self.payloads.append(json.loads(request.content))
+            await self.gate.wait()
+            return httpx.Response(200, json={"id": "1"})
+        return super().__call__(request)
+
+
+async def test_fills_reach_the_feed_while_an_alert_waits_and_alerts_keep_order(caplog):
+    realtime = FakeRealtime()
+    discord = SlowDiscord()
+    async with running(realtime, discord, fill_kiwoom()):
+        [connection] = await realtime.wait_registered()
+        connection.push(fill_event())
+        await discord.wait_for(1)
+        connection.push(fill_event(**{"9203": "0000019"}))
+        # 첫 알림의 Discord 응답을 기다리는 동안에도 다음 체결은 체결 feed에 바로 닿는다.
+        await wait_until(
+            lambda: [r.getMessage() for r in caplog.records].count("fill_received") == 2
+        )
+        assert len(discord.payloads) == 1
+        discord.gate.set()
+        await discord.wait_for(2)
+
+    notified = [r.fields["order_no"] for r in caplog.records if r.getMessage() == "fill_notified"]
+    assert notified == ["0000018", "0000019"]
 
 
 async def test_malformed_message_is_logged_and_watching_continues(caplog):
@@ -354,8 +422,8 @@ FAILED_REG = {"trnm": "REG", "return_code": 1, "return_msg": "x"}
 
 @pytest.fixture
 def fast_register_retry(monkeypatch):
-    monkeypatch.setattr(fill_watch, "REGISTER_RETRY_INITIAL_SECONDS", 0.01)
-    monkeypatch.setattr(fill_watch, "REGISTER_RETRY_MAX_SECONDS", 0.04)
+    monkeypatch.setattr(fill_feed, "REGISTER_RETRY_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(fill_feed, "REGISTER_RETRY_MAX_SECONDS", 0.04)
 
 
 async def first_connection(realtime: FakeRealtime):
@@ -377,7 +445,7 @@ def waits(caplog) -> list[float]:
     ]
 
 
-async def test_reconnects_and_registers_again_after_drop(fast_reconnect):
+async def test_reconnects_and_registers_again_after_drop(fast_reconnect, caplog):
     realtime = FakeRealtime()
     discord = FakeDiscord()
     async with running(realtime, discord):
@@ -390,6 +458,11 @@ async def test_reconnects_and_registers_again_after_drop(fast_reconnect):
     assert first.closed
     assert second.sent_trnm() == ["LOGIN", "REG"]
     assert fields(discord.payloads[0])["이번 체결"] == "3주 @ 60,000원 (180,000원)"
+    # 끊기면 등록 상태를 모름으로 되돌리고, 다시 등록되면 받는 중이 된다. 마지막은 서버 종료다.
+    states = [
+        r.fields["state"] for r in caplog.records if r.getMessage() == "fill_feed_status_changed"
+    ]
+    assert states == ["live", "unknown", "live", "unknown"]
 
 
 async def test_retries_when_connection_is_refused(fast_reconnect, caplog):
@@ -429,7 +502,7 @@ def register_waits(caplog) -> list[float]:
     return [
         r.fields["wait_seconds"]
         for r in caplog.records
-        if r.getMessage() == "fill_watch_register_retry"
+        if r.getMessage() == "fill_feed_register_retry"
     ]
 
 
@@ -454,7 +527,7 @@ async def test_register_retry_wait_grows_and_resets_after_success(
 
 async def test_register_retry_is_dropped_once_registration_succeeds(fast_reconnect, monkeypatch):
     # 거부 뒤 다시 등록을 기다리는 동안 재연결로 등록에 성공하면, 기다리던 재등록은 보내지 않는다.
-    monkeypatch.setattr(fill_watch, "REGISTER_RETRY_INITIAL_SECONDS", 0.2)
+    monkeypatch.setattr(fill_feed, "REGISTER_RETRY_INITIAL_SECONDS", 0.2)
     replies = iter([FAILED_REG])
     realtime = FakeRealtime(responder=lambda message: next(replies, OK_REG))
     async with running(realtime):

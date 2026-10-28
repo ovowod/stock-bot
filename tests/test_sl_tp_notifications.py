@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import pytest
 
-from stock_bot import auto_sell, sl_tp_watch
+from stock_bot import auto_sell, fill_feed, sl_tp_watch
 from stock_bot import realtime as realtime_module
 from tests.fake_kiwoom import kiwoom_error, page_response
 from tests.fake_realtime import OK_REG, FakeRealtime, fill_event
@@ -434,6 +434,33 @@ async def test_rejected_quote_subscription_is_announced_once(data_dir):
 
     [payload] = titled(discord, "SL / TP 판정 중단")
     assert "실시간 시세 구독이 거부" in payload["embeds"][0]["description"]
+    assert fields(payload)["원인"] == "등록 한도 초과"
+
+
+async def test_rejected_fill_registration_is_announced_once_while_retrying(
+    data_dir, monkeypatch, caplog
+):
+    monkeypatch.setattr(fill_feed, "REGISTER_RETRY_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(fill_feed, "REGISTER_RETRY_MAX_SECONDS", 0.02)
+    write_settings(data_dir)
+
+    def respond(message: dict[str, Any]) -> dict[str, Any]:
+        if message["grp_no"] == "1":
+            return {"trnm": "REG", "return_code": 1, "return_msg": "등록 한도 초과"}
+        return OK_REG
+
+    realtime = FakeRealtime(responder=respond)
+    discord = FakeDiscord()
+    async with running(realtime, notify_kiwoom(), data_dir, discord=discord):
+        await wait_until(lambda: bool(titled(discord, "SL / TP 판정 중단")))
+        # 체결 feed가 다시 시도해 거부가 이어져도 다시 알리지 않는다.
+        await wait_until(lambda: messages(caplog).count("fill_feed_register_retry") >= 4)
+        await settle()
+
+    [payload] = titled(discord, "SL / TP 판정 중단")
+    description = payload["embeds"][0]["description"]
+    assert "주문체결 실시간 등록이 거부" in description
+    assert "자동으로 다시 시도합니다" in description
     assert fields(payload)["원인"] == "등록 한도 초과"
 
 
