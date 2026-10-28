@@ -10,16 +10,23 @@ const ORDERS_ALLOWED: Record<string, boolean> = {
   us_paper: true,
 };
 
-const environmentReplies = new WeakMap<Page, Record<string, boolean> | "fail">();
+const environmentReplies = new WeakMap<Page, Record<string, boolean> | "fail" | Promise<void>>();
 
-/** /api/environments의 응답을 바꾼다. 로그인하기(openDashboard·mockAuth) 전에 부른다. "fail"이면 500이다. */
-export function setEnvironments(page: Page, reply: Partial<Record<string, boolean>> | "fail"): void {
-  environmentReplies.set(page, reply === "fail" ? reply : { ...ORDERS_ALLOWED, ...reply });
+/**
+ * /api/environments의 응답을 바꾼다. 로그인하기(openDashboard·mockAuth) 전에 부른다.
+ * "fail"이면 500이고, Promise면 그것이 끝날 때 기본값으로 답한다.
+ */
+export function setEnvironments(page: Page, reply: Partial<Record<string, boolean>> | "fail" | Promise<void>): void {
+  environmentReplies.set(page, reply === "fail" || reply instanceof Promise ? reply : { ...ORDERS_ALLOWED, ...reply });
 }
 
 async function mockEnvironments(page: Page): Promise<void> {
-  await page.route("**/api/environments", (route) => {
-    const reply = environmentReplies.get(page) ?? ORDERS_ALLOWED;
+  await page.route("**/api/environments", async (route) => {
+    let reply = environmentReplies.get(page) ?? ORDERS_ALLOWED;
+    if (reply instanceof Promise) {
+      await reply;
+      reply = ORDERS_ALLOWED;
+    }
     if (reply === "fail") {
       return route.fulfill({ status: 500, json: { error: { kind: "unknown", message: "test" } } });
     }

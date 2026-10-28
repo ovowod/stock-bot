@@ -244,6 +244,18 @@ test("주문 허용이 켜진 실전에서는 취소 버튼이 보인다", async
   await expect(panel(page).getByText("실전투자에서는 주문 취소를 할 수 없습니다.")).toHaveCount(0);
 });
 
+test("주문 가능 여부를 받는 동안 취소 버튼은 보이지만 누를 수 없다", async ({ page }) => {
+  await mockApi(page, { openOrders: () => listed([openOrder()]) });
+  let release = () => {};
+  setEnvironments(page, new Promise<void>((resolve) => (release = resolve)));
+  await open(page);
+
+  const cancel = row(page, "SK하이닉스").getByRole("button", { name: "SK하이닉스 주문 취소" });
+  await expect(cancel).toBeDisabled();
+  release();
+  await expect(cancel).toBeEnabled();
+});
+
 test("주문 가능 여부를 받지 못하면 취소 버튼 대신 안내가 보인다", async ({ page }) => {
   await mockApi(page, { openOrders: () => listed([openOrder()]) });
   setEnvironments(page, "fail");

@@ -108,17 +108,21 @@ async def test_paper_environment_sends_money_moving_trs(spec):
     [
         ("kt00018", "/api/dostk/acnt"),
         ("ka10075", "/api/dostk/acnt"),
+        ("ust21070", "/api/us/acnt"),
         # 주문·환전 주소에 섞인 조회 TR
         ("ust21204", "/api/us/ordr"),
+        ("ust21205", "/api/us/ordr"),
         ("ust31490", "/api/us/ordr"),
         ("ust31300", "/api/us/exchange"),
+        ("ust31301", "/api/us/exchange"),
     ],
 )
-async def test_real_environment_still_sends_inquiries(api_id, path):
+@pytest.mark.parametrize("spec", REAL, ids=lambda s: s.environment.value)
+async def test_real_environment_still_sends_inquiries(spec, api_id, path):
     fake = FakeKiwoom().reply(api_id, {"return_code": 0, "return_msg": "정상"})
     client = KiwoomClient(FAKE_ENV, transport=httpx.MockTransport(fake))
 
-    await client.call(DOMESTIC_REAL, api_id, path, {})
+    await client.call(spec, api_id, path, {})
 
     assert len(fake.calls(api_id)) == 1
 

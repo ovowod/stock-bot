@@ -11,7 +11,7 @@ import {
 } from "../../api";
 import { findEnvironment, type EnvironmentOption } from "../../environments";
 import { formatCount, formatForeign, formatKrw } from "../../format";
-import { ORDER_PERMISSION_FAILED, useOrderPermission } from "../../orderPermission";
+import { blockedMessage, useOrderPermission } from "../../orderPermission";
 import { useToast } from "../toast/Toasts";
 import {
   ORDER_TYPES,
@@ -190,6 +190,7 @@ function OrderForm({
 }) {
   const market = env.market;
   const permission = useOrderPermission(env.value);
+  const blocked = blockedMessage(permission, "실전투자에서는 주문할 수 없습니다.");
   const showToast = useToast();
   const sell = target.sell;
   const side = sell ? "매도" : "매수";
@@ -499,10 +500,10 @@ function OrderForm({
 
       {/* 패널이 화면 높이를 채우는 태블릿·데스크톱에서는 주문 버튼을 패널 맨 아래에 둔다. */}
       <div className="sticky bottom-0 mt-auto space-y-2 bg-surface pt-2">
-        {permission === "blocked" || permission === "failed" ? (
+        {blocked ? (
           <p className="flex items-center justify-center gap-1.5 rounded-2xl bg-real-soft py-3.5 text-sm font-bold text-real">
             <ShieldAlert className="size-4" aria-hidden />
-            {permission === "blocked" ? "실전투자에서는 주문할 수 없습니다." : ORDER_PERMISSION_FAILED}
+            {blocked}
           </p>
         ) : (
           <button
