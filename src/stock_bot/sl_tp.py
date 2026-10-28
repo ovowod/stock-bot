@@ -63,8 +63,8 @@ class SlTpSettingsStore:
             )
             raise
         counts = _counts(settings)
-        # 매도 동작이 붙어도 실전 계좌가 갑자기 매도되지 않게, 실전에서는 켜 둘 수 없다.
-        if spec.is_real and counts["enabled_count"]:
+        # 자동 매도를 보낼 수 없는 환경(주문 허용이 꺼진 실전)에서는 켜 둘 수 없다.
+        if not spec.orders_allowed and counts["enabled_count"]:
             log(logger, logging.WARNING, "sl_tp_enable_refused", **counts)
             raise _enable_not_allowed()
         settings["updated_at"] = datetime.now(UTC).isoformat(timespec="seconds")
@@ -96,7 +96,7 @@ class SlTpSettingsStore:
             if updated_at is not None and not isinstance(updated_at, str):
                 raise ValueError("updated_at이 문자열이 아닙니다")
             settings = _validate(data, spec.market)
-            if spec.is_real and _counts(settings)["enabled_count"]:
+            if not spec.orders_allowed and _counts(settings)["enabled_count"]:
                 raise _enable_not_allowed()
         except (OSError, ValueError, AppError) as exc:
             cause = exc.message if isinstance(exc, AppError) else str(exc)
@@ -154,7 +154,7 @@ def _response(spec: EnvironmentSpec, settings: dict[str, Any]) -> dict[str, Any]
         "market": spec.market.value,
         "timezone": TIMEZONES[spec.market],
         "regular_hours": {"start": start, "end": end},
-        "can_enable": not spec.is_real,
+        "can_enable": spec.orders_allowed,
         "updated_at": settings["updated_at"],
         "excluded": settings["excluded"],
         "sessions": settings["sessions"],

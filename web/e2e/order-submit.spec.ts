@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openDashboard } from "./support";
+import { openDashboard, setEnvironments } from "./support";
 
 // 브라우저의 /api 요청을 가로채 가짜 응답을 준다. 주문 요청도 가짜 서버가 받으며 키움 서버는 호출되지 않는다.
 
@@ -221,6 +221,23 @@ test("실전투자에서는 매수 버튼 대신 안내가 보이고 주문 요�
   await expect(dialog.getByText("실전투자에서는 주문할 수 없습니다.")).toBeVisible();
   await expect(dialog.getByRole("button", { name: "매수" })).toHaveCount(0);
   await expect(dialog.getByLabel("수량 (주)")).toHaveValue("1");
+  expect(orders).toEqual([]);
+});
+
+test("주문 허용이 켜진 실전에서는 매수 버튼이 보인다", async ({ page }) => {
+  await mockApi(page);
+  setEnvironments(page, { domestic_real: true });
+  const dialog = await openPanel(page, "국내 실전");
+  await expect(dialog.getByRole("button", { name: "매수" })).toBeVisible();
+  await expect(dialog.getByText("실전투자에서는 주문할 수 없습니다.")).toHaveCount(0);
+});
+
+test("주문 가능 여부를 받지 못하면 매수 버튼 대신 안내가 보인다", async ({ page }) => {
+  const orders = await mockApi(page);
+  setEnvironments(page, "fail");
+  const dialog = await openPanel(page);
+  await expect(dialog.getByText("주문 가능 여부를 불러오지 못했습니다. 새로고침하세요.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "매수" })).toHaveCount(0);
   expect(orders).toEqual([]);
 });
 

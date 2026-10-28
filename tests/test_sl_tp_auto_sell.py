@@ -730,17 +730,17 @@ async def test_trigger_order_and_result_logs_share_one_request_id(data_dir, json
     assert "sl_tp_quote_received" not in lines  # 체결가 수신은 DEBUG라 기본 수준에서 남지 않는다.
 
 
-async def test_auto_sell_path_refuses_real_trading_before_calling_kiwoom():
-    kiwoom = FakeKiwoom()
+async def test_real_auto_sell_never_reaches_kiwoom():
+    kiwoom = FakeKiwoom().reply("kt10001", {"ord_no": "0000141"})
     client = KiwoomClient(FAKE_ENV, transport=httpx.MockTransport(kiwoom))
 
     async def holding(spec, code):
-        raise AssertionError("실전에서는 잔고도 조회하지 않는다")
+        return {"quantity": 10, "sellable_quantity": 10}
 
     orders = OrderService(client, holding, lambda spec: asyncio.sleep(0, []))
     result = await orders.sell_all_at_market(
         ENVIRONMENTS[Environment.DOMESTIC_REAL], "005930", "", "sl-tp-x", lambda: True
     )
 
-    assert result.outcome == "cancelled"
-    assert kiwoom.requests == []
+    assert result.outcome == "rejected"
+    assert kiwoom.calls("kt10001") == []

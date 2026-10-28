@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { OpenOrder, OpenOrders } from "../../api";
 import type { EnvironmentOption } from "../../environments";
 import { formatCount, formatOrderPrice } from "../../format";
+import { blockedMessage, useOrderPermission } from "../../orderPermission";
 import { Callout } from "../order/Sheet";
 import { CancelSheet } from "./CancelSheet";
 import { ErrorNotice, Panel } from "./parts";
@@ -28,14 +29,15 @@ export function OpenOrdersPanel({
   onChanged: () => void;
 }) {
   const ready = state.status === "ready" ? state : null;
-  const isReal = env.isReal;
+  const permission = useOrderPermission(env.value);
+  const blocked = blockedMessage(permission, "실전투자에서는 주문 취소를 할 수 없습니다.");
   const [cancelling, setCancelling] = useState<OpenOrder | null>(null);
   return (
     <Panel title="미체결 주문" label="미체결 주문" aside={ready ? `${ready.data.orders.length}건` : undefined}>
-      {isReal && (
+      {blocked && (
         <div className="mb-3">
           <Callout tone="muted" icon={ShieldAlert}>
-            실전투자에서는 주문 취소를 할 수 없습니다.
+            {blocked}
           </Callout>
         </div>
       )}
@@ -62,7 +64,7 @@ export function OpenOrdersPanel({
                   key={order.order_no}
                   order={order}
                   market={env.market}
-                  isReal={isReal}
+                  cancel={blocked ? "hidden" : permission === "loading" ? "disabled" : "enabled"}
                   onCancel={() => setCancelling(order)}
                 />
               ))}
@@ -80,12 +82,13 @@ export function OpenOrdersPanel({
 function OpenOrderRow({
   order,
   market,
-  isReal,
+  cancel,
   onCancel,
 }: {
   order: OpenOrder;
   market: Market;
-  isReal: boolean;
+  /** 취소 버튼. 주문 허용이 꺼졌거나 받지 못하면 숨기고, 받는 중에는 누를 수 없다. */
+  cancel: "enabled" | "disabled" | "hidden";
   onCancel: () => void;
 }) {
   const quantity =
@@ -123,13 +126,14 @@ function OpenOrderRow({
       {/* 좁은 화면에서는 수량과 취소 버튼을 아래 줄 전체 너비로 내려 종목 정보가 좁아지지 않게 한다. */}
       <div className="flex w-full items-center justify-between gap-3 md:w-auto md:shrink-0 md:justify-end">
         <p className="text-[15px] font-bold whitespace-nowrap">{quantity}</p>
-        {!isReal && !order.cancelable && <p className="text-xs whitespace-nowrap text-muted">키움 앱에서 취소하세요</p>}
-        {!isReal && order.cancelable && (
+        {cancel !== "hidden" && !order.cancelable && <p className="text-xs whitespace-nowrap text-muted">키움 앱에서 취소하세요</p>}
+        {cancel !== "hidden" && order.cancelable && (
           <button
             type="button"
             aria-label={`${order.name} 주문 취소`}
             onClick={onCancel}
-            className="shrink-0 rounded-xl bg-canvas px-3.5 py-2 text-sm font-bold text-sub hover:bg-ink hover:text-white"
+            disabled={cancel === "disabled"}
+            className="shrink-0 rounded-xl bg-canvas px-3.5 py-2 text-sm font-bold text-sub hover:bg-ink hover:text-white disabled:pointer-events-none disabled:opacity-40"
           >
             취소
           </button>

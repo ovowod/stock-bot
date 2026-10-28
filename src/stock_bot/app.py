@@ -273,6 +273,7 @@ def create_app(
                 "label": spec.label,
                 "market": spec.market.value,
                 "is_real": spec.is_real,
+                "orders_allowed": spec.orders_allowed,
             }
             for spec in ENVIRONMENTS.values()
         ]

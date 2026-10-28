@@ -16,7 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from stock_bot.auto_sell import AutoSell
-from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
+from stock_bot.config import ENVIRONMENTS, EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.fill_feed import FeedState, FeedStatus, Fill, FillFeed
 from stock_bot.kiwoom import KiwoomClient
@@ -36,8 +36,6 @@ from stock_bot.sl_tp_alerts import (
 
 logger = logging.getLogger("stock_bot.sl_tp_watch")
 
-# 지켜볼 투자 환경. 실전은 넣지 않는다. 국내 모의와 미국 모의는 인증정보·연결·설정이 따로다.
-WATCHED = (ENVIRONMENTS[Environment.DOMESTIC_PAPER], ENVIRONMENTS[Environment.US_PAPER])
 # 체결 알림에 "SL / TP 자동 매도"로 표시된다.
 AUTO_SELL_SOURCE = "SL / TP"
 # 시세 실시간 항목. 0B는 국내 주식체결, FE는 미국주식 실시간 체결가다.
@@ -137,8 +135,9 @@ class SlTpWatcher:
         self._watches: list[_Watch] = []
 
     def start(self) -> None:
-        """인증정보가 없는 모의 환경은 건너뛴다. Discord 설정과 상관없이 동작한다."""
-        for spec in WATCHED:
+        """인증정보가 없는 환경은 건너뛴다. Discord 설정과 상관없이 동작한다."""
+        # 주문 허용이 켜진 투자 환경만 지켜본다. 자동 매도를 보낼 수 없는 환경은 판정하지 않는다.
+        for spec in (s for s in ENVIRONMENTS.values() if s.orders_allowed):
             environment_var.set(spec.environment.value)
             try:
                 self.kiwoom.credentials(spec)
@@ -156,7 +155,7 @@ class SlTpWatcher:
         self._watches.clear()
 
     def settings_saved(self, spec: EnvironmentSpec, settings: dict[str, Any]) -> None:
-        """설정 저장이 성공했다. 지켜보지 않는 환경(실전, 인증정보 없음)은 무시한다."""
+        """설정 저장이 성공했다. 지켜보지 않는 환경(주문 허용이 꺼짐, 인증정보 없음)은 무시한다."""
         for watch in self._watches:
             if watch.spec is spec:
                 watch.settings_saved(settings)
@@ -775,9 +774,7 @@ class _Watch:
         연결 끊김만으로는 취소하지 않는다. 끊기기 전 체결가는 실제 체결이었다.
         """
         reason = None
-        if self.spec.is_real:
-            reason = "real_trading"
-        elif self._is_stopped():
+        if self._is_stopped():
             reason = "stopped"
         elif run is not self._run or not run.covers(self._session_at(self._owner.now())):
             reason = "session_changed"

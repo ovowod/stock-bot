@@ -63,13 +63,14 @@ def test_us_cancel_maps_the_exchange_to_kiwoom_codes(make_client, code, stex_tp)
     assert body_of(fake.calls("ust20003")[0])["stex_tp"] == stex_tp
 
 
-def test_us_real_cancels_are_refused_before_any_kiwoom_request(make_client):
+def test_us_real_cancels_stop_at_the_open_order_recheck(make_client):
     fake = us_kiwoom()
 
     response = make_client(fake).post("/api/environments/us_real/cancellations", json=cancel())
 
-    assert response.status_code == 403
-    assert fake.requests == []
+    assert response.status_code == 400
+    assert response.json()["error"]["kind"] == "cancel_not_supported"
+    assert fake.calls("ust20003") == []
 
 
 @pytest.mark.parametrize("order_no", ["", "0000002820", "12a"])

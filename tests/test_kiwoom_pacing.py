@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import dataclasses
 import logging
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import datetime, timedelta
@@ -17,8 +18,9 @@ from stock_bot.kiwoom import KiwoomClient
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, body_of, kiwoom_error, page_response
 
 DOMESTIC_PAPER = ENVIRONMENTS[Environment.DOMESTIC_PAPER]
-DOMESTIC_REAL = ENVIRONMENTS[Environment.DOMESTIC_REAL]
-US_REAL = ENVIRONMENTS[Environment.US_REAL]
+# 실전 주문 한도를 보려고 주문 허용을 켠다. 요청은 가짜 서버로만 간다.
+DOMESTIC_REAL = dataclasses.replace(ENVIRONMENTS[Environment.DOMESTIC_REAL], orders_allowed=True)
+US_REAL = dataclasses.replace(ENVIRONMENTS[Environment.US_REAL], orders_allowed=True)
 PATH = "/api/dostk/acnt"
 INTERVAL = 1.2
 # 피크타임(한국시간 9시대)이 아닌 기본 시각.

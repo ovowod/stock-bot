@@ -46,18 +46,20 @@ def test_domestic_limit_order_is_sent_to_kt10000_on_the_paper_domain(make_client
     assert body["accepted_at"]
 
 
-def test_real_environment_orders_are_refused_before_any_kiwoom_request(make_client, caplog):
+def test_real_environment_orders_never_reach_kiwoom(make_client, caplog):
     caplog.set_level(logging.INFO, logger="stock_bot")
-    fake = FakeKiwoom().reply("kt10000", ORDER_REPLY)
+    fake = FakeKiwoom().reply("kt10000", ORDER_REPLY).reply("ust20000", ORDER_REPLY)
     client = make_client(fake)
-    for environment in ("domestic_real", "us_real"):
-        # 입력이 틀려도 실전 차단이 먼저다.
-        for order in (domestic_order(), {"order_key": "x"}):
-            response = client.post(f"/api/environments/{environment}/orders", json=order)
-            assert response.status_code == 403
-            assert response.json()["error"]["kind"] == "order_not_allowed"
-    assert fake.requests == []
-    assert any(r.getMessage() == "order_blocked_real" for r in caplog.records)
+    orders = {
+        "domestic_real": domestic_order(),
+        "us_real": us_order(order_key="key-2"),
+    }
+    for environment, order in orders.items():
+        response = client.post(f"/api/environments/{environment}/orders", json=order)
+        assert response.status_code == 403
+        assert response.json()["error"]["kind"] == "order_not_allowed"
+    assert fake.calls("kt10000") == fake.calls("ust20000") == []
+    assert sum(r.getMessage() == "kiwoom_order_blocked" for r in caplog.records) == 2
 
 
 def test_invalid_orders_are_rejected_without_calling_kiwoom(make_client):
@@ -91,7 +93,7 @@ def test_invalid_orders_are_rejected_without_calling_kiwoom(make_client):
 def test_order_key_is_logged_on_receipt_even_when_the_order_is_rejected(make_client, caplog):
     """입력 검사·실전 차단으로 끝난 요청도 주문 키로 찾을 수 있다."""
     caplog.set_level(logging.INFO, logger="stock_bot")
-    client = make_client()
+    client = make_client(FakeKiwoom())
     client.post(DOMESTIC_URL, json=domestic_order(order_key="key-bad", quantity="0"))
     client.post("/api/environments/domestic_real/orders", json=domestic_order(order_key="key-real"))
     client.post(DOMESTIC_URL, content=b"not json")

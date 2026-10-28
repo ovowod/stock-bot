@@ -187,7 +187,7 @@ def test_real_environment_sells_send_nothing_to_kiwoom(make_client):
     response = make_client(fake).post("/api/environments/domestic_real/orders", json=sell_order())
 
     assert response.status_code == 403
-    assert fake.requests == []
+    assert fake.calls("kt10001") == []
 
 
 def test_domestic_market_sell_sends_trde_tp_3_without_a_price(make_client):
@@ -313,11 +313,14 @@ def test_us_real_sells_send_nothing_and_repeated_keys_order_once(make_client):
     fake.reply("ust20001", US_SELL_REPLY)
     client = make_client(fake)
     assert client.post("/api/environments/us_real/orders", json=us_sell()).status_code == 403
-    assert fake.requests == []
+    # 실전 매도는 잔고를 다시 확인한 뒤 관문에서 막힌다.
+    assert [r.url.host for r in fake.calls("ust21070")] == ["api.kiwoom.com"]
+    assert fake.calls("ust20001") == []
 
     assert client.post(US_URL, json=us_sell()).status_code == 200
     assert client.post(US_URL, json=us_sell()).status_code == 409
-    assert len(fake.calls("ust21070")) == 1
+    paper = [r for r in fake.calls("ust21070") if r.url.host == "mockapi.kiwoom.com"]
+    assert len(paper) == 1
     assert len(fake.calls("ust20001")) == 1
 
 

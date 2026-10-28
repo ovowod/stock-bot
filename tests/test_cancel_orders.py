@@ -66,7 +66,7 @@ def test_cancelling_all_remaining_rechecks_then_sends_kt10003_with_zero(make_cli
     }
 
 
-def test_real_environment_cancels_are_refused_before_any_kiwoom_request(make_client, caplog):
+def test_real_environment_cancels_stop_at_the_open_order_recheck(make_client, caplog):
     caplog.set_level(logging.INFO, logger="stock_bot")
     fake = kiwoom()
 
@@ -74,10 +74,11 @@ def test_real_environment_cancels_are_refused_before_any_kiwoom_request(make_cli
         "/api/environments/domestic_real/cancellations", json=cancel()
     )
 
-    assert response.status_code == 403
-    assert response.json()["error"]["kind"] == "order_not_allowed"
-    assert fake.requests == []
-    assert any(r.getMessage() == "cancel_blocked_real" for r in caplog.records)
+    assert response.status_code == 400
+    assert response.json()["error"]["kind"] == "cancel_not_supported"
+    assert api_ids(fake) == ["ka10075"]
+    blocked = [r for r in caplog.records if r.getMessage() == "cancel_blocked"]
+    assert [getattr(r, "fields", {})["reason"] for r in blocked] == ["real"]
 
 
 @pytest.mark.parametrize(

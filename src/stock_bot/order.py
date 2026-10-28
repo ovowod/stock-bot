@@ -120,13 +120,10 @@ class OrderService:
 
     async def place(self, spec: EnvironmentSpec, request: Any) -> dict[str, Any]:
         """request는 브라우저가 보낸 JSON 본문이다. 해석하지 못했으면 None이다."""
-        # 받은 즉시 주문 키를 남겨, 입력 검사나 실전 차단으로 끝난 요청도 추적할 수 있게 한다.
+        # 받은 즉시 주문 키를 남겨, 입력 검사로 끝난 요청도 추적할 수 있게 한다.
         order_key = request.get("order_key") if isinstance(request, dict) else None
         log(logger, logging.INFO, "order_received", order_key=order_key)
-        # 실전투자는 입력 검사보다 먼저, 키움을 부르기 전에 막는다.
-        if spec.is_real:
-            log(logger, logging.WARNING, "order_blocked_real", order_key=order_key)
-            raise AppError("order_not_allowed", "실전투자에서는 주문할 수 없습니다.", 403)
+        # 주문 허용이 꺼진 환경은 KiwoomClient가 보내기 직전에 막는다(ADR 0003).
         order = _validate(request, spec.market)
         self._claim_key(spec, order["order_key"])
         log(logger, logging.INFO, "order_requested", **order)
@@ -141,11 +138,6 @@ class OrderService:
 
     async def cancel(self, spec: EnvironmentSpec, request: Any) -> dict[str, Any]:
         """미체결 주문을 취소한다. request는 브라우저가 보낸 JSON 본문이다."""
-        # 실전투자는 입력 검사보다 먼저, 키움을 부르기 전에 막는다.
-        if spec.is_real:
-            order_key = request.get("order_key") if isinstance(request, dict) else None
-            log(logger, logging.WARNING, "cancel_blocked_real", order_key=order_key)
-            raise AppError("order_not_allowed", "실전투자에서는 주문 취소를 할 수 없습니다.", 403)
         cancel = _validate_cancel(request, spec.market)
         self._claim_key(spec, cancel["order_key"])
         log(logger, logging.INFO, "cancel_requested", **cancel)
@@ -169,9 +161,6 @@ class OrderService:
         이미 키움에 보낸 주문은 취소하지 않는다.
         """
         fields = {"order_key": order_key, "code": code}
-        if spec.is_real:
-            log(logger, logging.WARNING, "order_blocked_real", **fields)
-            return AutoSellResult("cancelled", cause="real_trading")
         log(logger, logging.INFO, "auto_sell_requested", **fields)
         # 수동 매도와 같은 잠금이라, 잔고 확인부터 주문 응답까지
         # 같은 매도 가능 수량을 함께 쓰지 않는다.

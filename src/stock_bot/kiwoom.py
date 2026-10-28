@@ -45,6 +45,36 @@ _EMBEDDED_CODE = re.compile(r"\[(\d{4}):")
 
 # 키움 문서 "주문" 메뉴의 TR. 나머지는 실전 한도에서 조회로 센다.
 ORDER_TR_IDS = frozenset({"kt10000", "kt10001", "kt10003", "ust20000", "ust20001", "ust20003"})
+# 주문 허용이 꺼진 투자 환경에서 보내지 않는 TR. 키움 문서에서 돈이나 주문 상태를 바꾸는 TR 전부다.
+# 같은 주소에 조회 TR이 섞여 있어(ust21204·ust31300 등) 주소가 아니라 TR로 막는다.
+MONEY_MOVING_TR_IDS = frozenset(
+    {
+        # 국내 주문(/api/dostk/ordr): 매수·매도·정정·취소, 금현물 매수·매도·정정·취소
+        "kt10000",
+        "kt10001",
+        "kt10002",
+        "kt10003",
+        "kt50000",
+        "kt50001",
+        "kt50002",
+        "kt50003",
+        # 국내 신용주문(/api/dostk/crdordr): 신용 매수·매도·정정·취소
+        "kt10006",
+        "kt10007",
+        "kt10008",
+        "kt10009",
+        # 미국 주문(/api/us/ordr): 매수·매도·정정·취소, 예약 매수·매도·취소
+        "ust20000",
+        "ust20001",
+        "ust20002",
+        "ust20003",
+        "ust21200",
+        "ust21201",
+        "ust21203",
+        # 미국 환전(/api/us/exchange): 환전 신청
+        "ust31302",
+    }
+)
 # 실전 묶음별 1초당 한도: (일반, 피크타임). 피크타임 한도는 미국만 있다.
 REAL_CALL_LIMITS: dict[str, tuple[int, int | None]] = {
     "domestic_order": (5, None),
@@ -422,6 +452,12 @@ class KiwoomClient:
         patient: bool = False,
     ) -> _Page:
         url = f"{spec.domain}{path}"
+        # 주문 허용이 꺼진 환경을 막는 유일한 관문. 모든 호출이 여기를 지나 보내지기 전에 막힌다.
+        if api_id in MONEY_MOVING_TR_IDS and not spec.orders_allowed:
+            log(logger, logging.WARNING, "kiwoom_order_blocked", api_id=api_id, target=url)
+            raise AppError(
+                "order_not_allowed", "실전투자에서는 주문할 수 없습니다.", 403, {"api_id": api_id}
+            )
         await self._pacer.wait(_pacing_unit(spec, api_id), api_id, patient)
         if ready is not None and not ready():
             # 호출 한도 자리는 이미 썼지만 보내지 않았다. 한도를 넘길 일은 없으므로 되돌리지 않는다.
