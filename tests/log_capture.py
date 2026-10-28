@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Any
 
-from stock_bot.logging_setup import JsonFormatter
+from stock_bot.core.logging_setup import JsonFormatter
 
 
 class JsonLines(logging.Handler):

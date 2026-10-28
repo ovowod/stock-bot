@@ -16,10 +16,11 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from stock_bot.account import AccountService
-from stock_bot.auth import AuthService, load_password
-from stock_bot.auto_sell import AutoSell
-from stock_bot.config import (
+from stock_bot.account.account import AccountService
+from stock_bot.account.holdings import Holdings
+from stock_bot.auth.auth import AuthService, load_password
+from stock_bot.auth.login import install_login
+from stock_bot.core.config import (
     DATA_DIR,
     ENVIRONMENTS,
     LOG_DIR,
@@ -28,23 +29,22 @@ from stock_bot.config import (
     load_env_file,
     parse_environment,
 )
-from stock_bot.errors import AppError, error_response
-from stock_bot.fill_feed import FillFeed
-from stock_bot.fill_watch import FillWatcher
-from stock_bot.holdings import Holdings
-from stock_bot.kiwoom import KiwoomClient
-from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
-from stock_bot.login import install_login
-from stock_bot.notification import DiscordNotifier, Embed
-from stock_bot.open_order import OpenOrderService
-from stock_bot.order import OrderService
-from stock_bot.order_alerts import cancel_embed
-from stock_bot.quote import QuoteService
-from stock_bot.ranking import RankingService
-from stock_bot.realtime import RealtimeConnect, RealtimeHub, connect_websocket
-from stock_bot.sl_tp import SlTpSettingsStore
-from stock_bot.sl_tp_watch import SlTpWatcher
-from stock_bot.stock_search import StockSearchService, today_kst
+from stock_bot.core.errors import AppError, error_response
+from stock_bot.core.logging_setup import environment_var, log, request_id_var, setup_logging
+from stock_bot.core.notification import DiscordNotifier, Embed
+from stock_bot.fill.feed import FillFeed
+from stock_bot.fill.watch import FillWatcher
+from stock_bot.kiwoom.kiwoom import KiwoomClient
+from stock_bot.kiwoom.realtime import RealtimeConnect, RealtimeHub, connect_websocket
+from stock_bot.market.quote import QuoteService
+from stock_bot.market.ranking import RankingService
+from stock_bot.market.stock_search import StockSearchService, today_kst
+from stock_bot.order.alerts import cancel_embed
+from stock_bot.order.auto_sell import AutoSell
+from stock_bot.order.open_order import OpenOrderService
+from stock_bot.order.order import OrderService
+from stock_bot.sl_tp.sl_tp import SlTpSettingsStore
+from stock_bot.sl_tp.watch import SlTpWatcher
 
 logger = logging.getLogger("stock_bot.api")
 
