@@ -9,13 +9,12 @@ from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
 from stock_bot.reader import Reader
+from stock_bot.us_exchange import US_EXCHANGE_CODES
 
 logger = logging.getLogger("stock_bot.quote")
 
 DOMESTIC_QUOTE_PATH = "/api/dostk/stkinfo"
 US_QUOTE_PATH = "/api/us/mrkcond"
-# 화면의 미국 거래소 이름 -> 키움 stex_tp. 미국 시세·주문 TR은 이 세 거래소만 받는다.
-US_EXCHANGE_CODES = {"NYSE": "NY", "NASDAQ": "ND", "AMEX": "NA"}
 
 
 class QuoteService:

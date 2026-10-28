@@ -309,6 +309,22 @@ test("미국 매도도 주문할 수 없는 거래소의 종목은 막고, 매�
   expect(orders).toEqual([]);
 });
 
+test("종목 목록에서 거래소를 찾지 못한 미국 보유종목은 거래소 확인 불가로 보이고 매도 버튼이 없다", async ({ page }) => {
+  const { orders } = await mockApi(page, {
+    usHoldings: [usHolding({ code: "ZZZZ", name: "목록에 없는 종목", exchange: null }), usHolding()],
+  });
+  await openDashboard(page);
+  await page.getByRole("radio", { name: "미국 모의" }).filter({ visible: true }).click();
+
+  const unknown = page.getByRole("listitem").filter({ hasText: "목록에 없는 종목" }).filter({ visible: true });
+  await expect(unknown.getByText("거래소 확인 불가").filter({ visible: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "목록에 없는 종목 매도" })).toHaveCount(0);
+  // 거래소를 아는 종목은 지금처럼 매도 패널이 열린다.
+  const dialog = await openSell(page, "미국 모의", "애플");
+  await expect(dialog).toContainText("NASDAQ");
+  expect(orders).toEqual([]);
+});
+
 const notHeld = (code: string): HoldingReply => ({
   body: { code, held: false, quantity: 0, sellable_quantity: 0, fetched_at: "2026-10-05T01:00:00+00:00" },
 });

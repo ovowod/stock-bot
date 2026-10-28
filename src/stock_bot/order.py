@@ -21,8 +21,8 @@ from stock_bot.errors import AppError, response_format_error
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
 from stock_bot.open_order import OpenOrder
-from stock_bot.quote import US_EXCHANGE_CODES
 from stock_bot.reader import Reader
+from stock_bot.us_exchange import US_EXCHANGE_CODES
 
 logger = logging.getLogger("stock_bot.order")
 

@@ -14,6 +14,7 @@ from stock_bot.errors import AppError, response_format_error
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
 from stock_bot.reader import Reader
+from stock_bot.us_exchange import US_EXCHANGE_NAMES
 
 logger = logging.getLogger("stock_bot.ranking")
 
@@ -34,7 +35,6 @@ PERIODS: dict[Market, dict[str, str]] = {
     Market.US: {"30s": "B286", "1m": "B281", "10m": "B282", "1h": "B283", "today": "B284"},
 }
 CONDITIONS = {"exchange": (EXCHANGES, "all"), "period": (PERIODS, "1h")}
-US_EXCHANGE_NAMES = {"NY": "NYSE", "ND": "NASDAQ", "NA": "AMEX"}
 # 전일대비기호: 1 상한가, 2 상승, 3 보합, 4 하한가, 5 하락
 DIRECTIONS = {"1": "up", "2": "up", "3": "flat", "4": "down", "5": "down"}
 # 미국 인기 종목의 부호: + 상승, - 하락, 빈값 보합

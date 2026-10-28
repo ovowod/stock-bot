@@ -213,6 +213,8 @@ function DomesticView({
   );
 }
 
+const NO_EXCHANGE = "거래소 확인 불가";
+
 function UsView({ data, onSold, openOrders }: { data: UsAccount; onSold: () => void; openOrders: ReactNode }) {
   const { summary, summary_krw: krw, deposit } = data;
   const openOrder = useOrderPanel();
@@ -290,9 +292,10 @@ function UsView({ data, onSold, openOrders }: { data: UsAccount; onSold: () => v
               name: h.name,
               quantity: formatCount(h.quantity),
               position: [formatCount(h.quantity), `현재가 ${price(h.current_price)}`],
+              badge: h.exchange === null ? NO_EXCHANGE : undefined,
               info: [
                 h.code,
-                h.exchange,
+                ...(h.exchange === null ? [] : [h.exchange]),
                 `평균 ${price(h.purchase_price)}`,
                 ...sellable(h.quantity, h.sellable_quantity),
               ],
@@ -300,19 +303,23 @@ function UsView({ data, onSold, openOrders }: { data: UsAccount; onSold: () => v
                 { label: "현재가", value: price(h.current_price) },
                 { label: "평균단가", value: price(h.purchase_price) },
                 { label: "종목코드", value: h.code },
-                { label: "거래소", value: h.exchange },
+                { label: "거래소", value: h.exchange ?? NO_EXCHANGE },
                 { label: "원화 평가금액", value: formatKrw(h.evaluation_amount_krw) },
                 ...sellableDetail(h.quantity, h.sellable_quantity),
               ],
-              onSell: () =>
-                openOrder({
-                  code: h.code,
-                  name: h.name,
-                  exchange: h.exchange,
-                  category: null,
-                  status: null,
-                  sell: { quantity: h.quantity, sellableQuantity: h.sellable_quantity, onAccepted: onSold },
-                }),
+              // 거래소를 모르면 잘못된 거래소로 매도가 나가지 않게 매도 버튼을 두지 않는다.
+              onSell:
+                h.exchange === null
+                  ? undefined
+                  : () =>
+                      openOrder({
+                        code: h.code,
+                        name: h.name,
+                        exchange: h.exchange,
+                        category: null,
+                        status: null,
+                        sell: { quantity: h.quantity, sellableQuantity: h.sellable_quantity, onAccepted: onSold },
+                      }),
               value: usd(h.evaluation_amount),
               valueSub: formatKrw(h.evaluation_amount_krw),
               change: (

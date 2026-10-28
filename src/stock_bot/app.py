@@ -33,6 +33,7 @@ from stock_bot.config import (
 from stock_bot.errors import AppError
 from stock_bot.fill_feed import FillFeed
 from stock_bot.fill_watch import FillWatcher
+from stock_bot.holdings import Holdings
 from stock_bot.kiwoom import KST, KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.masking import secrets
@@ -91,16 +92,17 @@ def create_app(
     kiwoom = KiwoomClient(environ, transport=transport)
     rankings = RankingService(kiwoom)
     stocks = StockSearchService(kiwoom, today or today_kst)
-    accounts = AccountService(kiwoom, stocks.listings)
+    holdings = Holdings(kiwoom, stocks.listings)
+    accounts = AccountService(kiwoom, holdings)
     quotes = QuoteService(kiwoom)
     open_orders = OpenOrderService(kiwoom, stocks.listings)
     orders = OrderService(
         kiwoom,
-        accounts.holding,
+        holdings.holding,
         # 취소 재확인은 미국 종목 목록이 꼭 있어야 거래소를 정할 수 있다.
         lambda spec: open_orders.orders(spec, listing_required=True),
         on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
-        fresh_holding=accounts.fresh_holding,
+        fresh_holding=holdings.fresh_holding,
     )
     now = now or (lambda: datetime.now(UTC))
     realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
@@ -110,7 +112,7 @@ def create_app(
     fills = FillWatcher(kiwoom, open_orders, notifier, feed, auto_sell)
     sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
     sl_tp_watch = SlTpWatcher(
-        kiwoom, sl_tp, accounts.positions, auto_sell, realtime, feed, notifier, now
+        kiwoom, sl_tp, holdings.positions, auto_sell, realtime, feed, notifier, now
     )
     sl_tp.on_saved = sl_tp_watch.settings_saved
 
@@ -288,7 +290,7 @@ def create_app(
     async def get_holding(environment: str, code: str) -> dict[str, Any]:
         spec = parse_environment(environment)
         environment_var.set(spec.environment.value)
-        holding = await accounts.holding(spec, code)
+        holding = await holdings.holding(spec, code)
         return {**holding, "fetched_at": datetime.now(UTC).isoformat(timespec="seconds")}
 
     @app.get("/api/environments/{environment}/open-orders")

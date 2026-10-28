@@ -17,6 +17,7 @@ from typing import Any
 from stock_bot.config import EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.logging_setup import log
+from stock_bot.us_exchange import US_EXCHANGES
 
 logger = logging.getLogger("stock_bot.sl_tp")
 
@@ -24,7 +25,6 @@ FORMAT_VERSION = 1
 TIMEZONES = {Market.DOMESTIC: "Asia/Seoul", Market.US: "America/New_York"}
 # 정규장. 휴장일·단축 거래일은 다루지 않는다(spec의 Out of Scope).
 REGULAR_HOURS = {Market.DOMESTIC: ("09:00", "15:30"), Market.US: ("09:30", "16:00")}
-US_EXCHANGES = ("NYSE", "NASDAQ", "AMEX")
 # fullmatch로 검사한다. "$"는 끝의 줄바꿈 앞에서도 맞고, \d는 아라비아 숫자 등도 받는다.
 _TIME = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _PERCENT = re.compile(r"[0-9]+(\.[0-9]{1,2})?")

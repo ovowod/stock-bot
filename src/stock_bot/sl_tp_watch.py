@@ -22,7 +22,6 @@ from stock_bot.fill_feed import FeedState, FeedStatus, Fill, FillFeed
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import DiscordNotifier, Embed, EmbedField
-from stock_bot.quote import US_EXCHANGE_CODES
 from stock_bot.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
 from stock_bot.sl_tp import TIMEZONES, SlTpSettingsStore
 from stock_bot.sl_tp_alerts import (
@@ -33,6 +32,7 @@ from stock_bot.sl_tp_alerts import (
     stopped_embed,
     unknown_embed,
 )
+from stock_bot.us_exchange import US_EXCHANGE_CODES
 
 logger = logging.getLogger("stock_bot.sl_tp_watch")
 
