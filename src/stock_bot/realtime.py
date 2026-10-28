@@ -9,6 +9,7 @@ import contextvars
 import json
 import logging
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -92,22 +93,10 @@ EventHandler = Callable[[RealtimeEvent], Awaitable[None]]
 ImmediateHandler = Callable[[RealtimeEvent], None]
 
 
-class Channel:
-    """한 기능이 한 연결에 내는 구독. 이벤트는 채널마다 따로 큐에 쌓아 순서대로 handler에 넘긴다.
+class Channel(ABC):
+    """한 기능이 한 연결에 내는 구독. 이벤트를 넘기는 방식은 아래 두 채널이 정한다."""
 
-    채널마다 큐가 따로라서 한 기능의 처리가 늦어도 다른 기능의 이벤트는 늦어지지 않는다.
-    immediate handler로 연 채널은 큐 없이 받는 자리에서 바로 넘긴다. 그래서 같은 메시지의
-    다른 항목이 다른 채널의 큐에서 처리되기 전에 끝난다.
-    """
-
-    def __init__(
-        self,
-        link: _Link,
-        feature: str,
-        label: str,
-        handler: EventHandler | None = None,
-        immediate: ImmediateHandler | None = None,
-    ) -> None:
+    def __init__(self, link: _Link, feature: str, label: str) -> None:
         self.feature = feature
         # 밀려남 중단 알림에 쓰는 기능 이름. 여러 기능이 함께 쓰는 채널은 이름이 여럿이다.
         self.labels = [label] if label else []
@@ -115,9 +104,6 @@ class Channel:
         # 구독을 바꿀 때마다 는다. 연결은 보낸 버전과 비교해 다시 보낼지 정한다.
         self.version = 0
         self._link = link
-        self._immediate = immediate
-        self._queue: asyncio.Queue[RealtimeEvent] = asyncio.Queue()
-        self._worker = asyncio.create_task(self._work(handler)) if handler is not None else None
 
     def subscribe(self, subscription: Subscription | None) -> None:
         """구독을 바꾼다. None이면 해지한다. 같은 구독을 다시 넣으면 REG를 다시 보낸다."""
@@ -141,30 +127,11 @@ class Channel:
         """
         return self._link.connection
 
-    def put(self, event: RealtimeEvent) -> None:
-        if self._immediate is None:
-            self._queue.put_nowait(event)
-            return
-        try:
-            # handler가 바꾼 요청 ID 같은 로그 context가 받는 쪽의 다음 로그에 남지 않게 한다.
-            contextvars.copy_context().run(self._immediate, event)
-        except Exception as exc:
-            # 받는 자리에서 오류가 새면 연결이 끊긴다. 남기고 다음 이벤트를 받는다.
-            self._failed(event, exc)
+    @abstractmethod
+    def put(self, event: RealtimeEvent) -> None: ...
 
     async def close(self) -> None:
-        if self._worker is not None:
-            self._worker.cancel()
-            await asyncio.gather(self._worker, return_exceptions=True)
-
-    async def _work(self, handler: EventHandler) -> None:
-        while True:
-            event = await self._queue.get()
-            try:
-                await handler(event)
-            except Exception as exc:
-                # 이벤트 하나의 처리 오류로 작업자가 멈추면 그 뒤 이벤트를 모두 놓친다.
-                self._failed(event, exc)
+        return None
 
     def _failed(self, event: RealtimeEvent, exc: Exception) -> None:
         logger.error(
@@ -178,6 +145,53 @@ class Channel:
                 }
             },
         )
+
+
+class _QueuedChannel(Channel):
+    """이벤트를 채널마다 따로 큐에 쌓아 순서대로 handler에 넘긴다.
+
+    채널마다 큐가 따로라서 한 기능의 처리가 늦어도 다른 기능의 이벤트는 늦어지지 않는다.
+    """
+
+    def __init__(self, link: _Link, feature: str, label: str, handler: EventHandler) -> None:
+        super().__init__(link, feature, label)
+        self._queue: asyncio.Queue[RealtimeEvent] = asyncio.Queue()
+        self._worker = asyncio.create_task(self._work(handler))
+
+    def put(self, event: RealtimeEvent) -> None:
+        self._queue.put_nowait(event)
+
+    async def close(self) -> None:
+        self._worker.cancel()
+        await asyncio.gather(self._worker, return_exceptions=True)
+
+    async def _work(self, handler: EventHandler) -> None:
+        while True:
+            event = await self._queue.get()
+            try:
+                await handler(event)
+            except Exception as exc:
+                # 이벤트 하나의 처리 오류로 작업자가 멈추면 그 뒤 이벤트를 모두 놓친다.
+                self._failed(event, exc)
+
+
+class _ImmediateChannel(Channel):
+    """큐 없이 받는 자리에서 바로 handler에 넘긴다.
+
+    그래서 같은 메시지의 다른 항목이 다른 채널의 큐에서 처리되기 전에 끝난다.
+    """
+
+    def __init__(self, link: _Link, feature: str, label: str, handler: ImmediateHandler) -> None:
+        super().__init__(link, feature, label)
+        self._handler = handler
+
+    def put(self, event: RealtimeEvent) -> None:
+        try:
+            # handler가 바꾼 요청 ID 같은 로그 context가 받는 쪽의 다음 로그에 남지 않게 한다.
+            contextvars.copy_context().run(self._handler, event)
+        except Exception as exc:
+            # 받는 자리에서 오류가 새면 연결이 끊긴다. 남기고 다음 이벤트를 받는다.
+            self._failed(event, exc)
 
 
 class RealtimeHub:
@@ -200,14 +214,14 @@ class RealtimeHub:
     ) -> Channel:
         """spec의 인증정보 연결에 채널을 연다. 연결은 구독이 생길 때 연다."""
         link = self._link(spec)
-        return link.add(Channel(link, feature, label, handler))
+        return link.add(_QueuedChannel(link, feature, label, handler))
 
     def immediate_channel(
         self, spec: EnvironmentSpec, feature: str, label: str, handler: ImmediateHandler
     ) -> Channel:
         """큐 없이 받는 자리에서 바로 handler를 부르는 채널을 연다."""
         link = self._link(spec)
-        return link.add(Channel(link, feature, label, immediate=handler))
+        return link.add(_ImmediateChannel(link, feature, label, handler))
 
     def _link(self, spec: EnvironmentSpec) -> _Link:
         link = self._links.get(spec.credential_prefix)
@@ -449,6 +463,8 @@ class _Link:
         replies: asyncio.Queue[dict[str, Any]],
     ) -> None:
         """구독 변경을 하나씩 보낸다. 새 연결은 살아 있는 구독을 모두 다시 등록한다.
+
+        다시 등록은 채널을 연 순서대로 한다.
 
         키움의 REG/REMOVE 응답에는 어느 요청의 응답인지 알 단서가 없어,
         응답을 받은 뒤 다음을 보낸다.

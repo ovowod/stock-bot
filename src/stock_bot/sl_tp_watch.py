@@ -331,7 +331,7 @@ class _Watch:
         if self._unsubscribe_fills is None:
             # 거부된 등록은 체결 feed가 다시 시도한다. 이미 알고 있는 상태는 바로 받는다.
             self._unsubscribe_fills = self._owner.feed.subscribe(
-                self.spec, "SL / TP", self._on_feed
+                self.spec, "sl_tp", "SL / TP", self._on_feed
             )
         self._request_refresh(new, "session_started")
 
@@ -360,6 +360,9 @@ class _Watch:
             run.refresh = self._spawn(self._refresh(run))
 
     async def _refresh(self, run: _Run) -> None:
+        # 체결 feed 안에서 시작되면 그 체결의 요청 ID를 이어받는다. 다시 읽기는 여러 체결을
+        # 합치므로 어느 한 체결의 ID로 남기지 않는다. 이 작업의 context만 바뀐다.
+        request_id_var.set("-")
         delay = HOLDINGS_RETRY_INITIAL_SECONDS
         while True:
             # 연결이 없으면 읽지 않고 기다린다. 읽은 뒤 연결되면 그사이 체결을 놓친다.

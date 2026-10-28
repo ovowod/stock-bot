@@ -240,9 +240,11 @@ async def test_fill_feed_registers_only_the_real_markets_that_are_subscribed():
     hub = RealtimeHub(kiwoom, DiscordNotifier({}), realtime, Clock())
     feed = FillFeed(hub)
     try:
-        domestic = feed.subscribe(ENVIRONMENTS[Environment.DOMESTIC_REAL], "체결 감시", ignore)
+        domestic = feed.subscribe(
+            ENVIRONMENTS[Environment.DOMESTIC_REAL], "fill_watch", "체결 감시", ignore
+        )
         [connection] = await realtime.wait_registered()
-        us = feed.subscribe(ENVIRONMENTS[Environment.US_REAL], "체결 감시", ignore)
+        us = feed.subscribe(ENVIRONMENTS[Environment.US_REAL], "fill_watch", "체결 감시", ignore)
         await wait_until(lambda: len(connection.requests("REG")) == 2)
         domestic()
         us()

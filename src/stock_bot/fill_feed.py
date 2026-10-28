@@ -94,18 +94,21 @@ class FillFeed:
         self._hub = hub
         # 인증정보(credential_prefix)마다 등록 하나.
         self._lines: dict[str, _Line] = {}
+        # 채널을 미리 열어 둔다. 연결은 채널을 연 순서대로 다시 등록하므로, 재연결 때
+        # 나중에 여는 SL / TP 시세보다 체결 등록이 먼저 나간다. 구독이 없으면 연결은 열지 않는다.
+        for spec in ENVIRONMENTS.values():
+            if spec.credential_prefix not in self._lines:
+                self._lines[spec.credential_prefix] = _Line(hub, spec)
 
     def subscribe(
-        self, spec: EnvironmentSpec, label: str, handler: FillHandler
+        self, spec: EnvironmentSpec, feature: str, label: str, handler: FillHandler
     ) -> Callable[[], None]:
         """spec 투자 환경의 체결을 신청한다. 돌려준 함수를 부르면 해지한다.
 
-        label은 밀려남 중단 알림에 쓰는 기능 이름이다.
+        feature는 로그에 남기는 기능 이름, label은 밀려남 중단 알림에 쓰는 기능 이름이다.
         """
-        line = self._lines.get(spec.credential_prefix)
-        if line is None:
-            line = self._lines[spec.credential_prefix] = _Line(self._hub, spec)
-        return line.subscribe(_Subscriber(spec, label, handler))
+        line = self._lines[spec.credential_prefix]
+        return line.subscribe(_Subscriber(spec, feature, label, handler))
 
     async def stop(self) -> None:
         for line in self._lines.values():
@@ -115,6 +118,7 @@ class FillFeed:
 @dataclass(eq=False)
 class _Subscriber:
     spec: EnvironmentSpec
+    feature: str
     label: str
     handler: FillHandler
 
@@ -149,7 +153,7 @@ class _Line:
             logging.INFO,
             "fill_feed_subscribed",
             environment=subscriber.spec.environment.value,
-            feature=subscriber.label,
+            feature=subscriber.feature,
         )
         if not self._register() and self._status is not None:
             # 등록 항목이 그대로면 다시 등록하지 않고 기억한 상태를 바로 알린다.
@@ -164,7 +168,7 @@ class _Line:
                 logging.INFO,
                 "fill_feed_unsubscribed",
                 environment=subscriber.spec.environment.value,
-                feature=subscriber.label,
+                feature=subscriber.feature,
             )
             self._register()
 
@@ -181,7 +185,7 @@ class _Line:
             return False
         self._types = types
         # 새 항목의 등록 결과가 나오기 전에 예전 상태를 알리지 않는다.
-        self._status = None
+        self._set_status(None)
         self._cancel_retry()
         self._delay = REGISTER_RETRY_INITIAL_SECONDS
         self._subscribe()
@@ -219,7 +223,7 @@ class _Line:
             log(
                 logger,
                 logging.WARNING,
-                "fill_watch_register_retry",
+                "fill_feed_register_retry",
                 target=self._spec.realtime_url,
                 type=self._types,
                 wait_seconds=self._delay,
@@ -230,7 +234,7 @@ class _Line:
             self._set_status(FeedStatus(FeedState.REJECTED, event.detail))
         elif event.kind is EventKind.DISCONNECTED:
             # 다시 연결되면 등록 결과가 새로 온다. 그 전에는 예전 상태를 알리지 않는다.
-            self._status = None
+            self._set_status(None)
 
     async def _register_later(self, delay: float) -> None:
         """밀려나 멈춘 연결이면 다시 등록해도 연결을 열지 않는다."""
@@ -239,10 +243,23 @@ class _Line:
         if self._types:
             self._subscribe()
 
-    def _set_status(self, status: FeedStatus) -> None:
+    def _set_status(self, status: FeedStatus | None) -> None:
+        """등록 상태를 바꾼다. None은 모른다는 뜻이고 알리지 않는다. 아는 상태는 매번 알린다."""
+        before = None if self._status is None else self._status.state
+        after = None if status is None else status.state
         self._status = status
-        for subscriber in list(self._subscribers):
-            self._deliver(subscriber, status)
+        if before != after:
+            log(
+                logger,
+                logging.INFO,
+                "fill_feed_status_changed",
+                environment=self._names,
+                state=after or "unknown",
+                type=self._types,
+            )
+        if status is not None:
+            for subscriber in list(self._subscribers):
+                self._deliver(subscriber, status)
 
     def _on_item(self, item: Any, event: RealtimeEvent) -> None:
         # 체결 하나의 수신·처리·알림 로그를 같은 ID로 묶는다.
@@ -296,7 +313,7 @@ class _Line:
             logger.error(
                 "fill_feed_handler_failed",
                 exc_info=exc,
-                extra={"fields": {"feature": subscriber.label, "error_type": type(exc).__name__}},
+                extra={"fields": {"feature": subscriber.feature, "error_type": type(exc).__name__}},
             )
 
 

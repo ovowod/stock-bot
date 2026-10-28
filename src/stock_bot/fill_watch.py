@@ -38,7 +38,8 @@ WATCHES: tuple[tuple[EnvironmentSpec, ...], ...] = (
     (ENVIRONMENTS[Environment.US_PAPER],),
     (ENVIRONMENTS[Environment.DOMESTIC_REAL], ENVIRONMENTS[Environment.US_REAL]),
 )
-# 밀려남 중단 알림에 쓰는 기능 이름.
+# 로그에 남기는 기능 이름과 밀려남 중단 알림에 쓰는 기능 이름.
+FEATURE = "fill_watch"
 LABEL = "체결 감시"
 
 
@@ -97,7 +98,7 @@ class FillWatcher:
             )
             # 끊긴 동안의 체결은 보충하지 않는다. 공유 연결이 다시 연결해 등록만 한다.
             for each in watch:
-                self._feed.subscribe(each, LABEL, self._on_fill)
+                self._feed.subscribe(each, FEATURE, LABEL, self._on_fill)
 
     async def stop(self) -> None:
         if self._worker is not None:

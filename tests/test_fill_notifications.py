@@ -331,9 +331,12 @@ async def test_connection_and_fill_steps_are_logged_without_secrets(caplog):
         "realtime_connected",
         "realtime_logged_in",
         "realtime_registered",
+        "fill_feed_status_changed",
         "fill_received",
         "open_orders_fetched",
         "fill_notified",
+        # 서버를 끄며 연결이 끊겨 등록 상태를 모름으로 되돌린다.
+        "fill_feed_status_changed",
     ]
     received = next(r for r in caplog.records if r.getMessage() == "fill_received")
     assert received.fields["order_no"] == "0000018"
@@ -442,7 +445,7 @@ def waits(caplog) -> list[float]:
     ]
 
 
-async def test_reconnects_and_registers_again_after_drop(fast_reconnect):
+async def test_reconnects_and_registers_again_after_drop(fast_reconnect, caplog):
     realtime = FakeRealtime()
     discord = FakeDiscord()
     async with running(realtime, discord):
@@ -455,6 +458,11 @@ async def test_reconnects_and_registers_again_after_drop(fast_reconnect):
     assert first.closed
     assert second.sent_trnm() == ["LOGIN", "REG"]
     assert fields(discord.payloads[0])["이번 체결"] == "3주 @ 60,000원 (180,000원)"
+    # 끊기면 등록 상태를 모름으로 되돌리고, 다시 등록되면 받는 중이 된다. 마지막은 서버 종료다.
+    states = [
+        r.fields["state"] for r in caplog.records if r.getMessage() == "fill_feed_status_changed"
+    ]
+    assert states == ["live", "unknown", "live", "unknown"]
 
 
 async def test_retries_when_connection_is_refused(fast_reconnect, caplog):
@@ -494,7 +502,7 @@ def register_waits(caplog) -> list[float]:
     return [
         r.fields["wait_seconds"]
         for r in caplog.records
-        if r.getMessage() == "fill_watch_register_retry"
+        if r.getMessage() == "fill_feed_register_retry"
     ]
 
 

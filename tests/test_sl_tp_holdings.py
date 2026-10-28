@@ -367,7 +367,7 @@ async def test_joining_a_rejected_fill_registration_learns_the_rejection(
     realtime = rejecting_fills()
     kiwoom = sl_tp_kiwoom().reply("ka10075", {"oso": []})
     async with running(realtime, kiwoom, data_dir, clock, discord=FakeDiscord()):
-        await wait_until(lambda: "fill_watch_register_retry" in messages(caplog))
+        await wait_until(lambda: "fill_feed_register_retry" in messages(caplog))
         clock.at = AT_10
         connection = await watching(realtime)
         await wait_until(lambda: "sl_tp_subscription_rejected" in messages(caplog))
@@ -468,6 +468,37 @@ async def test_session_starting_while_disconnected_reads_holdings_after_reconnec
     assert second is realtime.connections[1]
     # 다시 붙은 연결로 한 번 읽었고, 그 연결의 CONNECTED로 또 읽지 않았다.
     assert len(kiwoom.calls("kt00018")) == 1
+
+
+async def test_reconnect_registers_fills_before_quotes(data_dir):
+    # Discord가 꺼져 있어도 예전처럼 체결(그룹 1)을 시세(그룹 2)보다 먼저 다시 등록한다.
+    write_settings(data_dir)
+    realtime = FakeRealtime()
+    async with running(realtime, sl_tp_kiwoom(), data_dir):
+        first = await watching(realtime)
+        first.drop()
+        await wait_until(lambda: len(realtime.connections) == 2)
+        second = realtime.connections[1]
+        await wait_until(lambda: len(second.requests("REG")) == 2)
+
+    assert [m["grp_no"] for m in second.requests("REG")] == ["1", "2"]
+
+
+async def test_reread_logs_do_not_carry_the_fill_request_id(data_dir, json_logs: JsonLines):
+    write_settings(data_dir)
+    realtime = FakeRealtime()
+    kiwoom = sl_tp_kiwoom()
+    async with running(realtime, kiwoom, data_dir):
+        connection = await watching(realtime)
+        connection.push(fill_event())
+        await wait_until(lambda: len(kiwoom.calls("kt00018")) == 2)
+        await settle()
+
+    # 다시 읽기는 여러 체결을 합치므로 어느 한 체결의 요청 ID로 남기지 않는다.
+    received = next(line for line in json_logs.lines if line["event"] == "fill_received")
+    refreshed = [line for line in json_logs.lines if line["event"] == "sl_tp_holdings_refreshed"]
+    assert len(refreshed) == 2
+    assert all(line["request_id"] != received["request_id"] for line in refreshed)
 
 
 async def test_replaced_connection_names_sl_tp_once_when_it_is_alone(data_dir, caplog):

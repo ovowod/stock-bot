@@ -454,7 +454,7 @@ async def test_rejected_fill_registration_is_announced_once_while_retrying(
     async with running(realtime, notify_kiwoom(), data_dir, discord=discord):
         await wait_until(lambda: bool(titled(discord, "SL / TP 판정 중단")))
         # 체결 feed가 다시 시도해 거부가 이어져도 다시 알리지 않는다.
-        await wait_until(lambda: messages(caplog).count("fill_watch_register_retry") >= 4)
+        await wait_until(lambda: messages(caplog).count("fill_feed_register_retry") >= 4)
         await settle()
 
     [payload] = titled(discord, "SL / TP 판정 중단")
