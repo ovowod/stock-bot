@@ -69,10 +69,12 @@ Status: ready-for-agent
 - 주문 키는 관문에 막혀도 쓴 것으로 남는다.
 - 매도는 잔고 재확인(조회)을 거친 뒤 관문에서 막힌다.
 - 취소는 미체결 재확인(조회)에서 400 `cancel_not_supported`(이유 `real`)로 끝나 관문까지 가지 않는다. 미체결의 `blocked_reason="real"`도 같은 스위치를 읽으므로, 스위치를 켜면 함께 풀린다.
-- 실전 자동 매도는 SL / TP를 켤 수 없어 일어나지 않는다. 일어나도 관문에 막혀 "매도 실패"로 끝난다.
+- 실전 자동 매도는 SL / TP가 실전을 지켜보지 않아 일어나지 않는다. 일어나도 관문에 막혀 "매도 실패"로 끝난다.
 
-**스위치를 읽는 화면 규칙**
+**스위치를 읽는 규칙**
 
+- `sl_tp_watch.py`: 지켜볼 투자 환경은 국내·미국 모의로 고정한 `WATCHED` 대신 주문 허용이 켜진 환경이다. 스위치를 켜면 실전 SL / TP도 동작한다.
+  - 국내 실전과 미국 실전은 실시간 연결 하나를 함께 쓰고, 두 SL / TP 모두 시세 그룹 번호 `2`를 쓴다. SL / TP는 켜진 세션 동안만 시세를 등록하고 두 시장의 정규장은 겹치지 않으므로, 두 등록이 동시에 있지 않다.
 - `sl_tp.py`: `can_enable`은 `spec.orders_allowed`다. 저장·읽기에서 켜진 세션을 거부하는 조건도 `not spec.orders_allowed`다.
 - `open_order.py`: 국내·미국 모두 `not spec.orders_allowed`면 `blocked_reason="real"`이다. 이유 코드는 그대로 둔다. 스위치가 꺼질 수 있는 환경은 실전뿐이다.
 - `/api/environments`에 `orders_allowed`를 더한다.
@@ -107,6 +109,7 @@ Status: ready-for-agent
   - 관문: 주문 TR이 나간다.
   - 수동 주문 API: 주문 TR이 나간다.
   - SL / TP: `can_enable`이 `True`이고 켠 세션을 저장할 수 있다.
+  - SL / TP 감시: 실전 보유종목을 실전 도메인에서 읽고 실전 실시간 주소로 시세를 등록한다.
   - 미체결: `cancelable`이 `True`다.
   - `/api/environments`: `orders_allowed`가 `true`다.
   - 자동 매도와 취소의 전체 흐름은 시험하지 않는다. 관문과 미체결 표시를 위에서 따로 확인한다.
@@ -116,7 +119,7 @@ Status: ready-for-agent
 
 ## Out of Scope
 
-- 실전 주문 열기와 스위치를 `.env`로 옮기는 일.
+- 실전 주문 열기와 스위치를 `.env`로 옮기는 일. 열 때는 실전에서 주문·취소·SL / TP를 직접 확인한다. 실전 SL / TP의 장구분(290)·체결가 형식, 실전 실시간 종목 등록 한도(계정당 200개)는 모의투자에서만 확인됐다.
 - 수동 주문과 자동 매도의 스위치 나누기.
 - WebSocket. 주문을 보내지 않는다.
 - 호출 한도의 `ORDER_TR_IDS` 분류 바꾸기.
@@ -128,6 +131,10 @@ Status: ready-for-agent
 - 아키텍처 점검(2026-10-27)의 후보 05다. 04 보유종목·거래소 판정보다 먼저 한다(2026-10-28 사용자 결정).
 - 결정 기록: `docs/adr/0003-orders-blocked-at-kiwoom-client.md`.
 - 작업 순서: branch `refactor/order-switch` 하나에 ① 스위치와 관문 ② 위쪽 검사 정리 ③ 화면을 커밋별로 두고 PR 하나로 올린다.
+
+## Implementation Notes
+
+- 2026-10-28 구현 중 `sl_tp_watch.py`의 `WATCHED`가 실전을 따로 빼고 있음을 찾았다. 사용자와 확인해 감시 대상도 스위치를 따르게 했다(Q5 "스위치 하나"를 그대로 지킨다).
 
 ## Review Log
 

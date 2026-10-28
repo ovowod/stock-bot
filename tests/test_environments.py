@@ -11,10 +11,34 @@ def test_lists_the_four_trading_environments_without_credentials(make_client):
 
     assert response.status_code == 200
     assert response.json() == [
-        {"value": "domestic_real", "label": "국내 실전", "market": "domestic", "is_real": True},
-        {"value": "us_real", "label": "미국 실전", "market": "us", "is_real": True},
-        {"value": "domestic_paper", "label": "국내 모의", "market": "domestic", "is_real": False},
-        {"value": "us_paper", "label": "미국 모의", "market": "us", "is_real": False},
+        {
+            "value": "domestic_real",
+            "label": "국내 실전",
+            "market": "domestic",
+            "is_real": True,
+            "orders_allowed": False,
+        },
+        {
+            "value": "us_real",
+            "label": "미국 실전",
+            "market": "us",
+            "is_real": True,
+            "orders_allowed": False,
+        },
+        {
+            "value": "domestic_paper",
+            "label": "국내 모의",
+            "market": "domestic",
+            "is_real": False,
+            "orders_allowed": True,
+        },
+        {
+            "value": "us_paper",
+            "label": "미국 모의",
+            "market": "us",
+            "is_real": False,
+            "orders_allowed": True,
+        },
     ]
     assert "key" not in response.text.lower()
 

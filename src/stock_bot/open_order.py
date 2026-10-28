@@ -207,7 +207,7 @@ def _us_order(row: Reader, spec: EnvironmentSpec, listings: dict[str, dict[str, 
     listing = listings.get(code, {})
     exchange = listing.get("exchange")
     price = _optional_number(row, "ord_uv")
-    if spec.is_real:
+    if not spec.orders_allowed:
         blocked: str | None = "real"
     elif row.optional("rsrv_tp") in US_RESERVED:
         # 예약주문은 다른 TR(ust21203)로 취소한다.
@@ -257,8 +257,11 @@ def _optional_integer(row: Reader, key: str) -> int | None:
 
 
 def _blocked_reason(row: Reader, spec: EnvironmentSpec, side_label: str) -> str | None:
-    """이 앱에서 취소할 수 없는 이유. 여러 이유가 겹치면 실전, 신용, 거래소 순으로 하나만 준다."""
-    if spec.is_real:
+    """이 앱에서 취소할 수 없는 이유. 여러 이유가 겹치면 실전, 신용, 거래소 순으로 하나만 준다.
+
+    실전은 주문 허용이 꺼진 환경이다.
+    """
+    if not spec.orders_allowed:
         return "real"
     if "신용" in side_label:
         return "credit"

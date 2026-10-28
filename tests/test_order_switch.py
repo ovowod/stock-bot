@@ -12,6 +12,11 @@ from stock_bot.config import ENVIRONMENTS, Environment
 from stock_bot.errors import AppError
 from stock_bot.kiwoom import KiwoomClient
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom
+from tests.fake_realtime import FakeRealtime
+from tests.test_fill_notifications import REAL_ENV
+from tests.test_open_orders import OPEN_ORDER
+from tests.test_orders import domestic_order
+from tests.test_sl_tp_auto_sell import running, session, sl_tp_kiwoom, watching, write_settings
 
 DOMESTIC_REAL = ENVIRONMENTS[Environment.DOMESTIC_REAL]
 ORDER_REPLY = {"ord_no": "00024", "return_code": 0, "return_msg": "정상"}
@@ -142,3 +147,63 @@ async def test_switching_orders_on_lets_real_orders_through():
     )
 
     assert len(fake.calls("kt10000")) == 1
+
+
+@pytest.fixture
+def real_orders_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """실전 두 환경의 주문 허용을 켠다. 요청은 가짜 키움 서버로만 간다."""
+    for environment in (Environment.DOMESTIC_REAL, Environment.US_REAL):
+        on = dataclasses.replace(ENVIRONMENTS[environment], orders_allowed=True)
+        monkeypatch.setitem(ENVIRONMENTS, environment, on)
+
+
+def test_environment_list_reports_the_switch(make_client, real_orders_on):
+    environments = make_client().get("/api/environments").json()
+
+    assert {e["value"]: e["orders_allowed"] for e in environments} == {
+        "domestic_real": True,
+        "us_real": True,
+        "domestic_paper": True,
+        "us_paper": True,
+    }
+
+
+def test_switching_orders_on_lets_real_manual_orders_through(make_client, real_orders_on):
+    fake = FakeKiwoom().reply("kt10000", ORDER_REPLY)
+
+    response = make_client(fake).post(
+        "/api/environments/domestic_real/orders", json=domestic_order()
+    )
+
+    assert response.status_code == 200
+    [request] = fake.calls("kt10000")
+    assert request.url.host == "api.kiwoom.com"
+
+
+def test_switching_orders_on_makes_real_open_orders_cancelable(make_client, real_orders_on):
+    fake = FakeKiwoom().reply("ka10075", {"oso": [OPEN_ORDER]})
+
+    [order] = make_client(fake).get("/api/environments/domestic_real/open-orders").json()["orders"]
+
+    assert (order["cancelable"], order["blocked_reason"]) == (True, None)
+
+
+def test_switching_orders_on_lets_real_sl_tp_sessions_be_enabled(make_client, real_orders_on):
+    client = make_client()
+    url = "/api/environments/domestic_real/sl-tp"
+
+    assert client.get(url).json()["can_enable"] is True
+    response = client.put(url, json={"excluded": [], "sessions": [session(enabled=True)]})
+    assert response.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_switching_orders_on_makes_sl_tp_watch_real_holdings(data_dir, real_orders_on):
+    write_settings(data_dir, session(), environment="domestic_real")
+    realtime = FakeRealtime()
+    kiwoom = sl_tp_kiwoom()
+    async with running(realtime, kiwoom, data_dir, environ=REAL_ENV):
+        connection = await watching(realtime)
+
+    assert kiwoom.calls("kt00018")[0].url.host == "api.kiwoom.com"
+    assert connection.url == "wss://api.kiwoom.com:10000/api/websocket"
