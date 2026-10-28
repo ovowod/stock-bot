@@ -46,6 +46,8 @@ class EnvironmentSpec:
     is_real: bool
     credential_prefix: str
     domain: str
+    # 키움에 돈이 움직이는 요청(주문·취소·환전 등)을 보내도 되는지. 실전을 열 때 .env로 옮긴다.
+    orders_allowed: bool
 
     @property
     def realtime_url(self) -> str:
@@ -57,9 +59,23 @@ ENVIRONMENTS: dict[Environment, EnvironmentSpec] = {
     spec.environment: spec
     for spec in (
         EnvironmentSpec(
-            Environment.DOMESTIC_REAL, "국내 실전", Market.DOMESTIC, True, "REAL", REAL_DOMAIN
+            Environment.DOMESTIC_REAL,
+            "국내 실전",
+            Market.DOMESTIC,
+            True,
+            "REAL",
+            REAL_DOMAIN,
+            orders_allowed=False,
         ),
-        EnvironmentSpec(Environment.US_REAL, "미국 실전", Market.US, True, "REAL", REAL_DOMAIN),
+        EnvironmentSpec(
+            Environment.US_REAL,
+            "미국 실전",
+            Market.US,
+            True,
+            "REAL",
+            REAL_DOMAIN,
+            orders_allowed=False,
+        ),
         EnvironmentSpec(
             Environment.DOMESTIC_PAPER,
             "국내 모의",
@@ -67,9 +83,16 @@ ENVIRONMENTS: dict[Environment, EnvironmentSpec] = {
             False,
             "PAPER_KR",
             PAPER_DOMAIN,
+            orders_allowed=True,
         ),
         EnvironmentSpec(
-            Environment.US_PAPER, "미국 모의", Market.US, False, "PAPER_US", PAPER_DOMAIN
+            Environment.US_PAPER,
+            "미국 모의",
+            Market.US,
+            False,
+            "PAPER_US",
+            PAPER_DOMAIN,
+            orders_allowed=True,
         ),
     )
 }
