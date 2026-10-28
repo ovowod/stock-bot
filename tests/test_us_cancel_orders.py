@@ -181,13 +181,13 @@ def test_us_cancel_events_are_logged(make_client, caplog):
 
 def test_accepted_us_cancel_is_described_for_discord(make_client, monkeypatch):
     seen: list[Embed] = []
-    original = app_module._cancel_embed
+    original = app_module.cancel_embed
 
     def capture(*args: Any) -> Embed:
         seen.append(original(*args))
         return seen[-1]
 
-    monkeypatch.setattr(app_module, "_cancel_embed", capture)
+    monkeypatch.setattr(app_module, "cancel_embed", capture)
 
     make_client(us_kiwoom()).post(URL, json=cancel())
 

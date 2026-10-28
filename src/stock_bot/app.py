@@ -2,24 +2,22 @@
 
 import asyncio
 import logging
-import math
 import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlsplit
+from typing import Annotated, Any
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from stock_bot.account import AccountService
-from stock_bot.auth import SESSION_COOKIE, AuthService, ClientInfo, load_password
+from stock_bot.auth import AuthService, load_password
 from stock_bot.auto_sell import AutoSell
 from stock_bot.config import (
     DATA_DIR,
@@ -30,16 +28,17 @@ from stock_bot.config import (
     load_env_file,
     parse_environment,
 )
-from stock_bot.errors import AppError
+from stock_bot.errors import AppError, error_response
 from stock_bot.fill_feed import FillFeed
 from stock_bot.fill_watch import FillWatcher
 from stock_bot.holdings import Holdings
-from stock_bot.kiwoom import KST, KiwoomClient
+from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var, setup_logging
-from stock_bot.masking import secrets
-from stock_bot.notification import DiscordNotifier, Embed, EmbedField
-from stock_bot.open_order import OpenOrder, OpenOrderService
+from stock_bot.login import install_login
+from stock_bot.notification import DiscordNotifier, Embed
+from stock_bot.open_order import OpenOrderService
 from stock_bot.order import OrderService
+from stock_bot.order_alerts import cancel_embed
 from stock_bot.quote import QuoteService
 from stock_bot.ranking import RankingService
 from stock_bot.realtime import RealtimeConnect, RealtimeHub, connect_websocket
@@ -50,8 +49,20 @@ from stock_bot.stock_search import StockSearchService, today_kst
 logger = logging.getLogger("stock_bot.api")
 
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
-# 로그인하지 않아도 부를 수 있는 API. 그 밖의 /api는 로그인 세션이 있어야 한다.
-PUBLIC_API_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/auth/session"}
+
+
+async def selected_environment(environment: str) -> EnvironmentSpec:
+    """경로의 투자 환경을 읽고 이 요청의 로그에 환경을 붙인다.
+
+    async여야 한다. 일반 함수면 FastAPI가 다른 thread에서 돌려 environment_var가 route로
+    넘어오지 않는다.
+    """
+    spec = parse_environment(environment)
+    environment_var.set(spec.environment.value)
+    return spec
+
+
+Spec = Annotated[EnvironmentSpec, Depends(selected_environment)]
 
 
 def create_app(
@@ -101,7 +112,7 @@ def create_app(
         holdings.holding,
         # 취소 재확인은 미국 종목 목록이 꼭 있어야 거래소를 정할 수 있다.
         lambda spec: open_orders.orders(spec, listing_required=True),
-        on_cancelled=lambda spec, order, result: notify(_cancel_embed(spec, order, result)),
+        on_cancelled=lambda spec, order, result: notify(cancel_embed(spec, order, result)),
         fresh_holding=holdings.fresh_holding,
     )
     now = now or (lambda: datetime.now(UTC))
@@ -132,40 +143,9 @@ def create_app(
         title="Stock Bot", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
     )
 
-    # 아래 request_context보다 먼저 등록해야 그 안쪽에서 돈다.
+    # 아래 request_context보다 먼저 등록해야 로그인 확인이 그 안쪽에서 돈다.
     # 그래야 거부 응답에도 요청 ID가 붙는다.
-    @app.middleware("http")
-    async def require_login(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        path = request.url.path
-        # 조회가 아닌 요청(POST·PUT 등)은 다른 사이트에서 온 것이면 받지 않는다.
-        if request.method not in ("GET", "HEAD") and not _same_origin(request):
-            log(
-                logger,
-                logging.WARNING,
-                "origin_rejected",
-                path=path,
-                origin=request.headers.get("origin"),
-                **_client_info(request).log_fields(),
-            )
-            return _error_response(
-                403, "forbidden_origin", "다른 사이트에서 온 요청은 받지 않습니다.", {}
-            )
-        if (
-            path.startswith("/api")
-            and path not in PUBLIC_API_PATHS
-            and not auth.authenticate(request.cookies.get(SESSION_COOKIE))
-        ):
-            log(
-                logger,
-                logging.WARNING,
-                "unauthorized_request",
-                path=path,
-                **_client_info(request).log_fields(),
-            )
-            return _error_response(401, "unauthorized", "로그인이 필요합니다.", {})
-        return await call_next(request)
+    install_login(app, auth, notify)
 
     @app.middleware("http")
     async def request_context(
@@ -201,7 +181,7 @@ def create_app(
             cause=exc.message,
             detail=exc.detail,
         )
-        return _error_response(exc.status, exc.kind, exc.message, exc.detail)
+        return error_response(exc.status, exc.kind, exc.message, exc.detail)
 
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
@@ -210,62 +190,7 @@ def create_app(
             exc_info=exc,
             extra={"fields": {"path": request.url.path, "error_type": type(exc).__name__}},
         )
-        return _error_response(500, "internal_error", "서버 내부 오류가 발생했습니다.", {})
-
-    @app.post("/api/auth/login")
-    async def login(request: Request) -> Response:
-        try:
-            payload = await request.json()
-        except ValueError:
-            payload = None
-        password = payload.get("password") if isinstance(payload, dict) else None
-        if not isinstance(password, str):
-            # 보낸 값은 응답과 로그에 담지 않는다. 비밀번호가 들어 있을 수 있다.
-            raise AppError("invalid_request", "요청 형식이 올바르지 않습니다.", 400)
-        client = _client_info(request)
-        result = auth.login(password, client)
-        now = datetime.now(KST)
-        if result.locked_now:
-            until = now + timedelta(seconds=result.retry_after_seconds)
-            notify(
-                _access_embed(
-                    "로그인 시도 제한",
-                    _LOCK_COLOR,
-                    client,
-                    [
-                        EmbedField("연속 실패", f"{result.failures}회", inline=True),
-                        EmbedField("풀리는 시각", _kst(until), inline=True),
-                    ],
-                )
-            )
-        if result.retry_after_seconds:
-            minutes = math.ceil(result.retry_after_seconds / 60)
-            raise AppError(
-                "login_locked",
-                f"로그인 시도가 너무 많습니다. {minutes}분 후 다시 시도하세요.",
-                429,
-                {"retry_after_seconds": result.retry_after_seconds},
-            )
-        if result.session_id is None:
-            raise AppError("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
-        notify(_access_embed("로그인", _LOGIN_COLOR, client, [EmbedField("시각", _kst(now))]))
-        response = Response(status_code=204)
-        # Max-Age·Expires를 두지 않아 브라우저를 닫으면 사라진다.
-        response.set_cookie(SESSION_COOKIE, result.session_id, **_cookie_options(request))
-        return response
-
-    @app.post("/api/auth/logout")
-    async def logout(request: Request) -> Response:
-        auth.logout(request.cookies.get(SESSION_COOKIE))
-        response = Response(status_code=204)
-        response.delete_cookie(SESSION_COOKIE, **_cookie_options(request))
-        return response
-
-    @app.get("/api/auth/session")
-    async def get_session(request: Request) -> dict[str, Any]:
-        if not auth.authenticate(request.cookies.get(SESSION_COOKIE)):
-            raise AppError("unauthorized", "로그인이 필요합니다.", 401)
-        return {"authenticated": True}
+        return error_response(500, "internal_error", "서버 내부 오류가 발생했습니다.", {})
 
     @app.get("/api/environments")
     async def list_environments() -> list[dict[str, Any]]:
@@ -281,81 +206,49 @@ def create_app(
         ]
 
     @app.get("/api/environments/{environment}/account")
-    async def get_account(environment: str) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
+    async def get_account(spec: Spec) -> dict[str, Any]:
         return await accounts.fetch(spec)
 
     @app.get("/api/environments/{environment}/holdings/{code}")
-    async def get_holding(environment: str, code: str) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
+    async def get_holding(spec: Spec, code: str) -> dict[str, Any]:
         holding = await holdings.holding(spec, code)
         return {**holding, "fetched_at": datetime.now(UTC).isoformat(timespec="seconds")}
 
     @app.get("/api/environments/{environment}/open-orders")
-    async def get_open_orders(environment: str) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
+    async def get_open_orders(spec: Spec) -> dict[str, Any]:
         return await open_orders.fetch(spec)
 
     @app.get("/api/environments/{environment}/rankings/{kind}")
     async def get_ranking(
-        environment: str, kind: str, exchange: str | None = None, period: str | None = None
+        spec: Spec, kind: str, exchange: str | None = None, period: str | None = None
     ) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
         return await rankings.fetch(spec, kind, {"exchange": exchange, "period": period})
 
     @app.get("/api/environments/{environment}/stocks")
-    async def search_stocks(environment: str, q: str | None = None) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
+    async def search_stocks(spec: Spec, q: str | None = None) -> dict[str, Any]:
         return await stocks.search(spec, q)
 
     @app.get("/api/environments/{environment}/quote")
     async def get_quote(
-        environment: str, code: str | None = None, exchange: str | None = None
+        spec: Spec, code: str | None = None, exchange: str | None = None
     ) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
         return await quotes.fetch(spec, code, exchange)
 
     @app.post("/api/environments/{environment}/orders")
-    async def place_order(environment: str, request: Request) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
-        try:
-            payload = await request.json()
-        except ValueError:
-            payload = None
-        return await orders.place(spec, payload)
+    async def place_order(spec: Spec, request: Request) -> dict[str, Any]:
+        return await orders.place(spec, await _json_body(request))
 
     @app.post("/api/environments/{environment}/cancellations")
-    async def cancel_order(environment: str, request: Request) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
-        try:
-            payload = await request.json()
-        except ValueError:
-            payload = None
-        return await orders.cancel(spec, payload)
+    async def cancel_order(spec: Spec, request: Request) -> dict[str, Any]:
+        return await orders.cancel(spec, await _json_body(request))
 
     @app.get("/api/environments/{environment}/sl-tp")
-    async def get_sl_tp(environment: str) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
+    async def get_sl_tp(spec: Spec) -> dict[str, Any]:
         return sl_tp.read(spec)
 
     @app.put("/api/environments/{environment}/sl-tp")
-    async def put_sl_tp(environment: str, request: Request) -> dict[str, Any]:
-        spec = parse_environment(environment)
-        environment_var.set(spec.environment.value)
-        try:
-            payload = await request.json()
-        except ValueError:
-            payload = None
-        return await sl_tp.save(spec, payload)
+    async def put_sl_tp(spec: Spec, request: Request) -> dict[str, Any]:
+        return await sl_tp.save(spec, await _json_body(request))
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")
@@ -363,86 +256,9 @@ def create_app(
     return app
 
 
-_LOGIN_COLOR = 0x6C62A8
-_LOCK_COLOR = 0xE42939
-_CANCEL_COLOR = 0x8B95A1
-
-
-def _access_embed(title: str, color: int, client: ClientInfo, extra: list[EmbedField]) -> Embed:
-    """접속 정보를 담은 Discord 알림. 입력한 비밀번호는 넣지 않는다."""
-    return Embed(
-        title=title,
-        color=color,
-        fields=(
-            *extra,
-            EmbedField("IP", client.ip, inline=True),
-            EmbedField("브라우저·OS", client.device, inline=True),
-        ),
-    )
-
-
-def _cancel_embed(spec: EnvironmentSpec, order: OpenOrder, result: dict[str, Any]) -> Embed:
-    """접수된 주문 취소의 Discord 알림."""
-    quantity = result["cancel_quantity"]
-    return Embed(
-        title="주문 취소 접수",
-        color=_CANCEL_COLOR,
-        fields=(
-            EmbedField("투자 환경", spec.label, inline=True),
-            EmbedField("종목", f"{order.name} ({order.code})", inline=True),
-            EmbedField("원래 주문", order.side_label, inline=True),
-            # 잔량 전부로 보내 키움이 수량을 확정해 주지 않으면 null이다.
-            EmbedField(
-                "취소 수량",
-                "남은 수량 전부" if quantity is None else f"{quantity:,}주",
-                inline=True,
-            ),
-            EmbedField(
-                "주문번호", f"{result['original_order_no']} → {result['order_no']}", inline=True
-            ),
-            EmbedField("시각", _kst(datetime.now(KST)), inline=True),
-        ),
-    )
-
-
-def _kst(moment: datetime) -> str:
-    return moment.strftime("%Y-%m-%d %H:%M:%S KST")
-
-
-def _client_info(request: Request) -> ClientInfo:
-    return ClientInfo(
-        request.client.host if request.client else "-",
-        request.headers.get("user-agent", ""),
-    )
-
-
-def _cookie_options(request: Request) -> dict[str, Any]:
-    """HTTP에서 Secure를 붙이면 쿠키가 저장되지 않으므로 HTTPS 요청일 때만 붙인다."""
-    return {
-        "path": "/",
-        "httponly": True,
-        "samesite": "strict",
-        "secure": request.url.scheme == "https",
-    }
-
-
-def _same_origin(request: Request) -> bool:
-    """Origin 헤더가 없으면(같은 출처의 일부 요청, 테스트 도구) 통과시킨다."""
-    origin = request.headers.get("origin")
-    if origin is None:
-        return True
-    return urlsplit(origin).netloc == request.headers.get("host")
-
-
-def _error_response(status: int, kind: str, message: str, detail: dict[str, Any]) -> JSONResponse:
-    return JSONResponse(
-        status_code=status,
-        content={
-            "error": {
-                "kind": kind,
-                "message": secrets.mask(message),
-                "request_id": request_id_var.get(),
-                **detail,
-            }
-        },
-    )
+async def _json_body(request: Request) -> Any:
+    """요청 본문의 JSON. 해석하지 못하면 None이고, 받는 쪽이 형식 오류로 처리한다."""
+    try:
+        return await request.json()
+    except ValueError:
+        return None

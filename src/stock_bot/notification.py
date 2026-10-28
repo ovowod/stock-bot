@@ -9,6 +9,7 @@ import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -51,6 +52,10 @@ class Embed:
     description: str = ""
     color: int | None = None
     fields: tuple[EmbedField, ...] = ()
+
+
+def format_kst(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%d %H:%M:%S KST")
 
 
 class DiscordNotifier:

@@ -319,7 +319,7 @@ def test_a_failing_cancel_listener_does_not_turn_an_accepted_cancel_into_a_failu
     def broken(*args: object) -> None:
         raise KeyError("name")
 
-    monkeypatch.setattr(app_module, "_cancel_embed", broken)
+    monkeypatch.setattr(app_module, "cancel_embed", broken)
     fake = kiwoom()
 
     response = make_client(fake).post(URL, json=cancel())

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from stock_bot.config import PROJECT_ROOT, load_env_file
+from tests.fake_kiwoom import domestic_fake, us_fake
 
 
 def test_lists_the_four_trading_environments_without_credentials(make_client):
@@ -50,6 +51,22 @@ def test_rejects_unknown_environment_without_calling_kiwoom(make_client):
     body = response.json()
     assert body["error"]["kind"] == "unknown_environment"
     assert body["error"]["request_id"]
+
+
+@pytest.mark.parametrize(
+    ("environment", "fake"), [("domestic_paper", domestic_fake), ("us_paper", us_fake)]
+)
+def test_request_logs_carry_the_environment(make_client, json_logs, environment, fake):
+    client = make_client(fake())
+
+    assert client.get(f"/api/environments/{environment}/account").status_code == 200
+    response = client.post(f"/api/environments/{environment}/orders", content=b"not json")
+    assert response.status_code == 400
+
+    kiwoom = [line["env"] for line in json_logs.lines if line["event"] == "kiwoom_request"]
+    errors = [line["env"] for line in json_logs.lines if line["event"] == "api_error"]
+    assert kiwoom and set(kiwoom) == {environment}
+    assert errors == [environment]
 
 
 def test_env_file_path_is_project_root():
