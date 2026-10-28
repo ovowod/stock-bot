@@ -6,9 +6,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from stock_bot.account import DOMESTIC_ACCOUNT_PATH, US_ACCOUNT_PATH, StockListings
 from stock_bot.config import EnvironmentSpec, Market
 from stock_bot.errors import AppError, response_format_error
+from stock_bot.holdings import DOMESTIC_ACCOUNT_PATH, US_ACCOUNT_PATH, StockListings
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import log
 from stock_bot.reader import Reader
@@ -246,7 +246,7 @@ def _optional_number(row: Reader, key: str) -> Decimal | None:
 def _optional_integer(row: Reader, key: str) -> int | None:
     """화면에 보여주기만 하는 숫자 칸. 깨진 값이면 목록 전체를 실패시키지 않고 그 칸만 비운다.
 
-    모의 서버가 숫자 칸을 '. 950'처럼 깨진 값으로 보낸 적이 있다(account.py의 _HoldingReader).
+    모의 서버가 숫자 칸을 '. 950'처럼 깨진 값으로 보낸 적이 있다(holdings.py의 _HoldingReader).
     취소에 쓰는 주문번호·종목코드·미체결 수량은 여기에 넣지 않는다.
     """
     try:

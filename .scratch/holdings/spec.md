@@ -152,6 +152,11 @@ Status: ready-for-agent
   - Q11 계좌 요약: 원래 응답을 넘겨 화면이 지금처럼 읽음
   - Q12 진행: spec 하나, 티켓 없음, 커밋 세 개, PR 하나
 
+## Implementation Notes
+
+- 2026-10-28 국내 계좌 화면은 원래 깨진 숫자 칸이 있으면 화면 전체가 응답 형식 오류였다(미국 화면과 SL / TP만 `_HoldingReader`를 썼다). 공통 한 줄을 쓰면서 국내 화면도 그 칸만 비운다. Q10의 "화면 전용 칸 때문에 화면 전체가 실패하지 않는다"와 같은 방향이다.
+- 꼭 필요한 수량 칸을 읽는 함수는 `_HoldingReader`의 메서드가 아니라 module 함수 `_count`로 두었다. `Reader.rows`가 `list[Reader]`를 돌려줘 type check를 통과하기 위해서다.
+
 ## Review Log
 
 ### 2026-10-28: Codex review

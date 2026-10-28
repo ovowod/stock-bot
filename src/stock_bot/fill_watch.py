@@ -10,11 +10,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
-from stock_bot.account import DOMESTIC_ACCOUNT_PATH
 from stock_bot.auto_sell import AutoSell, AutoSellMatch
 from stock_bot.config import ENVIRONMENTS, Environment, EnvironmentSpec, Market
 from stock_bot.errors import AppError
 from stock_bot.fill_feed import FILL_TYPES, FeedStatus, Fill, FillFeed
+from stock_bot.holdings import DOMESTIC_ACCOUNT_PATH
 from stock_bot.kiwoom import KiwoomClient
 from stock_bot.logging_setup import environment_var, log, request_id_var
 from stock_bot.notification import FIELD_VALUE_LIMIT, DiscordNotifier, Embed, EmbedField
