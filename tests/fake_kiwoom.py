@@ -23,6 +23,12 @@ FAKE_ENV = {
     "PASSWORD": "fake-password-GGGG7777",
 }
 
+# 인증정보를 일부 투자 환경에만 둔 환경 변수. 앱이 그 밖의 투자 환경에 연결하지 않게 한다.
+DOMESTIC_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_US_", "REAL_"))}
+US_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_KR_", "REAL_"))}
+PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith("REAL_")}
+REAL_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith("PAPER_")}
+
 
 @dataclass
 class FakeKiwoom:
@@ -457,10 +463,3 @@ class ThreadedTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         await request.aread()
         return await asyncio.to_thread(self._handler, request)
-
-
-# 인증정보를 일부 투자 환경에만 둔 환경 변수. 앱이 그 밖의 투자 환경에 연결하지 않게 한다.
-DOMESTIC_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_US_", "REAL_"))}
-US_PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith(("PAPER_KR_", "REAL_"))}
-PAPER_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith("REAL_")}
-REAL_ENV = {k: v for k, v in FAKE_ENV.items() if not k.startswith("PAPER_")}

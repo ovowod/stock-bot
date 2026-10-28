@@ -280,6 +280,7 @@ def us_open_order(**overrides: str) -> dict[str, str]:
     return row
 
 
+# 같은 App key로 다른 연결이 들어와 이 연결이 밀려났다는 키움 시스템 메시지.
 REPLACED = {
     "trnm": "SYSTEM",
     "code": "R10001",

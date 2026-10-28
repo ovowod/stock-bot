@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request, Response
 
 from stock_bot.auth.auth import SESSION_COOKIE, AuthService, ClientInfo
 from stock_bot.core.errors import AppError, error_response
+from stock_bot.core.http import json_body
 from stock_bot.core.logging_setup import log
 from stock_bot.core.notification import Embed, EmbedField, format_kst
 from stock_bot.kiwoom.kiwoom import KST
@@ -28,7 +29,7 @@ _LOCK_COLOR = 0xE42939
 
 
 def install_login(app: FastAPI, auth: AuthService, notify: Callable[[Embed], None]) -> None:
-    """요청 ID를 붙이는 middleware보다 먼저 불러야 거부 응답에도 요청 ID가 붙는다."""
+    """login·logout·session API와 로그인 확인 middleware를 app에 등록한다."""
 
     @app.middleware("http")
     async def require_login(
@@ -65,10 +66,7 @@ def install_login(app: FastAPI, auth: AuthService, notify: Callable[[Embed], Non
 
     @app.post("/api/auth/login")
     async def login(request: Request) -> Response:
-        try:
-            payload = await request.json()
-        except ValueError:
-            payload = None
+        payload = await json_body(request)
         password = payload.get("password") if isinstance(payload, dict) else None
         if not isinstance(password, str):
             # 보낸 값은 응답과 로그에 담지 않는다. 비밀번호가 들어 있을 수 있다.

@@ -126,6 +126,7 @@ async def test_duplicate_cancel_sends_one_discord_message():
 
 
 async def test_failed_discord_does_not_fail_the_cancel():
+    # 로그인 알림과 취소 알림이 모두 실패한다.
     discord = FakeDiscord(httpx.Response(500), httpx.Response(500))
     async with _client(_kiwoom(), discord) as client:
         await _login(client)

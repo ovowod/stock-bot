@@ -7,7 +7,7 @@ Status: ready-for-agent
 `app.py`의 `create_app` 한 함수가 약 310줄이다. 서비스 조립, middleware 두 개, 오류 처리, route 17개를 모두 품고 있다.
 - 로그인 쪽(login·logout·session route, `require_login` middleware, cookie 설정, 출처 확인, 접속 알림 내용)이 약 120줄로, API 목록 사이에 섞여 있다.
 - 주문 취소 알림 내용(`_cancel_embed`)이 주문 쪽이 아니라 `app.py`에 있다.
-- `parse_environment` + `environment_var.set`이 12번, 요청 본문 읽기(`try: await request.json() except ValueError`)가 5번 되풀이된다.
+- `parse_environment` + `environment_var.set`이 12번, 요청 본문 읽기(`try: await request.json() except ValueError`)가 4번 되풀이된다.
 
 `src/stock_bot/`에는 파일 25개가 폴더 없이 한곳에 있다. 화면 쪽(`web/src/features/`)은 기능별 폴더로 나뉘어 있는데 서버 쪽은 그렇지 않아, "주문 기능은 어디 있나"에 답하려면 파일 이름을 하나씩 봐야 한다.
 
@@ -170,6 +170,22 @@ Status: ready-for-agent
   - Q14 `FakeDiscord`: 체결·로그인 쪽 둘만 합침
   - Q15 커밋 순서: app.py → 폴더 이동 → 도우미 정리 → 리뷰 반영
   - Q16 실제 서버 기동: 하지 않음, merge 뒤 사용자 확인
+
+## Implementation Notes
+
+- 2026-10-29 요청 본문 읽기 도우미는 `core`의 새 module `http`(`json_body`)에 둔다. `app`에 두면 로그인 route가 있는 `auth/login`이 가져올 수 없어서다(순환 import). 네 곳(로그인, 주문, 취소, SL / TP 저장) 모두 이것을 쓴다.
+- `_kst`·`_cancel_embed`·`_error_response`는 다른 module이 쓰게 되어 `format_kst`·`cancel_embed`·`error_response`로 이름의 `_`를 뗐다. 이 함수를 patch하던 테스트 2개(`test_cancel_orders`, `test_us_cancel_orders`)는 새 이름을 patch한다.
+- 늘 500을 주던 가짜 Discord는 같은 수의 500 응답을 차례로 주게 바꿨다. 알림 전송은 500을 다시 보내지 않으므로 요청 수가 같다.
+- 2026-10-29 코드 리뷰(Standards·Spec 두 축)를 반영했다.
+  - 고침: 환경 변수 상수를 `FAKE_ENV` 옆으로 옮김, `REPLACED`에 뜻 주석, 취소 알림 실패 테스트의 500 두 개가 무엇인지 주석, `install_login` docstring과 부르는 자리 주석의 중복 제거.
+  - 두기: `format_kst`가 시간대를 바꾸지 않는 점(원래 `_kst` 그대로, 두 쓰는 곳 모두 KST 시각을 넘김), `test_notification`의 `FakeDiscord`(Q14에서 남기기로 함), 테스트 도우미의 `open_order`·`us_open_order`·`LISTING` 같은 이름(원래부터 서로 다른 module에 있던 이름).
+- 2026-10-29 Q16을 바꿔, 운영 서버가 꺼진 것을 사용자가 확인한 뒤 진짜 설정으로 서버를 잠깐 띄웠다(`.env`는 앱만 읽음). 시작 시 세 실시간 연결(국내 모의, 미국 모의, 실전 공용)이 모두 로그인·등록되고 체결 feed가 구독됐다. 로그인 없는 `/api`는 401, 다른 출처의 POST는 403, 화면 `/`는 200이었고, 종료는 정상(exit 0)이었다. 로그인 뒤 기능(계좌 조회 등)은 비밀번호가 `.env`에 있어 확인하지 않았다.
+- 2026-10-29 사용자가 Tailscale로 서버(08:19~08:22 KST)를 직접 써 보고, 그 로그를 확인했다. ERROR 0건, WARNING 6건(모두 예상한 것).
+  - 로그인: 로그아웃 뒤 session 401, 로그인 204, Discord 접속 알림 200.
+  - 계좌 확인·미체결: 네 투자 환경 모두 200. 키움 호출 로그의 `env`가 요청한 환경과 모두 맞았다(환경 dependency 확인).
+  - 미국 모의의 보유종목 `SDST`는 종목 목록에 없어 `holding_tickers_unlisted`(거래소 확인 불가, PR #18 동작). 미국 실전 미체결 없음은 키움 오류 코드 571758을 빈 목록으로 처리했다.
+  - SL / TP: 읽기 4번, 저장 4번 모두 200. 국내 실전 저장은 켜진 세션 0개, 국내 모의는 켜기·끄기·켜기. 정규장 전이라 감시는 시작하지 않았다.
+  - 주문·취소 TR은 한 번도 나가지 않았다.
 
 ## Review Log
 

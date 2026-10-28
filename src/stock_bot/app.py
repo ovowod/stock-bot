@@ -30,6 +30,7 @@ from stock_bot.core.config import (
     parse_environment,
 )
 from stock_bot.core.errors import AppError, error_response
+from stock_bot.core.http import json_body
 from stock_bot.core.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.core.notification import DiscordNotifier, Embed
 from stock_bot.fill.feed import FillFeed
@@ -236,11 +237,11 @@ def create_app(
 
     @app.post("/api/environments/{environment}/orders")
     async def place_order(spec: Spec, request: Request) -> dict[str, Any]:
-        return await orders.place(spec, await _json_body(request))
+        return await orders.place(spec, await json_body(request))
 
     @app.post("/api/environments/{environment}/cancellations")
     async def cancel_order(spec: Spec, request: Request) -> dict[str, Any]:
-        return await orders.cancel(spec, await _json_body(request))
+        return await orders.cancel(spec, await json_body(request))
 
     @app.get("/api/environments/{environment}/sl-tp")
     async def get_sl_tp(spec: Spec) -> dict[str, Any]:
@@ -248,17 +249,9 @@ def create_app(
 
     @app.put("/api/environments/{environment}/sl-tp")
     async def put_sl_tp(spec: Spec, request: Request) -> dict[str, Any]:
-        return await sl_tp.save(spec, await _json_body(request))
+        return await sl_tp.save(spec, await json_body(request))
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")
 
     return app
-
-
-async def _json_body(request: Request) -> Any:
-    """요청 본문의 JSON. 해석하지 못하면 None이고, 받는 쪽이 형식 오류로 처리한다."""
-    try:
-        return await request.json()
-    except ValueError:
-        return None
