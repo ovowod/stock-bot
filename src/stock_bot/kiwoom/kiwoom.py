@@ -84,6 +84,9 @@ REAL_CALL_LIMITS: dict[str, tuple[int, int | None]] = {
 }
 # 미국 실전 피크타임: 매일 한국시간 09:00:00~09:59:59.
 PEAK_HOUR = 9
+# 묶음 한도와 별도로 TR 하나에 걸린 1초당 한도. 묶음 한도도 함께 지킨다.
+# kt00018: 2026-10-29 18시부터 1초 5회에서 3회로 줄었다(키움 공지 2026-10-27).
+TR_CALL_LIMITS: dict[str, int] = {"kt00018": 3}
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,7 @@ class _Slot:
     """
 
     at: float
+    api_id: str
     sent: bool = False
 
 
@@ -154,7 +158,7 @@ class _Pacer:
         # 기준 시간이 지난 기록은 더 이상 한도에 세어지지 않는다.
         while slots and slots[0].sent and slots[0].at + CALL_INTERVAL_SECONDS <= start:
             slots.pop(0)
-        at = self._earliest(unit, slots, start)
+        at = self._earliest(unit, slots, start, api_id)
         if not patient and at - start > MAX_PACING_WAIT_SECONDS:
             log(
                 logger,
@@ -170,7 +174,7 @@ class _Pacer:
                 429,
                 {"api_id": api_id},
             )
-        slot = _Slot(at)
+        slot = _Slot(at, api_id)
         slots.append(slot)
         waited = False
         try:
@@ -198,17 +202,25 @@ class _Pacer:
 
     def _earliest_for(self, unit: _Unit, slot: _Slot) -> float:
         slots = self._slots[unit.key]
-        return self._earliest(unit, slots[: slots.index(slot)], max(slot.at, self._clock()))
+        before = slots[: slots.index(slot)]
+        return self._earliest(unit, before, max(slot.at, self._clock()), slot.api_id)
 
-    def _earliest(self, unit: _Unit, before: list[_Slot], start: float) -> float:
+    def _earliest(self, unit: _Unit, before: list[_Slot], start: float, api_id: str) -> float:
         """앞 요청(before) 뒤에, start 이후 한도에 자리가 나는 가장 이른 시각."""
         at = max(start, before[-1].at) if before else start
+        tr_limit = TR_CALL_LIMITS.get(api_id)
+        same_tr = [s for s in before if s.api_id == api_id]
         while True:
             kst = self._kst(at)
             limit = unit.limit_at(kst)
             if len(before) < limit or (ready := before[-limit].at + CALL_INTERVAL_SECONDS) <= at:
-                return at
-            if unit.is_peak(kst):
+                if (
+                    tr_limit is None
+                    or len(same_tr) < tr_limit
+                    or (ready := same_tr[-tr_limit].at + CALL_INTERVAL_SECONDS) <= at
+                ):
+                    return at
+            elif unit.is_peak(kst):
                 # 피크타임이 끝나면 한도가 올라가므로 그 시각에 자리가 날 수 있다.
                 peak_end = kst.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
                 ready = min(ready, at + (peak_end - kst).total_seconds())

@@ -278,6 +278,35 @@ async def test_domestic_real_same_inquiry_twice_does_not_wait():
 
 
 @pytest.mark.anyio
+async def test_domestic_real_kt00018_is_three_per_interval():
+    clock = FakeClock()
+    client, sent = make(fake_replying("kt00018", "ka00001"), clock)
+
+    await asyncio.gather(
+        *(client.call(DOMESTIC_REAL, "kt00018", PATH, {}) for _ in range(4)),
+        client.call(DOMESTIC_REAL, "ka00001", PATH, {}),
+    )
+
+    assert times(sent, "kt00018") == [0.0] * 3 + [1.2]
+    # 먼저 온 요청이 먼저 나가므로 뒤에 온 다른 조회도 기다린 kt00018 뒤에 나간다.
+    assert times(sent, "ka00001") == [1.2]
+
+
+@pytest.mark.anyio
+async def test_domestic_real_kt00018_still_counts_toward_the_inquiry_limit():
+    clock = FakeClock()
+    client, sent = make(fake_replying("kt00018", "ka00001"), clock)
+
+    await asyncio.gather(
+        *(client.call(DOMESTIC_REAL, "ka00001", PATH, {}) for _ in range(3)),
+        *(client.call(DOMESTIC_REAL, "kt00018", PATH, {}) for _ in range(3)),
+    )
+
+    assert times(sent, "ka00001") == [0.0] * 3
+    assert times(sent, "kt00018") == [0.0, 0.0, 1.2]
+
+
+@pytest.mark.anyio
 async def test_domestic_real_orders_and_inquiries_do_not_wait_for_each_other():
     clock = FakeClock()
     client, sent = make(fake_replying("ka00001", "kt10000", "kt10003"), clock)
