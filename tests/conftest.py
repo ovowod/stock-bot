@@ -8,8 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from stock_bot import app as app_module
-from stock_bot import kiwoom, order
 from stock_bot.app import create_app
+from stock_bot.kiwoom import kiwoom
+from stock_bot.order import order
 from tests.fake_kiwoom import FAKE_ENV
 from tests.log_capture import JsonLines
 
