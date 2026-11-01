@@ -25,7 +25,7 @@ Spec: `.scratch/trailing-stop-status/spec.md` (자체 서버 API, 화면, 로그
 
 ## Comments
 
-- 지금 시각을 포함하는 세션 찾기는 `src/stock_bot/trailing_stop/status.py`의 `_session_at`에 따로 두었다. 01의 공통 세션 찾기(꺼진 세션 포함)가 들어오면 그것으로 바꾼다.
+- 지금 시각을 포함하는 세션 찾기는 01의 공통 `session_at(include_disabled=True)`을 쓴다.
 - 감시 여부·이유·종목은 `TrailingStopStatus._watch_state` 한곳에서 정한다. 03에서 감시를 붙이면 여기서 감시의 메모리를 읽는다. 지금은 켜진 세션이 지금 시각을 포함해도 `no_session`이다(이 티켓의 규칙).
 - 계산할 수 없는 값은 기존 화면의 빈 값 표시(`format.ts`의 `EMPTY`, "–")를 그대로 썼다. spec의 "—"와 글자가 다르다.
 - 성공한 상태 조회는 `api_request`·`trailing_stop_settings_read`·`trailing_stop_status_read`를 모두 DEBUG로 남긴다. 실패한 조회(4xx·5xx, 설정 파일을 읽지 못함)는 INFO 이상이다.

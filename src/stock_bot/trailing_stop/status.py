@@ -7,12 +7,12 @@ Trailing Stop 감시는 아직 없어 늘 감시 안 함이고 종목도 없다.
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, time
+from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
+from stock_bot.auto_trading.judging import session_at
 from stock_bot.auto_trading.settings import TIMEZONES, FeatureSettingsStore
-from stock_bot.core.config import EnvironmentSpec, Market
+from stock_bot.core.config import EnvironmentSpec
 from stock_bot.core.errors import AppError
 from stock_bot.core.logging_setup import log
 from stock_bot.kiwoom.kiwoom import KiwoomClient
@@ -40,7 +40,8 @@ class TrailingStopStatus:
             # 읽지 못한 원인은 설정 저장소가 ERROR로 남겼다. 조회는 이유를 담아 답한다.
             settings = None
         sessions = [] if settings is None else settings["sessions"]
-        session = _session_at(sessions, spec.market, self._now())
+        found = session_at(sessions, self._now(), spec.market, include_disabled=True)
+        session = None if found is None else found[1]
         watching, reason, stocks = self._watch_state(spec, settings is not None)
         excluded = [] if settings is None else [item["code"] for item in settings["excluded"]]
         log(
@@ -77,18 +78,3 @@ class TrailingStopStatus:
         if not settings_ok:
             return False, "settings_unreadable", []
         return False, "no_session", []
-
-
-def _session_at(
-    sessions: list[dict[str, Any]], market: Market, moment: datetime
-) -> dict[str, Any] | None:
-    """그 시각(그 시장 시간대)을 포함하는 세션. 꺼진 세션도 찾는다.
-
-    시작은 포함하고 종료는 빼므로 맞닿은 시각은 뒤 세션이다. SL / TP 감시의 세션 찾기와
-    같은 규칙이다. 두 기능이 함께 쓰는 세션 찾기가 생기면 그것으로 바꾼다.
-    """
-    at = moment.astimezone(ZoneInfo(TIMEZONES[market])).time()
-    for session in sessions:
-        if time.fromisoformat(session["start"]) <= at < time.fromisoformat(session["end"]):
-            return session
-    return None
