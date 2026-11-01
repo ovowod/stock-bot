@@ -10,6 +10,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from stock_bot.core.config import Environment, EnvironmentSpec
 from stock_bot.core.logging_setup import log
@@ -57,10 +58,12 @@ class AutoSell:
         source: str,
         request_id: str,
         ready: Callable[[], bool],
+        confirm: Callable[[dict[str, Any]], bool] | None = None,
     ) -> AutoSellResult:
         """매도 가능 수량 전량을 시장가로 판다. 그 종목의 자동 매도가 진행 중이면 보내지 않는다.
 
         ready는 키움에 보내기 직전에 부른다. False면 보내지 않는다.
+        confirm은 주문 직전에 다시 읽은 보유종목으로 부른다. False면 보내지 않는다.
         예외가 나도 결과를 돌려준다. 어디서 멈췄는지 모르면 unknown이다.
         """
         key = (spec.environment, code)
@@ -71,7 +74,12 @@ class AutoSell:
         done = self._claimed[key] = asyncio.Event()
         try:
             result = await self._orders.sell_all_at_market(
-                spec, code, exchange, order_key=f"auto-sell-{request_id}", ready=ready
+                spec,
+                code,
+                exchange,
+                order_key=f"auto-sell-{request_id}",
+                ready=ready,
+                confirm=confirm,
             )
             if result.outcome == "accepted" and result.order_no:
                 # 차지를 놓기 전에 기억해야, 결과를 기다리던 체결 알림이 이 주문번호를 찾는다.

@@ -1,7 +1,7 @@
 """Trailing Stop 감시: 모의투자 보유종목의 시세 체결로 활성화, 고점, 트리거를 판정한다.
 
 켜진 Trailing Stop 세션 동안 보유종목을 읽고 공유 실시간 연결로 시세 체결을 구독한다.
-트리거가 일어나도 매도 주문은 내지 않는다. 주문 경로(AutoSell·OrderService)에 기대지 않는다.
+트리거가 일어나면 공용 자동 매도(AutoSell)로 매도 가능 수량 전량을 시장가로 판다.
 기억(활성화·고점·트리거)은 투자 환경마다 메모리에 두고 고점 기록 파일(record.py)에 써서,
 세션과 날짜를 넘기고 서버를 다시 시작해도 이어 간다. 파일은 서버가 시작할 때와
 읽지 못한 상태에서 복구할 때만 읽는다. 그 밖에는 메모리가 기준이다.
@@ -40,7 +40,10 @@ from stock_bot.core.notification import DiscordNotifier, Embed, EmbedField
 from stock_bot.fill.feed import FeedState, FeedStatus, Fill, FillFeed
 from stock_bot.kiwoom.kiwoom import KiwoomClient
 from stock_bot.kiwoom.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
+from stock_bot.order.auto_sell import AutoSell
+from stock_bot.order.order import AutoSellResult
 from stock_bot.trailing_stop import record
+from stock_bot.trailing_stop.alerts import RESULT_EMBEDS, SellTrigger
 from stock_bot.trailing_stop.record import Memory, format_decimal, format_moment
 
 logger = logging.getLogger("stock_bot.trailing_stop_watch")
@@ -58,6 +61,8 @@ HOLDINGS_ALERT_AFTER = timedelta(minutes=5)
 # 고점 갱신을 모아 고점 기록 파일에 쓰는 간격. 활성화·트리거·기억 삭제는 바로 쓴다.
 RECORD_WRITE_SECONDS = 5.0
 NEUTRAL_COLOR = 0x8B8F98
+# 체결 알림과 로그에 남는 자동 매도 기능 이름.
+AUTO_SELL_SOURCE = "Trailing Stop"
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 
@@ -94,6 +99,9 @@ class _Run:
     # 보유종목 읽기가 처음 실패한 시각과 판정 중단을 알렸는지. 성공하면 지운다.
     failed_since: datetime | None = None
     failure_alerted: bool = False
+    # 종목코드 -> 이 실행에서 낸 자동 매도와 그 결과(상태 조회 모양).
+    # 결과는 매도를 시작한 실행에 남아, 늦게 나와도 다음 실행의 상태를 바꾸지 않는다.
+    auto_sells: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def covers(self, found: tuple[date, dict[str, Any]] | None) -> bool:
         """그 날짜·세션이 이 실행의 것인가. 기준만 바뀌면 같은 실행이다."""
@@ -106,6 +114,7 @@ class TrailingStopWatcher:
         kiwoom: KiwoomClient,
         settings: FeatureSettingsStore,
         positions: PositionLookup,
+        auto_sell: AutoSell,
         hub: RealtimeHub,
         feed: FillFeed,
         notifier: DiscordNotifier,
@@ -115,6 +124,7 @@ class TrailingStopWatcher:
         self.kiwoom = kiwoom
         self.settings = settings
         self.positions = positions
+        self.auto_sell = auto_sell
         self.hub = hub
         # 내 계좌 체결. 체결되면 매입가·보유수량이 바뀌므로 보유종목을 다시 읽는다.
         self.feed = feed
@@ -200,6 +210,12 @@ class _Watch:
         self._quotes_rejected = False
         self._fills_rejected = False
         self._unsubscribe_fills: Callable[[], None] | None = None
+        # 평균 매입가가 앱이 받은 체결로 바뀐 것인지 보려고 둔다. 지난 비교 뒤 체결을 받은 종목,
+        # 지난 비교 때의 연결 번호(None이면 서버 시작 뒤 비교 전), 그 뒤 체결 등록이 거부됐는지.
+        # 연결이 바뀌었거나 거부됐으면 그사이 체결을 놓쳤을 수 있어 받은 체결로 인정하지 않는다.
+        self._filled: set[str] = set()
+        self._compared_connection: int | None = None
+        self._fills_gap = False
         # 같은 이유의 건너뜀·잘못된 체결가 로그를 반복해 남기지 않으려고
         # 종목마다 마지막 이유를 둔다.
         self._skips: dict[str, str] = {}
@@ -326,6 +342,7 @@ class _Watch:
             "peak_at": None if memory is None else format_moment(memory.peak_at),
             "triggered_at": None if memory is None else format_moment(memory.triggered_at),
             "triggered_price": None if memory is None else format_decimal(memory.triggered_price),
+            "auto_sell": None if self._run is None else self._run.auto_sells.get(code),
         }
 
     async def _tick(self) -> None:
@@ -495,7 +512,7 @@ class _Watch:
             return
 
     def _use_holdings(self, run: _Run, rows: list[dict[str, Any]], reasons: list[str]) -> None:
-        checked = self._use_quantities(rows)
+        checked = self._use_quantities(rows, run.connection)
         self._holdings = checked.eligible
         self._ineligible = {c: r for c, r in checked.ineligible.items() if r != "credit"}
         self._holdings_ready = True
@@ -514,15 +531,16 @@ class _Watch:
         log(logger, logging.INFO, "trailing_stop_judging_resumed", run=run.number)
         self._subscribe()
 
-    def _use_quantities(self, rows: list[dict[str, Any]]) -> HoldingsCheck:
+    def _use_quantities(self, rows: list[dict[str, Any]], connection: int | None) -> HoldingsCheck:
         """다시 읽은 보유종목으로 보유 수량을 바꾸고, 현금잔고가 없는 종목의 기억은 버린다.
 
-        판정할 수 없게 됐을 뿐인 종목은 기억을 둔다.
+        판정할 수 없게 됐을 뿐인 종목은 기억을 둔다. connection은 읽을 때의 연결 번호다.
         """
         checked = check_holdings(self.spec.market, rows)
         cash = {row["code"] for row in rows if not row["credit"]}
         for code in sorted(self.memory.keys() - cash):
             self._forget(code, "not_held")
+        self._use_purchase_prices(checked.eligible, connection)
         self._quantities = {
             row["code"]: Decimal(row["quantity"])
             for row in rows
@@ -530,7 +548,55 @@ class _Watch:
         }
         return checked
 
-    def _forget(self, code: str, reason: str) -> None:
+    def _use_purchase_prices(self, holdings: dict[str, Holding], connection: int | None) -> None:
+        """기억의 평균 매입가를 다시 읽은 값과 비교한다.
+
+        앱이 받은 체결로 바뀌었으면 새 값으로 바꾸고 바로 쓴다. 트리거된 종목은 고점을
+        갱신하지 않아 다른 쓰기가 없다. 쓰지 않으면 재시작 뒤 앱이 봤던 변경이 못 본 변경으로
+        보인다. 받은 체결로 설명되지 않으면 팔고 다시 산 것일 수 있어 기억을 버린다.
+        """
+        changed = False
+        for code in sorted(self.memory):
+            holding = holdings.get(code)
+            if holding is None:
+                continue
+            if self._reconcile_purchase_price(code, holding.purchase_price, connection):
+                changed = True
+        self._filled.clear()
+        self._compared_connection = connection
+        self._fills_gap = self._fills_rejected
+        if changed:
+            self._write("purchase_price")
+
+    def _reconcile_purchase_price(
+        self, code: str, purchase: Decimal, connection: int | None
+    ) -> bool:
+        """다시 읽은 평균 매입가를 기억과 맞춰 본다.
+
+        같으면 그대로 두고 False다. 다르지만 받은 체결로 설명되면 기억의 값을 바꾸고 True다.
+        설명되지 않으면 기억을 버리고 False다. 바꾼 값을 파일에 쓰는 것은 부르는 쪽이 한다.
+        """
+        memory = self.memory[code]
+        if purchase == memory.purchase_price:
+            return False
+        seen = (
+            code in self._filled
+            and connection is not None
+            and connection == self._compared_connection
+            and not self._fills_gap
+        )
+        if not seen:
+            self._forget(
+                code,
+                "purchase_price_changed",
+                previous_purchase_price=format_decimal(memory.purchase_price),
+                purchase_price=format_decimal(purchase),
+            )
+            return False
+        memory.purchase_price = purchase
+        return True
+
+    def _forget(self, code: str, reason: str, **detail: Any) -> None:
         memory = self.memory.pop(code)
         self._peaks.discard(code)
         log(
@@ -541,6 +607,7 @@ class _Watch:
             reason=reason,
             peak=format_decimal(memory.peak),
             triggered=memory.triggered_at is not None,
+            **detail,
         )
         self._write("forgotten")
         self._sync_fills()
@@ -548,7 +615,7 @@ class _Watch:
     def _read_record(self, reason: str) -> bool:
         """고점 기록 파일을 읽어 기억으로 쓴다. 읽지 못하면 기억은 그대로 두고 False다."""
         try:
-            memory = record.load(self._record)
+            loaded = record.load(self._record)
         except (OSError, ValueError) as exc:
             log(
                 logger,
@@ -560,7 +627,7 @@ class _Watch:
                 cause=str(exc),
             )
             return False
-        self.memory = memory
+        self.memory = loaded.memory
         self._unwritten = False
         self._peaks.clear()
         log(
@@ -569,8 +636,18 @@ class _Watch:
             "trailing_stop_record_read",
             path=str(self._record),
             reason=reason,
-            memory_count=len(memory),
+            memory_count=len(loaded.memory),
         )
+        if loaded.cleared_codes is not None:
+            log(
+                logger,
+                logging.INFO,
+                "trailing_stop_record_migrated",
+                path=str(self._record),
+                cleared_codes=loaded.cleared_codes,
+            )
+            # 다음 시작 때 다시 옮기지 않게 버전 2로 바로 쓴다.
+            self._write("migrated")
         return True
 
     def _write(self, reason: str) -> None:
@@ -698,6 +775,7 @@ class _Watch:
             )
             # 체결을 받지 못하면 바뀐 매입가·보유수량을 모른 채 판정하게 되므로 판정도 멈춘다.
             self._fills_rejected = True
+            self._fills_gap = True
 
     def _on_fill(self, fill: Fill) -> None:
         """내 계좌 체결(앱 밖 주문 포함). 매도면 보유 수량을 바로 빼고, 보유종목을 다시 읽는다.
@@ -705,6 +783,8 @@ class _Watch:
         세션 밖에서는 기억이 있는 종목의 체결만 다룬다.
         """
         remembered = fill.code in self.memory
+        if fill.code is not None:
+            self._filled.add(fill.code)
         self._subtract(fill)
         run = self._run
         if run is None:
@@ -735,6 +815,7 @@ class _Watch:
         request_id_var.set("-")
         while True:
             self._outside_pending = False
+            connection = self._channel.connection
             try:
                 rows = await self._owner.positions(self.spec)
             except AppError as exc:
@@ -770,7 +851,7 @@ class _Watch:
                     reason="newer_trigger",
                 )
                 continue
-            checked = self._use_quantities(rows)
+            checked = self._use_quantities(rows, connection)
             log(
                 logger,
                 logging.INFO,
@@ -846,14 +927,18 @@ class _Watch:
         memory = self.memory.get(code)
         if memory is None:
             if price >= purchase * (1 + activation / 100):
-                memory = self.memory[code] = Memory(activated_at=at, peak=price, peak_at=at)
+                memory = self.memory[code] = Memory(
+                    activated_at=at, peak=price, peak_at=at, purchase_price=purchase
+                )
                 self._log_judged(
                     "trailing_stop_activated", code, price, purchase, memory, run, session
                 )
                 self._write("activated")
             return
         if memory.triggered_at is not None:
-            # 트리거 뒤에는 아무것도 바꾸지 않는다.
+            # 트리거 뒤에는 고점을 바꾸지 않는다. 이 실행에서 아직 팔지 않았으면 판다.
+            if code not in run.auto_sells:
+                self._start_sell(run, code, memory, session, uuid.uuid4().hex[:12], retry=True)
             return
         if price > memory.peak:
             # 고점 갱신은 시세 체결마다 로그로 남기거나 파일에 쓰지 않고 모아서 쓴다.
@@ -864,8 +949,13 @@ class _Watch:
                 self._flush = self._spawn(self._write_later())
         elif price <= memory.peak * (1 - drop / 100):
             memory.triggered_at, memory.triggered_price = at, price
-            self._log_judged("trailing_stop_triggered", code, price, purchase, memory, run, session)
+            # 트리거 로그, 자동 매도, 그 체결 알림을 같은 요청 ID로 잇는다.
+            request_id = uuid.uuid4().hex[:12]
+            self._log_judged(
+                "trailing_stop_triggered", code, price, purchase, memory, run, session, request_id
+            )
             self._write("triggered")
+            self._start_sell(run, code, memory, session, request_id, retry=False)
 
     def _log_judged(
         self,
@@ -876,9 +966,10 @@ class _Watch:
         memory: Memory,
         run: _Run,
         session: dict[str, Any],
+        request_id: str | None = None,
     ) -> None:
         """활성화·트리거 로그. 나중에 판정이 맞았는지 확인하도록 요청 ID와 적용한 기준을 담는다."""
-        token = request_id_var.set(uuid.uuid4().hex[:12])
+        token = request_id_var.set(request_id or uuid.uuid4().hex[:12])
         try:
             log(
                 logger,
@@ -896,6 +987,139 @@ class _Watch:
             )
         finally:
             request_id_var.reset(token)
+
+    def _start_sell(
+        self,
+        run: _Run,
+        code: str,
+        memory: Memory,
+        session: dict[str, Any],
+        request_id: str,
+        retry: bool,
+    ) -> None:
+        """자동 매도를 따로 돌린다. 시세 처리는 주문 결과를 기다리지 않는다.
+
+        이 실행에서 그 종목은 결과와 상관없이 다시 내지 않는다. 다시 시도는 앞 실행에서
+        트리거된 종목을 새 실행의 첫 시세 체결에서 파는 것이다. 알림의 트리거 칸은
+        기억한 트리거 가격과 고점, 기준은 지금 켜진 세션의 값이다.
+        """
+        holding = self._holdings[code]
+        assert memory.triggered_at is not None and memory.triggered_price is not None
+        trigger = SellTrigger(
+            code,
+            holding.name,
+            holding.exchange,
+            memory.triggered_price,
+            memory.triggered_at,
+            memory.peak,
+            holding.purchase_price,
+            Decimal(session["activation_profit"]),
+            Decimal(session["drop_from_peak"]),
+            _span(session),
+            retry,
+        )
+        run.auto_sells[code] = _attempt("sending", None, None, None, self._owner.now())
+        token = request_id_var.set(request_id)
+        try:
+            log(
+                logger,
+                logging.INFO,
+                "trailing_stop_auto_sell_started",
+                code=code,
+                run=run.number,
+                attempt="retry" if retry else "trigger",
+            )
+            # 요청 ID는 만들어질 때의 문맥을 따라 매도 작업으로 넘어간다.
+            self._spawn(self._sell(run, trigger, request_id))
+        finally:
+            request_id_var.reset(token)
+
+    async def _sell(self, run: _Run, trigger: SellTrigger, request_id: str) -> None:
+        """트리거 때 읽은 거래소로 판다. 국내는 거래소가 없어 빈 값으로 보낸다."""
+        code = trigger.code
+        result = await self._owner.auto_sell.sell(
+            self.spec,
+            code,
+            trigger.exchange or "",
+            source=AUTO_SELL_SOURCE,
+            request_id=request_id,
+            ready=lambda: self._may_send(run, code),
+            confirm=lambda holding: self._confirm_holding(run, code, holding),
+        )
+        run.auto_sells[code] = _result_attempt(result, self._owner.now())
+        log(
+            logger,
+            logging.INFO if result.outcome in ("accepted", "skipped") else logging.WARNING,
+            "trailing_stop_auto_sell_finished",
+            code=code,
+            run=run.number,
+            outcome=result.outcome,
+            quantity=result.quantity,
+            order_no=result.order_no,
+            cause=result.cause,
+        )
+        embed = RESULT_EMBEDS.get(result.outcome)
+        if embed is not None:
+            sent = await self._owner.notifier.send(
+                embed=embed(self.spec, trigger, result), spec=self.spec
+            )
+            log(
+                logger,
+                logging.INFO,
+                "trailing_stop_notified",
+                reason=f"auto_sell_{result.outcome}",
+                code=code,
+                sent=sent,
+            )
+
+    def _confirm_holding(self, run: _Run, code: str, holding: dict[str, Any]) -> bool:
+        """주문 직전에 다시 읽은 평균 매입가를 보유종목을 다시 읽을 때와 같은 규칙으로 판단한다.
+
+        트리거와 주문 사이에 연결이 끊긴 채 팔고 다시 산 새 보유분을 예전 트리거로 팔지 않는다.
+        보유하지 않으면 판단하지 않는다(매도 가능 수량 0으로 보내지 않는다).
+        """
+        purchase = holding.get("purchase_price")
+        if purchase is None or code not in self.memory:
+            return True
+        if self._reconcile_purchase_price(code, purchase, self._channel.connection):
+            self._write("purchase_price")
+        if code in self.memory:
+            return True
+        log(
+            logger,
+            logging.INFO,
+            "trailing_stop_send_refused",
+            code=code,
+            run=run.number,
+            reason="purchase_price_changed",
+        )
+        return False
+
+    def _may_send(self, run: _Run, code: str) -> bool:
+        """키움에 보내기 직전 확인. 거절하면 보내지 않고 다음 실행에서 다시 시도한다.
+
+        연결 끊김만으로는 막지 않는다. 끊기기 전 체결가는 실제 체결이었다.
+        """
+        reason = None
+        if self._is_stopped():
+            reason = "stopped"
+        elif run is not self._run or not run.covers(self._session_at(self._owner.now())):
+            reason = "session_changed"
+        elif code in self._excluded:
+            reason = "excluded"
+        elif code not in self.memory:
+            # 활성화가 풀렸다(전량 매도, 보유에서 빠짐 등).
+            reason = "forgotten"
+        if reason is not None:
+            log(
+                logger,
+                logging.INFO,
+                "trailing_stop_send_refused",
+                code=code,
+                run=run.number,
+                reason=reason,
+            )
+        return reason is None
 
     def _skip_reason(self, code: str, values: dict[str, Any]) -> str | None:
         if self._is_stopped():
@@ -991,6 +1215,27 @@ class _Watch:
 
 def _span(session: dict[str, Any]) -> str:
     return f"{session['start']}-{session['end']}"
+
+
+def _attempt(
+    state: str, reason: str | None, quantity: int | None, order_no: str | None, at: datetime
+) -> dict[str, Any]:
+    """상태 조회의 auto_sell 모양."""
+    return {
+        "state": state,
+        "reason": reason,
+        "quantity": quantity,
+        "order_no": order_no,
+        "at": format_moment(at),
+    }
+
+
+def _result_attempt(result: AutoSellResult, at: datetime) -> dict[str, Any]:
+    if result.outcome == "accepted":
+        return _attempt("accepted", None, result.quantity, result.order_no, at)
+    # 실패 이유는 결과 이름 그대로다. 매도 가능 수량 0(skipped)만 이름을 바꾼다.
+    reason = "no_sellable" if result.outcome == "skipped" else result.outcome
+    return _attempt("failed", reason, result.quantity, None, at)
 
 
 def _run_fields(run: _Run) -> dict[str, Any]:

@@ -124,7 +124,7 @@ def create_app(
     )
     now = now or (lambda: datetime.now(UTC))
     realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
-    # 자동 매도는 SL / TP가 내고, 체결 알림이 그 체결을 알아본다.
+    # 자동 매도는 SL / TP와 Trailing Stop이 내고, 체결 알림이 그 체결을 알아본다.
     auto_sell = AutoSell(orders)
     feed = FillFeed(realtime)
     fills = FillWatcher(kiwoom, open_orders, notifier, feed, auto_sell)
@@ -138,11 +138,11 @@ def create_app(
         kiwoom, sl_tp, holdings.positions, auto_sell, realtime, feed, notifier, now
     )
     sl_tp.on_saved = sl_tp_watch.settings_saved
-    # Trailing Stop은 상태만 판정하고 팔지 않는다. 주문 경로(auto_sell)를 넘기지 않는다.
     trailing_stop_watch = TrailingStopWatcher(
         kiwoom,
         trailing_stop,
         holdings.positions,
+        auto_sell,
         realtime,
         feed,
         notifier,

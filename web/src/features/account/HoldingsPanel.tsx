@@ -5,6 +5,7 @@ import {
   type EnvironmentValue,
   type NotWatchingReason,
   type TrailingStopStatus,
+  type TrailingStopAutoSell,
   type TrailingStopStock,
 } from "../../api";
 import { EMPTY, formatRate } from "../../format";
@@ -74,6 +75,9 @@ export function HoldingsPanel({ environment, rows }: { environment: EnvironmentV
               Trailing Stop 상태를 불러오지 못했습니다.{status && " 마지막으로 받은 상태를 보여줍니다."} {error.message}
             </p>
           )}
+          <p className="text-xs break-keep text-sub">
+            매도 조건 충족이 되면 매도 가능 수량 전량을 시장가로 팝니다(모의투자만).
+          </p>
           <p className="text-xs break-keep text-muted">
             수익률은 시세 체결가 기준이며 수수료·세금은 빼지 않습니다. 고점은 켜진 세션 동안의 체결가로 정합니다.
           </p>
@@ -174,6 +178,14 @@ const INELIGIBLE: Record<NonNullable<TrailingStopStock["ineligible_reason"]>, st
   unknown_exchange: "거래소 확인 불가",
 };
 
+const FAILED: Record<NonNullable<TrailingStopAutoSell["reason"]>, string> = {
+  rejected: "거부",
+  unknown: "결과 확인 불가",
+  in_progress: "다른 자동 매도 진행 중",
+  no_sellable: "매도 가능 수량 없음",
+  cancelled: "보내기 전 취소",
+};
+
 type Tone = "muted" | "waiting" | "tracking" | "triggered";
 
 const TONE: Record<Tone, string> = {
@@ -240,6 +252,7 @@ function trailingStopItem(row: HoldingRow, status: TrailingStopStatus | null): H
   const triggered = stock?.triggered_at
     ? `${stamp(stock.triggered_at)} · ${row.formatPrice(price(stock.triggered_price))}`
     : EMPTY;
+  const autoSell = status && stock?.status === "triggered" ? autoSellText(stock.auto_sell, status, stamp) : null;
   return {
     ...row.item,
     value: <StatusBadge label={label} />,
@@ -261,11 +274,32 @@ function trailingStopItem(row: HoldingRow, status: TrailingStopStatus | null): H
       { label: "고점 시각", value: stamp(stock?.peak_at) },
       { label: "활성화 시각", value: stamp(stock?.activated_at) },
       { label: "매도 조건 충족", value: triggered },
+      ...(autoSell === null ? [] : [{ label: "자동 매도", value: autoSell }]),
       { label: "지금 세션 기준", value: status ? criteriaText(status) : EMPTY },
       { label: "제외종목", value: excluded === null ? EMPTY : excluded ? "예" : "아니요" },
       ...row.sellable,
     ],
   };
+}
+
+/**
+ * 매도 조건 충족 종목의 자동 매도가 어디까지 왔는지. 장애로 멈췄으면 null이다(상태 칸에 멈춘 이유가 있다).
+ * 서버는 이번 세션 실행의 시도만 주므로, 시도가 없으면 그 세션의 다음 시세 체결에서 판다.
+ */
+function autoSellText(
+  autoSell: TrailingStopAutoSell | null,
+  status: TrailingStopStatus,
+  stamp: (iso: string) => string,
+): string | null {
+  if (!status.watching) return status.not_watching_reason === "no_session" ? "세션 밖 · 다음 세션에 매도" : null;
+  if (autoSell === null) return "다음 시세에서 매도";
+  if (autoSell.state === "sending") return "보내는 중";
+  if (autoSell.state === "accepted") {
+    const quantity = autoSell.quantity === null ? EMPTY : `${autoSell.quantity.toLocaleString("ko-KR")}주`;
+    return ["접수", autoSell.order_no ?? EMPTY, quantity, stamp(autoSell.at)].join(" · ");
+  }
+  const reason = autoSell.reason ? [FAILED[autoSell.reason]] : [];
+  return ["실패", "다음 세션에 다시 시도", ...reason].join(" · ");
 }
 
 /**

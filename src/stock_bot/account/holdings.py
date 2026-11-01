@@ -144,7 +144,9 @@ class Holdings:
         return _holding(spec, code, await self.read(spec, with_listings=False))
 
     async def fresh_holding(self, spec: EnvironmentSpec, code: str) -> dict[str, Any]:
-        """holding과 같지만, 동시에 부른 종목들이 잔고 조회 한 번을 함께 쓴다(자동 매도용).
+        """holding에 평균 매입가를 더한다(자동 매도용).
+
+        동시에 부른 종목들이 잔고 조회 한 번을 함께 쓴다.
 
         부른 뒤에 시작한 조회의 결과만 쓴다. 이미 진행 중인 조회는 기다리지 않고 다음 조회에 낀다.
         호출 한도 대기에 시간 제한을 두지 않는다. 화면을 붙잡지 않는 서버 작업이기 때문이다.
@@ -160,7 +162,11 @@ class Holdings:
                 task.add_done_callback(self._balance_tasks.discard)
         self._balance_waiters[environment] += 1
         # 기다리던 쪽 하나가 취소돼도 함께 쓰는 조회는 계속한다.
-        return _holding(spec, code, await asyncio.shield(batch))
+        snapshot = await asyncio.shield(batch)
+        holding = _holding(spec, code, snapshot)
+        # 자동 매도가 다시 읽은 평균 매입가를 기억과 비교한다. 보유하지 않으면 None이다.
+        rows = [h for h in snapshot.rows if h.code == code and not h.credit]
+        return {**holding, "purchase_price": rows[0].purchase_price if rows else None}
 
     async def _read_balances(self, spec: EnvironmentSpec) -> None:
         """기다리는 묶음이 없어질 때까지 묶음마다 한 번씩 읽는다."""

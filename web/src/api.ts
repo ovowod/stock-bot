@@ -500,6 +500,18 @@ export interface TrailingStopStock {
   peak_at: string | null;
   triggered_at: string | null;
   triggered_price: string | null;
+  /** 이번 세션 실행에서 낸 자동 매도. 아직 내지 않았으면 null. */
+  auto_sell: TrailingStopAutoSell | null;
+}
+
+/** 자동 매도가 어디까지 왔는지. at은 결과가 나온 시각(보내는 중이면 시작한 시각)이다. */
+export interface TrailingStopAutoSell {
+  state: "sending" | "accepted" | "failed";
+  /** failed일 때만 있다. */
+  reason: "rejected" | "unknown" | "in_progress" | "no_sellable" | "cancelled" | null;
+  quantity: number | null;
+  order_no: string | null;
+  at: string;
 }
 
 export interface TrailingStopStatus {

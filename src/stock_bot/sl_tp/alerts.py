@@ -114,10 +114,11 @@ def _trigger_fields(spec: EnvironmentSpec, trigger: AutoSellTrigger) -> tuple[Em
         EmbedField("트리거 체결가", price(trigger.price), inline=True),
         EmbedField("매입가", price(trigger.purchase_price), inline=True),
         # 판정은 반올림하지 않은 값으로 했다. 표시만 소수 둘째 자리로 줄인다.
-        EmbedField("수익률", f"{_rate(trigger.rate)} · 수수료·세금 제외", inline=True),
+        EmbedField("수익률", f"{format_rate(trigger.rate)} · 수수료·세금 제외", inline=True),
     )
 
 
-def _rate(rate: Decimal) -> str:
+def format_rate(rate: Decimal) -> str:
+    """소수 둘째 자리로 반올림한 부호 있는 %. Trailing Stop 알림도 쓴다."""
     shown = rate.quantize(Decimal("0.01"), ROUND_HALF_UP)
     return f"{'+' if shown > 0 else ''}{shown}%"

@@ -26,7 +26,13 @@ class FakeOrders:
         self.calls: list[tuple[str, str]] = []
 
     async def sell_all_at_market(
-        self, spec, code: str, exchange: str, order_key: str, ready: Callable[[], bool]
+        self,
+        spec,
+        code: str,
+        exchange: str,
+        order_key: str,
+        ready: Callable[[], bool],
+        confirm: Callable[[dict], bool] | None = None,
     ) -> AutoSellResult:
         self.calls.append((code, order_key))
         await self.gate.wait()

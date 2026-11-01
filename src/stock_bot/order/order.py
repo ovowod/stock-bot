@@ -154,9 +154,11 @@ class OrderService:
         exchange: str,
         order_key: str,
         ready: Callable[[], bool],
+        confirm: Callable[[dict[str, Any]], bool] | None = None,
     ) -> AutoSellResult:
         """자동 매도: 잔고를 다시 읽어 매도 가능 수량 전량을 시장가로 한 번만 보낸다.
 
+        confirm은 다시 읽은 보유종목(평균 매입가 포함)으로 부른다. False면 보내지 않는다.
         ready는 키움에 보내기 직전에 부른다. False면 보내지 않는다.
         이미 키움에 보낸 주문은 취소하지 않는다.
         """
@@ -169,7 +171,9 @@ class OrderService:
             delay = RECHECK_RETRY_SECONDS
             for attempt in range(1, RECHECK_ATTEMPTS + 1):
                 try:
-                    quantity = await self._sellable(spec, code, order_key, self._fresh_holding)
+                    holding = await self._recheck_holding(
+                        spec, code, order_key, self._fresh_holding
+                    )
                     break
                 except AppError as error:
                     reason = error.__cause__ if isinstance(error.__cause__, AppError) else error
@@ -190,6 +194,10 @@ class OrderService:
                     )
                     await asyncio.sleep(delay)
                     delay *= 2
+            if confirm is not None and not confirm(holding):
+                log(logger, logging.INFO, "auto_sell_cancelled", **fields, reason="confirm")
+                return AutoSellResult("cancelled")
+            quantity: int = holding["sellable_quantity"]
             if quantity <= 0:
                 log(logger, logging.INFO, "auto_sell_skipped", **fields, reason="no_sellable")
                 return AutoSellResult("skipped", quantity=0)
@@ -368,14 +376,14 @@ class OrderService:
                 )
         return result
 
-    async def _sellable(
+    async def _recheck_holding(
         self,
         spec: EnvironmentSpec,
         code: str,
         order_key: str,
         lookup: HoldingLookup | None = None,
-    ) -> int:
-        """매도 직전에 잔고를 다시 조회해 매도 가능 수량을 돌려준다.
+    ) -> dict[str, Any]:
+        """매도 직전에 잔고를 다시 조회해 그 종목의 보유종목(매도 가능 수량 포함)을 돌려준다.
 
         확인하지 못하면 sellable_check_failed 오류다. 원래 오류는 __cause__에 있다.
         """
@@ -407,11 +415,12 @@ class OrderService:
             quantity=holding["quantity"],
             sellable_quantity=sellable,
         )
-        return sellable
+        return holding
 
     async def _check_sellable(self, spec: EnvironmentSpec, order: dict[str, str]) -> None:
         """매도 주문 직전에 잔고를 다시 조회한다. 확인하지 못하거나 넘치면 주문을 보내지 않는다."""
-        sellable = await self._sellable(spec, order["code"], order["order_key"])
+        holding = await self._recheck_holding(spec, order["code"], order["order_key"])
+        sellable: int = holding["sellable_quantity"]
         if int(order["quantity"]) > sellable:
             log(
                 logger,
