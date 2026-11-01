@@ -29,6 +29,8 @@ class SellTrigger:
     activation_profit: Decimal
     drop_from_peak: Decimal
     session: str  # HH:MM-HH:MM, 그 시장 시간대
+    # 앞 실행에서 트리거된 종목을 새 실행에서 다시 파는 것인가.
+    retry: bool = False
 
     @property
     def rate(self) -> Decimal:
@@ -99,4 +101,5 @@ def _trigger_fields(spec: EnvironmentSpec, trigger: SellTrigger) -> tuple[EmbedF
         EmbedField("활성화 수익률", f"기준 +{trigger.activation_profit}%", inline=True),
         EmbedField("매입가", price(trigger.purchase_price), inline=True),
         EmbedField("수익률", f"{format_rate(trigger.rate)} · 수수료·세금 제외", inline=True),
+        *((EmbedField("시도", "다시 시도", inline=True),) if trigger.retry else ()),
     )

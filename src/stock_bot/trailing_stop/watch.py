@@ -901,7 +901,9 @@ class _Watch:
                 self._write("activated")
             return
         if memory.triggered_at is not None:
-            # 트리거 뒤에는 아무것도 바꾸지 않는다.
+            # 트리거 뒤에는 고점을 바꾸지 않는다. 이 실행에서 아직 팔지 않았으면 판다.
+            if code not in run.auto_sells:
+                self._start_sell(run, code, memory, session, uuid.uuid4().hex[:12], retry=True)
             return
         if price > memory.peak:
             # 고점 갱신은 시세 체결마다 로그로 남기거나 파일에 쓰지 않고 모아서 쓴다.
@@ -918,7 +920,7 @@ class _Watch:
                 "trailing_stop_triggered", code, price, purchase, memory, run, session, request_id
             )
             self._write("triggered")
-            self._start_sell(run, code, price, memory, session, request_id)
+            self._start_sell(run, code, memory, session, request_id, retry=False)
 
     def _log_judged(
         self,
@@ -955,23 +957,30 @@ class _Watch:
         self,
         run: _Run,
         code: str,
-        price: Decimal,
         memory: Memory,
         session: dict[str, Any],
         request_id: str,
+        retry: bool,
     ) -> None:
-        """자동 매도를 따로 돌린다. 시세 처리는 주문 결과를 기다리지 않는다."""
+        """자동 매도를 따로 돌린다. 시세 처리는 주문 결과를 기다리지 않는다.
+
+        이 실행에서 그 종목은 결과와 상관없이 다시 내지 않는다. 다시 시도는 앞 실행에서
+        트리거된 종목을 새 실행의 첫 시세 체결에서 파는 것이다. 알림의 트리거 칸은
+        기억한 트리거 가격과 고점, 기준은 지금 켜진 세션의 값이다.
+        """
         holding = self._holdings[code]
+        assert memory.triggered_price is not None
         trigger = SellTrigger(
             code,
             holding.name,
             holding.exchange,
-            price,
+            memory.triggered_price,
             memory.peak,
             holding.purchase_price,
             Decimal(session["activation_profit"]),
             Decimal(session["drop_from_peak"]),
             _span(session),
+            retry,
         )
         run.auto_sells[code] = _attempt("sending", None, None, None, self._owner.now())
         token = request_id_var.set(request_id)
@@ -982,7 +991,7 @@ class _Watch:
                 "trailing_stop_auto_sell_started",
                 code=code,
                 run=run.number,
-                attempt="trigger",
+                attempt="retry" if retry else "trigger",
             )
             # 요청 ID는 만들어질 때의 문맥을 따라 매도 작업으로 넘어간다.
             self._spawn(self._sell(run, trigger, request_id))
@@ -998,7 +1007,7 @@ class _Watch:
             trigger.exchange or "",
             source=AUTO_SELL_SOURCE,
             request_id=request_id,
-            ready=lambda: not self._is_stopped(),
+            ready=lambda: self._may_send(run, code),
         )
         run.auto_sells[code] = _result_attempt(result, self._owner.now())
         log(
@@ -1025,6 +1034,32 @@ class _Watch:
                 code=code,
                 sent=sent,
             )
+
+    def _may_send(self, run: _Run, code: str) -> bool:
+        """키움에 보내기 직전 확인. 거절하면 보내지 않고 다음 실행에서 다시 시도한다.
+
+        연결 끊김만으로는 막지 않는다. 끊기기 전 체결가는 실제 체결이었다.
+        """
+        reason = None
+        if self._is_stopped():
+            reason = "stopped"
+        elif run is not self._run or not run.covers(self._session_at(self._owner.now())):
+            reason = "session_changed"
+        elif code in self._excluded:
+            reason = "excluded"
+        elif code not in self.memory:
+            # 활성화가 풀렸다(전량 매도, 보유에서 빠짐 등).
+            reason = "forgotten"
+        if reason is not None:
+            log(
+                logger,
+                logging.INFO,
+                "trailing_stop_send_refused",
+                code=code,
+                run=run.number,
+                reason=reason,
+            )
+        return reason is None
 
     def _skip_reason(self, code: str, values: dict[str, Any]) -> str | None:
         if self._is_stopped():

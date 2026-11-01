@@ -1,5 +1,6 @@
 """Trailing Stop 자동 매도(모의): 트리거 때 키움 주문, Discord 알림, 상태 조회 API를 본다."""
 
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -7,16 +8,18 @@ import pytest
 
 from tests.fake_discord import GRAY, RED, FakeDiscord, fields
 from tests.fake_kiwoom import REAL_ENV, US_PAPER_ENV, body_of, kiwoom_error
-from tests.fake_realtime import FakeRealtime, fill_event
+from tests.fake_realtime import REPLACED, FakeRealtime, fill_event
 from tests.log_capture import JsonLines
 from tests.sl_tp.helpers import (
     AT_10,
     NY_10,
+    SELL_REPLY,
     Clock,
     Gate,
     api,
     balance,
     messages,
+    nth_call_gate,
     position,
     quote,
     running,
@@ -29,6 +32,8 @@ from tests.sl_tp.helpers import (
 from tests.support import wait_until
 from tests.trailing_stop.helpers import (
     held,
+    put_ts,
+    sell_fill,
     ts_kiwoom,
     ts_session,
     ts_us_kiwoom,
@@ -312,3 +317,202 @@ async def test_real_environment_never_sends_trailing_stop_orders(data_dir):
 
     assert body["not_watching_reason"] == "real"
     assert kiwoom.calls("kt10001") == []
+
+
+TWO_SESSIONS = (
+    ts_session(start="09:00", end="10:01"),
+    ts_session(start="10:01", end="11:00"),
+)
+
+
+def sell_body(kiwoom) -> list[str]:
+    """보낸 매도 주문의 수량."""
+    return [body_of(r)["ord_qty"] for r in kiwoom.calls("kt10001")]
+
+
+async def judging(caplog, times: int) -> None:
+    """보유종목을 times번째로 다시 읽고 판정을 이어 갈 때까지 기다린다."""
+    await wait_until(lambda: messages(caplog).count("trailing_stop_judging_resumed") >= times)
+
+
+@pytest.mark.parametrize("next_run", ["next_session", "next_day", "restart"])
+async def test_failed_sell_is_tried_once_more_in_the_next_run(data_dir, caplog, next_run):
+    write_ts(data_dir, *TWO_SESSIONS)
+    clock = Clock()
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    kiwoom = ts_kiwoom().reply("kt10001", kiwoom_error(1, "주문 거부"), SELL_REPLY)
+    async with running(realtime, kiwoom, data_dir, clock, discord=discord) as app:
+        connection = await watching(realtime)
+        triggered(connection)
+        await until_status(app, lambda b: auto_sell_state(b) == "failed")
+        # 같은 실행에서는 다시 내지 않는다.
+        connection.push(quote(price="-60000"))
+        await until_status(app, lambda b: b["stocks"][0]["last_price"] == "60000")
+        await settle()
+        assert len(kiwoom.calls("kt10001")) == 1
+        if next_run != "restart":
+            clock.at = AT_10 + (
+                timedelta(minutes=1) if next_run == "next_session" else timedelta(days=1)
+            )
+            await judging(caplog, 2)
+            # 다음 실행의 첫 정규장 시세 체결이면 가격과 상관없이 판다.
+            connection.push(quote(price="+70000"))
+            body = await until_status(app, lambda b: auto_sell_state(b) == "accepted")
+    if next_run == "restart":
+        second = FakeRealtime()
+        async with running(second, kiwoom, data_dir, clock, discord=discord) as app:
+            connection = await watching(second)
+            await until_status(app, lambda b: b["watching"])
+            connection.push(quote(price="+70000"))
+            body = await until_status(app, lambda b: auto_sell_state(b) == "accepted")
+    await wait_until(lambda: len(sell_alerts(discord)) == 2)
+
+    assert len(kiwoom.calls("kt10001")) == 2
+    assert body["stocks"][0]["status"] == "triggered"
+    failed, accepted = sell_alerts(discord)
+    assert failed["embeds"][0]["title"] == "Trailing Stop 자동 매도 실패"
+    assert "시도" not in fields(failed)
+    assert accepted["embeds"][0]["title"] == "Trailing Stop 자동 매도 접수"
+    # 다시 시도 알림의 트리거 칸은 기억한 트리거 가격과 고점이다.
+    assert fields(accepted)["시도"] == "다시 시도"
+    assert fields(accepted)["트리거 체결가"] == "61,000원"
+    assert fields(accepted)["고점"] == "63,000원"
+    started = [
+        r.fields for r in caplog.records if r.getMessage() == "trailing_stop_auto_sell_started"
+    ]
+    assert [f["attempt"] for f in started] == ["trigger", "retry"]
+    assert started[0] != started[1]
+
+
+async def test_accepted_sell_that_filled_everything_is_not_tried_again(data_dir, caplog):
+    write_ts(data_dir, *TWO_SESSIONS)
+    clock = Clock()
+    realtime = FakeRealtime()
+    kiwoom = ts_kiwoom()
+    async with running(realtime, kiwoom, data_dir, clock) as app:
+        connection = await watching(realtime)
+        triggered(connection)
+        await until_status(app, lambda b: auto_sell_state(b) == "accepted")
+        connection.push(sell_fill(quantity="3"))
+        await until_status(app, lambda b: b["stocks"][0]["status"] == "waiting")
+        clock.at = AT_10 + timedelta(minutes=1)
+        await judging(caplog, 3)
+        connection.push(quote(price="+61000"))
+        await until_status(app, lambda b: b["stocks"][0]["last_price"] == "61000")
+        await settle()
+
+    assert len(kiwoom.calls("kt10001")) == 1
+
+
+@pytest.mark.parametrize(
+    ("sellable", "sent"),
+    [("2", ["3", "2"]), ("0", ["3"])],
+    ids=["partly-filled", "unfilled-order-still-open"],
+)
+async def test_what_is_left_after_an_accepted_sell_is_sold_in_the_next_run(
+    data_dir, caplog, sellable, sent
+):
+    write_ts(data_dir, *TWO_SESSIONS)
+    clock = Clock()
+    realtime = FakeRealtime()
+    left = position(
+        pur_pric="000000000060000",
+        # 미체결 매도에 묶였으면 보유 수량은 그대로 3주다.
+        rmnd_qty=f"{int(sellable) or 3:015d}",
+        trde_able_qty=f"{int(sellable):015d}",
+    )
+    # 1: 세션 시작, 2: 트리거 매도 직전, 3: 다음 세션 시작, 4: 다시 시도 직전
+    kiwoom = ts_kiwoom(balance(held()), balance(held()), balance(left))
+    async with running(realtime, kiwoom, data_dir, clock) as app:
+        connection = await watching(realtime)
+        triggered(connection)
+        await until_status(app, lambda b: auto_sell_state(b) == "accepted")
+        clock.at = AT_10 + timedelta(minutes=1)
+        await judging(caplog, 2)
+        connection.push(quote(price="+61000"))
+        expected = "accepted" if sellable != "0" else "failed"
+        body = await until_status(app, lambda b: auto_sell_state(b) == expected)
+
+    assert sell_body(kiwoom) == sent
+    if sellable == "0":
+        # 미체결 매도에 묶여 매도 가능 수량이 0이면 보내지 않는다.
+        assert body["stocks"][0]["auto_sell"]["reason"] == "no_sellable"
+
+
+async def test_saving_new_criteria_in_the_same_session_does_not_try_again(data_dir):
+    write_ts(data_dir)
+    realtime = FakeRealtime()
+    kiwoom = ts_kiwoom().reply("kt10001", kiwoom_error(1, "주문 거부"), SELL_REPLY)
+    async with running(realtime, kiwoom, data_dir) as app:
+        connection = await watching(realtime)
+        triggered(connection)
+        await until_status(app, lambda b: auto_sell_state(b) == "failed")
+        await put_ts(app, ts_session(activation_profit="4", drop_from_peak="2"))
+        connection.push(quote(price="-60000"))
+        body = await until_status(app, lambda b: b["stocks"][0]["last_price"] == "60000")
+        await settle()
+
+    assert len(kiwoom.calls("kt10001")) == 1
+    assert body["stocks"][0]["auto_sell"]["reason"] == "rejected"
+
+
+@pytest.mark.parametrize("change", ["excluded", "session_changed", "forgotten", "stopped"])
+async def test_sell_is_not_sent_when_things_change_before_sending(data_dir, caplog, change):
+    write_ts(data_dir, ts_session(start="09:00", end="10:01"))
+    clock = Clock()
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    kiwoom = ts_kiwoom()
+    # 주문 직전 잔고 재확인(두 번째 잔고 조회)을 붙잡아 둔 사이에 상황이 바뀐다.
+    gate = nth_call_gate(kiwoom, "kt00018", 2)
+    async with running(realtime, gate, data_dir, clock, discord=discord) as app:
+        connection = await watching(realtime)
+        triggered(connection)
+        await gate.hit.wait()
+        if change == "excluded":
+            await put_ts(app, ts_session(start="09:00", end="10:01"), excluded=("005930",))
+        elif change == "session_changed":
+            clock.at = AT_10 + timedelta(minutes=1)
+            await until_status(app, lambda b: b["not_watching_reason"] == "no_session")
+        elif change == "forgotten":
+            connection.push(sell_fill(quantity="3"))
+            await until_status(app, lambda b: b["stocks"][0]["status"] == "waiting")
+        else:
+            connection.push(REPLACED)
+            await until_status(app, lambda b: b["not_watching_reason"] == "connection_replaced")
+        gate.open.set()
+        await wait_until(lambda: "trailing_stop_auto_sell_finished" in messages(caplog))
+        await settle()
+
+    assert kiwoom.calls("kt10001") == []
+    assert sell_alerts(discord) == []
+    finished = next(
+        r.fields for r in caplog.records if r.getMessage() == "trailing_stop_auto_sell_finished"
+    )
+    assert finished["outcome"] == "cancelled"
+    refused = [r.fields for r in caplog.records if r.getMessage() == "trailing_stop_send_refused"]
+    expected = {"excluded": "excluded", "forgotten": "forgotten"}.get(change, change)
+    assert refused[0]["reason"] == expected
+
+
+async def test_late_result_of_the_previous_run_does_not_change_the_current_run(data_dir, caplog):
+    write_ts(data_dir, *TWO_SESSIONS)
+    clock = Clock()
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    kiwoom = ts_kiwoom()
+    gate = Gate(kiwoom, lambda r: api(r) == "kt10001")
+    async with running(realtime, gate, data_dir, clock, discord=discord) as app:
+        connection = await watching(realtime)
+        triggered(connection)
+        await gate.hit.wait()
+        clock.at = AT_10 + timedelta(minutes=1)
+        await judging(caplog, 2)
+        gate.open.set()
+        await wait_until(lambda: bool(sell_alerts(discord)))
+        body = await until_status(app, lambda b: b["watching"])
+
+    # 앞 실행의 접수는 알리지만, 새 실행에서는 아직 시도하지 않은 것으로 보인다.
+    assert sell_alerts(discord)[0]["embeds"][0]["title"] == "Trailing Stop 자동 매도 접수"
+    assert body["stocks"][0]["auto_sell"] is None
