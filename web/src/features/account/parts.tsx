@@ -123,10 +123,12 @@ export interface HoldingView {
   /** 평가금액 아래 줄(예: 원화 환산 평가금액). */
   valueSub?: ReactNode;
   change: ReactNode;
-  /** 이름 옆 배지(예: "거래소 확인 불가"). */
+  /** 좁은 화면에서 이름 옆에 두는 배지(예: "거래소 확인 불가"). 넓은 화면은 셋째 줄(info)에 같은 내용이 있다. */
   badge?: string;
   /** 있으면 매도 버튼을 보여준다. */
   onSell?: () => void;
+  /** 매도 버튼이 없을 때 그 자리에 두는 안내(예: "앱에서 매도"). */
+  sellNote?: string;
 }
 
 export function HoldingsList({ items }: { items: HoldingView[] }) {
@@ -153,7 +155,6 @@ export function HoldingsList({ items }: { items: HoldingView[] }) {
               {/* 한글 이름은 띄어쓰기 자리에서만 줄을 바꾼다("아이셰어/즈"처럼 끊지 않는다). */}
               <p className="flex flex-wrap items-center gap-1.5">
                 <span className="text-[15px] font-semibold break-words break-keep">{item.name}</span>
-                <Badge text={item.badge} />
               </p>
               <Parts parts={item.position} className={SUB_TEXT} />
               <Parts parts={item.info} className={SUB_TEXT} />
@@ -163,7 +164,11 @@ export function HoldingsList({ items }: { items: HoldingView[] }) {
               {item.valueSub && <p className={SUB_TEXT}>{item.valueSub}</p>}
               <p className="text-[13px] font-medium">{item.change}</p>
             </div>
-            {item.onSell && <SellButton item={item} className="self-center px-3.5 py-2" />}
+            {/* 매도 버튼과 안내는 같은 폭을 차지해, 줄마다 평가금액의 오른쪽 끝이 맞는다. */}
+            {item.onSell && <SellButton item={item} className="w-18 self-center py-2" />}
+            {!item.onSell && item.sellNote && (
+              <p className="w-18 shrink-0 self-center text-center text-[11px] leading-snug break-keep text-muted">{item.sellNote}</p>
+            )}
           </div>
           <MobileHolding item={item} />
         </li>
@@ -208,6 +213,7 @@ function MobileHolding({ item }: { item: HoldingView }) {
             </div>
           ))}
           {item.onSell && <SellButton item={item} className="col-span-2 py-2.5" />}
+          {!item.onSell && item.sellNote && <p className="col-span-2 text-center text-xs text-muted">{item.sellNote}</p>}
         </dl>
       )}
     </div>
@@ -244,7 +250,7 @@ const SUB_TEXT = "text-[13px] text-muted";
 /** 미체결 패널의 취소 불가 배지와 같은 모양이다. */
 function Badge({ text }: { text?: string }) {
   if (!text) return null;
-  return <span className="rounded-full bg-canvas px-2 py-0.5 text-[11px] font-bold text-sub">{text}</span>;
+  return <span className="rounded-full bg-canvas px-2 py-0.5 text-[11px] font-bold whitespace-nowrap text-sub">{text}</span>;
 }
 
 /** 가운뎃점으로 이은 한 줄. 좁으면 가운뎃점 자리에서만 줄을 바꾸고, 각 덩어리 안에서는 끊지 않는다. */
