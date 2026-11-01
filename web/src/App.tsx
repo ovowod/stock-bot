@@ -6,6 +6,7 @@ import {
   ShieldAlert,
   Sparkles,
   Target,
+  TrendingDown,
   Trophy,
   Wallet,
   X,
@@ -20,6 +21,7 @@ import { OrderPanelProvider } from "./features/order/OrderPanel";
 import { RankingPage } from "./features/ranking/RankingPage";
 import { SlTpPage } from "./features/sl-tp/SlTpPage";
 import { StockSearchPage } from "./features/search/StockSearchPage";
+import { TrailingStopPage } from "./features/trailing-stop/TrailingStopPage";
 import { LEAVE_MESSAGE, ReportUnsavedChanges } from "./unsavedChanges";
 
 interface Feature {
@@ -73,6 +75,12 @@ const GROUPS: FeatureGroup[] = [
         label: "SL / TP",
         icon: Target,
         render: (environment) => <SlTpPage key={environment} environment={environment} />,
+      },
+      {
+        id: "trailing-stop",
+        label: "Trailing Stop",
+        icon: TrendingDown,
+        render: (environment) => <TrailingStopPage key={environment} environment={environment} />,
       },
     ],
   },

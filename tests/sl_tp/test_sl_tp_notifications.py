@@ -478,7 +478,7 @@ async def test_unreadable_settings_file_is_announced_once(data_dir):
     description = payload["embeds"][0]["description"]
     assert "자동매매 설정 파일을 읽지 못해" in description
     assert "고치거나 지운 뒤 SL / TP 화면에서 다시 저장" in description
-    assert "트레일링 스탑 설정도 사라집니다" in description
+    assert "Trailing Stop 설정도 사라집니다" in description
 
 
 async def test_replaced_connection_names_every_stopped_feature_once(data_dir):
