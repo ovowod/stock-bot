@@ -5,13 +5,14 @@
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from stock_bot.core.config import EnvironmentSpec
 from stock_bot.core.notification import Embed, EmbedField
 from stock_bot.fill.watch import LOSS_COLOR, NEUTRAL_COLOR, PRICE_FORMATS, PROFIT_COLOR
 from stock_bot.order.order import AutoSellResult
-from stock_bot.sl_tp.alerts import UNKNOWN_RESULT, ZONE_LABELS, format_rate
+from stock_bot.sl_tp.alerts import UNKNOWN_RESULT, ZONE_LABELS, format_rate, local_time
 
 RETRY_NEXT_SESSION = "다음 Trailing Stop 세션에 다시 시도합니다."
 
@@ -24,6 +25,7 @@ class SellTrigger:
     name: str
     exchange: str | None  # 미국만
     price: Decimal  # 트리거 체결가
+    triggered_at: datetime
     peak: Decimal
     purchase_price: Decimal
     activation_profit: Decimal
@@ -101,5 +103,13 @@ def _trigger_fields(spec: EnvironmentSpec, trigger: SellTrigger) -> tuple[EmbedF
         EmbedField("활성화 수익률", f"기준 +{trigger.activation_profit}%", inline=True),
         EmbedField("매입가", price(trigger.purchase_price), inline=True),
         EmbedField("수익률", f"{format_rate(trigger.rate)} · 수수료·세금 제외", inline=True),
-        *((EmbedField("시도", "다시 시도", inline=True),) if trigger.retry else ()),
+        # 다시 시도는 앞 실행의 트리거라, 언제 트리거됐는지 함께 보인다.
+        *(
+            (
+                EmbedField("시도", "다시 시도", inline=True),
+                EmbedField("트리거 시각", local_time(spec, trigger.triggered_at), inline=True),
+            )
+            if trigger.retry
+            else ()
+        ),
     )

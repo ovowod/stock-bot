@@ -63,14 +63,6 @@ RECORD_WRITE_SECONDS = 5.0
 NEUTRAL_COLOR = 0x8B8F98
 # 체결 알림과 로그에 남는 자동 매도 기능 이름.
 AUTO_SELL_SOURCE = "Trailing Stop"
-# 보내지 않았거나 접수되지 않은 자동 매도 결과 -> 상태 조회의 실패 이유.
-FAILED_REASONS = {
-    "rejected": "rejected",
-    "unknown": "unknown",
-    "in_progress": "in_progress",
-    "skipped": "no_sellable",
-    "cancelled": "cancelled",
-}
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 
@@ -568,7 +560,7 @@ class _Watch:
             holding = holdings.get(code)
             if holding is None:
                 continue
-            if self._accept_purchase_price(code, holding.purchase_price, connection):
+            if self._reconcile_purchase_price(code, holding.purchase_price, connection):
                 changed = True
         self._filled.clear()
         self._compared_connection = connection
@@ -576,10 +568,13 @@ class _Watch:
         if changed:
             self._write("purchase_price")
 
-    def _accept_purchase_price(self, code: str, purchase: Decimal, connection: int | None) -> bool:
-        """다시 읽은 평균 매입가가 기억과 다르면 받은 체결로 설명될 때만 받아들인다.
+    def _reconcile_purchase_price(
+        self, code: str, purchase: Decimal, connection: int | None
+    ) -> bool:
+        """다시 읽은 평균 매입가를 기억과 맞춰 본다.
 
-        받아들여 기억을 바꿨으면 True다. 설명되지 않으면 기억을 버리고 False다.
+        같으면 그대로 두고 False다. 다르지만 받은 체결로 설명되면 기억의 값을 바꾸고 True다.
+        설명되지 않으면 기억을 버리고 False다. 바꾼 값을 파일에 쓰는 것은 부르는 쪽이 한다.
         """
         memory = self.memory[code]
         if purchase == memory.purchase_price:
@@ -1009,12 +1004,13 @@ class _Watch:
         기억한 트리거 가격과 고점, 기준은 지금 켜진 세션의 값이다.
         """
         holding = self._holdings[code]
-        assert memory.triggered_price is not None
+        assert memory.triggered_at is not None and memory.triggered_price is not None
         trigger = SellTrigger(
             code,
             holding.name,
             holding.exchange,
             memory.triggered_price,
+            memory.triggered_at,
             memory.peak,
             holding.purchase_price,
             Decimal(session["activation_profit"]),
@@ -1085,7 +1081,7 @@ class _Watch:
         purchase = holding.get("purchase_price")
         if purchase is None or code not in self.memory:
             return True
-        if self._accept_purchase_price(code, purchase, self._channel.connection):
+        if self._reconcile_purchase_price(code, purchase, self._channel.connection):
             self._write("purchase_price")
         if code in self.memory:
             return True
@@ -1237,7 +1233,9 @@ def _attempt(
 def _result_attempt(result: AutoSellResult, at: datetime) -> dict[str, Any]:
     if result.outcome == "accepted":
         return _attempt("accepted", None, result.quantity, result.order_no, at)
-    return _attempt("failed", FAILED_REASONS[result.outcome], result.quantity, None, at)
+    # 실패 이유는 결과 이름 그대로다. 매도 가능 수량 0(skipped)만 이름을 바꾼다.
+    reason = "no_sellable" if result.outcome == "skipped" else result.outcome
+    return _attempt("failed", reason, result.quantity, None, at)
 
 
 def _run_fields(run: _Run) -> dict[str, Any]:

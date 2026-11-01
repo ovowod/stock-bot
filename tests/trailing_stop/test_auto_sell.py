@@ -380,6 +380,8 @@ async def test_failed_sell_is_tried_once_more_in_the_next_run(data_dir, caplog, 
     assert accepted["embeds"][0]["title"] == "Trailing Stop 자동 매도 접수"
     # 다시 시도 알림의 트리거 칸은 기억한 트리거 가격과 고점이다.
     assert fields(accepted)["시도"] == "다시 시도"
+    assert fields(accepted)["트리거 시각"] == "2026-10-26 10:00:00 (한국시간)"
+    assert "트리거 시각" not in fields(failed)
     assert fields(accepted)["트리거 체결가"] == "61,000원"
     assert fields(accepted)["고점"] == "63,000원"
     started = [
