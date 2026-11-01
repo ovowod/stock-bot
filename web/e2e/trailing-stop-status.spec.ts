@@ -587,6 +587,56 @@ test("장애로 멈추면 활성화된 종목은 고점 추적 중 · <멈춘 �
   await expect(visible(row(page, "NAVER"), "감시 안 함 · 보유종목 확인 중")).toBeVisible();
 });
 
+test("세션 밖에서도 기억한 종목은 세션 밖, 갱신 멈춤이고 고점 기록을 읽지 못하면 그 이유로 보인다", async ({
+  page,
+  isMobile,
+}) => {
+  // 한국시간 2026-11-02 18:00. 활성화와 트리거는 오늘·어제 세션에서 일어났다.
+  await page.clock.install({ time: new Date("2026-11-02T09:00:00Z") });
+  let reason = "no_session";
+  await mockScreen(page, { domestic_paper: domestic("domestic_paper", [SAMSUNG, NAVER, HYNIX]) }, (environment) => ({
+    body: status(environment, {
+      watching: false,
+      not_watching_reason: reason,
+      session: null,
+      stocks: [
+        stock("005930", {
+          status: "tracking",
+          activated_at: "2026-11-01T01:03:00+00:00",
+          peak: "90000",
+          peak_at: "2026-11-02T02:00:00+00:00",
+        }),
+        stock("000660", {
+          status: "triggered",
+          activated_at: "2026-11-02T01:03:00+00:00",
+          peak: "110000",
+          peak_at: "2026-11-02T01:10:00+00:00",
+          triggered_at: "2026-11-02T01:30:00+00:00",
+          triggered_price: "106700",
+        }),
+      ],
+    }),
+  }));
+  await openDashboard(page);
+  await view(page, "Trailing Stop").click();
+
+  const samsung = row(page, "삼성전자");
+  await expect(visible(samsung, "고점 추적 중 · 세션 밖, 갱신 멈춤")).toBeVisible();
+  // 84,500 / 90,000 = −6.11%. 세션 밖에서는 계좌 현재가로 계산한다.
+  await expectFact(samsung, isMobile, "고점 대비", "005930 · 도달 · 11/01 10:03 · 고점 대비 −6.1%", "−6.1%");
+  const hynix = row(page, "SK하이닉스");
+  await expect(visible(hynix, "매도 조건 충족 · 세션 밖, 갱신 멈춤")).toBeVisible();
+  await expectFact(hynix, isMobile, "매도 조건 충족", "매도 조건 충족 10:30 · 106,700원", "10:30 · 106,700원");
+  await expect(visible(row(page, "NAVER"), "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+
+  // 고점 기록을 읽지 못해 멈춘 것은 세션 밖과 구분해 멈춘 이유를 붙인다.
+  reason = "state_unreadable";
+  await page.clock.runFor(3000);
+  await expect(visible(row(page, "삼성전자"), "고점 추적 중 · 고점 기록을 읽지 못함")).toBeVisible();
+  await expect(visible(row(page, "SK하이닉스"), "매도 조건 충족 · 고점 기록을 읽지 못함")).toBeVisible();
+  await expect(page.getByText("세션 밖, 갱신 멈춤", { exact: false }).filter({ visible: true })).toHaveCount(0);
+});
+
 test("미국 감시 종목은 외화로 고점을 보이고 뉴욕시간으로 시각을 보인다", async ({ page, isMobile }) => {
   // 뉴욕 2026-11-02 10:00(서머타임 끝).
   await page.clock.install({ time: new Date("2026-11-02T15:00:00Z") });

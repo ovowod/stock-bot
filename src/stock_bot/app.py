@@ -140,7 +140,15 @@ def create_app(
     sl_tp.on_saved = sl_tp_watch.settings_saved
     # Trailing Stop은 상태만 판정하고 팔지 않는다. 주문 경로(auto_sell)를 넘기지 않는다.
     trailing_stop_watch = TrailingStopWatcher(
-        kiwoom, trailing_stop, holdings.positions, realtime, feed, notifier, now
+        kiwoom,
+        trailing_stop,
+        holdings.positions,
+        realtime,
+        feed,
+        notifier,
+        now,
+        # 고점 기록은 장중에 계속 바뀌므로 자동매매 설정 파일과 따로 둔다.
+        data_dir / "trailing-stop",
     )
     trailing_stop.on_saved = trailing_stop_watch.settings_saved
     trailing_stop_status = TrailingStopStatus(kiwoom, trailing_stop, trailing_stop_watch, now)

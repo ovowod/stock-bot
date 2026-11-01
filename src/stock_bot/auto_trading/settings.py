@@ -89,22 +89,8 @@ class AutoTradingSettingsFile:
         return sections
 
     def write(self, spec: EnvironmentSpec, sections: dict[str, Any]) -> None:
-        """임시 파일에 다 쓴 뒤 바꿔치기해, 쓰다 끊겨도 반쯤 쓴 파일이 남지 않게 한다."""
-        path = self.path(spec)
         content = json.dumps({"version": FORMAT_VERSION, **sections}, ensure_ascii=False, indent=2)
-        temp: Path | None = None
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                "w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False
-            ) as file:
-                temp = Path(file.name)
-                file.write(content)
-            os.replace(temp, path)
-        except OSError:
-            if temp is not None:
-                temp.unlink(missing_ok=True)
-            raise
+        write_atomic(self.path(spec), content)
 
     def migrate(self, legacy_dir: Path, feature: Feature) -> None:
         """예전 SL / TP 파일(version 1)을 새 파일의 feature 칸으로 옮긴다. 원본은 그대로 둔다.
@@ -146,6 +132,26 @@ class AutoTradingSettingsFile:
                 )
             finally:
                 environment_var.reset(token)
+
+
+def write_atomic(path: Path, content: str) -> None:
+    """임시 파일에 다 쓴 뒤 바꿔치기해, 쓰다 끊겨도 반쯤 쓴 파일이 남지 않게 한다.
+
+    쓰지 못하면 임시 파일을 지우고 OSError를 그대로 낸다.
+    """
+    temp: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False
+        ) as file:
+            temp = Path(file.name)
+            file.write(content)
+        os.replace(temp, path)
+    except OSError:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+        raise
 
 
 class FeatureSettingsStore:

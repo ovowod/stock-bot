@@ -1,6 +1,7 @@
 """Trailing Stop 상태 조회: 계좌 확인의 Trailing Stop 보기가 3초마다 부른다.
 
 키움을 부르지 않는다. 설정은 자동매매 설정 파일에서, 감시 여부·이유·종목은 감시의 메모리에서 읽는다.
+고점 기록 파일은 읽지 않는다. 감시의 메모리가 그보다 앞서 있다.
 """
 
 import logging
@@ -76,8 +77,8 @@ class TrailingStopStatus:
             self._kiwoom.credentials(spec)
         except AppError:
             return False, "no_credentials", []
-        if not settings_ok:
-            return False, "settings_unreadable", []
-        state = self._watcher.state(spec)
+        # 설정 파일을 읽지 못하면 감시 중이 아닌 것으로 보고, 기억이 있는 종목만 담는다.
+        stopped = None if settings_ok else "settings_unreadable"
+        state = self._watcher.state(spec, stopped)
         # 감시가 아직 시작되지 않았으면(서버 시작 전) 켜진 세션이 없는 것과 같다.
-        return (False, "no_session", []) if state is None else state
+        return (False, stopped or "no_session", []) if state is None else state

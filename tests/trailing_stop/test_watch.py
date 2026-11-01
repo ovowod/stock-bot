@@ -4,6 +4,7 @@
 """
 
 import json
+import logging
 from datetime import UTC, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from fastapi import FastAPI
 from stock_bot.fill import feed as fill_feed
 from stock_bot.kiwoom import realtime as realtime_module
 from stock_bot.trailing_stop import watch as ts_watch
+from tests.fake_discord import FakeDiscord, fields
 from tests.fake_kiwoom import FAKE_ENV, REAL_ENV, US_PAPER_ENV, FakeKiwoom, body_of
 from tests.fake_realtime import REPLACED, FakeConnection, FakeRealtime, fill_event
 from tests.log_capture import JsonLines
@@ -56,6 +58,7 @@ def fast_waits(monkeypatch):
     monkeypatch.setattr(ts_watch, "SESSION_CHECK_SECONDS", 0.01)
     monkeypatch.setattr(ts_watch, "HOLDINGS_RETRY_INITIAL_SECONDS", 0.01)
     monkeypatch.setattr(ts_watch, "HOLDINGS_RETRY_MAX_SECONDS", 0.04)
+    monkeypatch.setattr(ts_watch, "RECORD_WRITE_SECONDS", 0.01)
     monkeypatch.setattr(realtime_module, "RECONNECT_INITIAL_SECONDS", 0.01)
     monkeypatch.setattr(fill_feed, "REGISTER_RETRY_INITIAL_SECONDS", 0.01)
     monkeypatch.setattr(fill_feed, "REGISTER_RETRY_MAX_SECONDS", 0.04)
@@ -786,3 +789,440 @@ async def test_us_paper_subscribes_fe_and_judges_in_dollars(data_dir):
         ("ZZZZ", "ineligible", "unknown_exchange", None, None),
     ]
     assert found["stocks"][0]["activated_at"] == utc(NY_10)
+
+
+# --- 고점 기록 파일(04) ---
+
+
+def record_path(data_dir: Path, environment: str = "domestic_paper") -> Path:
+    return data_dir / "trailing-stop" / f"{environment}.json"
+
+
+def read_record(data_dir: Path) -> dict[str, Any]:
+    return json.loads(record_path(data_dir).read_text(encoding="utf-8"))
+
+
+def remembered(
+    activated_at,
+    peak: str,
+    peak_at,
+    triggered_at=None,
+    triggered_price: str | None = None,
+) -> dict[str, Any]:
+    """고점 기록 파일의 종목 하나(버전 1)."""
+    return {
+        "activated_at": utc(activated_at),
+        "peak": peak,
+        "peak_at": utc(peak_at),
+        "triggered_at": None if triggered_at is None else utc(triggered_at),
+        "triggered_price": triggered_price,
+    }
+
+
+def write_record(data_dir: Path, stocks: dict[str, Any]) -> None:
+    path = record_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1, "stocks": stocks}), encoding="utf-8")
+
+
+async def put_ts(
+    app: FastAPI, *sessions: dict[str, Any], excluded: tuple[str, ...] = ()
+) -> httpx.Response:
+    """Trailing Stop 화면처럼 저장 API로 설정을 저장한다."""
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post("/api/auth/login", json={"password": FAKE_ENV["PASSWORD"]})
+        response = await client.put(
+            "/api/environments/domestic_paper/trailing-stop",
+            json={
+                "excluded": [{"code": c, "name": "제외", "exchange": None} for c in excluded],
+                "sessions": list(sessions or (ts_session(),)),
+            },
+        )
+    assert response.status_code == 200, response.text
+    return response
+
+
+def fill_regs(connection: FakeConnection) -> list[dict[str, Any]]:
+    return [m for m in connection.requests("REG") if m["grp_no"] == "1"]
+
+
+def ts_alerts(discord: FakeDiscord) -> list[dict[str, Any]]:
+    """Trailing Stop 알림만. 로그인 알림 등은 뺀다."""
+    return [p for p in discord.payloads if p["embeds"][0]["title"].startswith("Trailing Stop")]
+
+
+async def alerted(discord: FakeDiscord) -> None:
+    await wait_until(lambda: bool(ts_alerts(discord)))
+
+
+AT_16 = AT_10.replace(hour=16)
+NEXT_DAY_10 = AT_10 + timedelta(days=1)
+UNREADABLE_RECORD_TEXT = (
+    "Trailing Stop 고점 기록을 읽지 못해 이 환경의 Trailing Stop 판정을 멈췄습니다. "
+    "파일을 고치거나 지운 뒤 Trailing Stop 화면에서 다시 저장하면 그때부터 동작합니다. "
+    "지우면 기억하던 고점이 사라집니다."
+)
+
+
+async def test_memory_carries_over_night_and_a_lower_next_day_open_triggers_at_once(
+    data_dir, caplog
+):
+    write_ts(data_dir)
+    clock = Clock()
+    realtime = FakeRealtime()
+    kiwoom = ts_kiwoom()
+    async with running(realtime, kiwoom, data_dir, clock) as app:
+        connection = await watching(realtime)
+        connection.push(quote(price="+63000"))
+        await until_status(app, lambda b: b["stocks"][0]["status"] == "tracking")
+        clock.at = AT_10 + timedelta(minutes=1)
+        connection.push(quote(price="+64000"))
+        await until_status(app, lambda b: b["stocks"][0]["peak"] == "64000")
+        clock.at = AT_16
+        evening = await until_status(app, lambda b: b["not_watching_reason"] == "no_session")
+        clock.at = NEXT_DAY_10
+        await wait_until(lambda: len(kiwoom.calls("kt00018")) == 2)
+        morning = await until_status(app, lambda b: b["watching"])
+        # 다음 날 첫 시세 체결이 고점 64,000원 대비 -3%(62,080원)보다 낮다.
+        connection.push(quote(price="-62000"))
+        found = await until_status(app, lambda b: b["stocks"][0]["status"] == "triggered")
+
+    # 세션 밖에서도 기억이 있는 종목은 고점 추적 중으로 담는다. 판정에 쓰는 값은 비운다.
+    [item] = evening["stocks"]
+    assert (item["status"], item["peak"], item["purchase_price"]) == ("tracking", "64000", None)
+    assert morning["stocks"][0]["status"] == "tracking"
+    assert morning["stocks"][0]["activated_at"] == utc(AT_10)
+    assert morning["stocks"][0]["peak"] == "64000"
+    [item] = found["stocks"]
+    assert item["triggered_at"] == utc(NEXT_DAY_10)
+    assert item["triggered_price"] == "62000"
+    assert item["peak"] == "64000"
+    # 세션이 바뀌어도 파일을 다시 읽지 않는다.
+    read = [r for r in caplog.records if r.getMessage() == "trailing_stop_record_read"]
+    assert [r.fields["reason"] for r in read] == ["start"]
+
+
+async def test_restarted_app_continues_from_the_record_in_the_same_data_folder(
+    data_dir, monkeypatch
+):
+    # 고점 갱신은 모아서 쓰므로, 이 테스트 동안에는 서버 종료 때만 쓴다.
+    monkeypatch.setattr(ts_watch, "RECORD_WRITE_SECONDS", 60)
+    write_ts(data_dir)
+    clock = Clock()
+    realtime = FakeRealtime()
+    async with running(realtime, ts_kiwoom(), data_dir, clock) as app:
+        connection = await watching(realtime)
+        connection.push(quote(price="+63000"))
+        await until_status(app, lambda b: b["stocks"][0]["status"] == "tracking")
+        # 활성화는 바로 쓴다.
+        activated = read_record(data_dir)
+        clock.at = AT_10 + timedelta(minutes=1)
+        connection.push(quote(price="+64000"))
+        await until_status(app, lambda b: b["stocks"][0]["peak"] == "64000")
+        before_stop = read_record(data_dir)
+
+    stopped = read_record(data_dir)
+    clock.at = AT_10 + timedelta(minutes=2)
+    second = FakeRealtime()
+    async with running(second, ts_kiwoom(), data_dir, clock) as app:
+        connection = await watching(second)
+        restarted = await until_status(app, lambda b: b["watching"])
+        connection.push(quote(price="-62080"))
+        found = await until_status(app, lambda b: b["stocks"][0]["status"] == "triggered")
+
+    assert activated == {"version": 1, "stocks": {"005930": remembered(AT_10, "63000", AT_10)}}
+    assert before_stop == activated
+    peak_at = AT_10 + timedelta(minutes=1)
+    assert stopped == {"version": 1, "stocks": {"005930": remembered(AT_10, "64000", peak_at)}}
+    [item] = restarted["stocks"]
+    assert (item["status"], item["activated_at"], item["peak"], item["peak_at"]) == (
+        "tracking",
+        utc(AT_10),
+        "64000",
+        utc(peak_at),
+    )
+    assert found["stocks"][0]["triggered_price"] == "62080"
+    triggered_at = AT_10 + timedelta(minutes=2)
+    assert read_record(data_dir)["stocks"]["005930"] == remembered(
+        AT_10, "64000", peak_at, triggered_at, "62080"
+    )
+
+
+async def test_peak_updates_are_written_in_batches_and_when_the_session_ends(
+    data_dir, monkeypatch, caplog
+):
+    caplog.set_level(logging.DEBUG, logger="stock_bot.trailing_stop_watch")
+    monkeypatch.setattr(ts_watch, "RECORD_WRITE_SECONDS", 60)
+    write_ts(data_dir, ts_session(start="09:00", end="10:02"))
+    clock = Clock()
+    realtime = FakeRealtime()
+    async with running(realtime, ts_kiwoom(), data_dir, clock) as app:
+        connection = await watching(realtime)
+        connection.push(quote(price="+63000"))
+        connection.push(quote(price="+63500"))
+        connection.push(quote(price="+64000"))
+        await until_status(app, lambda b: b["stocks"][0]["peak"] == "64000")
+        assert read_record(data_dir)["stocks"]["005930"]["peak"] == "63000"
+        clock.at = AT_10 + timedelta(minutes=2)
+        await wait_until(lambda: read_record(data_dir)["stocks"]["005930"]["peak"] == "64000")
+
+    written = [r.fields for r in caplog.records if r.getMessage() == "trailing_stop_record_written"]
+    assert [(f["reason"], f["peak_updated"]) for f in written] == [
+        ("activated", 0),
+        ("session_ended", 1),
+    ]
+
+
+async def test_peak_updates_are_written_without_waiting_for_the_session_end(data_dir):
+    write_ts(data_dir)
+    realtime = FakeRealtime()
+    async with running(realtime, ts_kiwoom(), data_dir) as app:
+        connection = await watching(realtime)
+        connection.push(quote(price="+63000"))
+        connection.push(quote(price="+64000"))
+        await until_status(app, lambda b: b["stocks"][0]["peak"] == "64000")
+        await wait_until(lambda: read_record(data_dir)["stocks"]["005930"]["peak"] == "64000")
+
+
+async def test_fills_outside_the_session_keep_memory_for_partial_sells_and_forget_sold_out(
+    data_dir, caplog
+):
+    write_ts(data_dir)
+    clock = Clock()
+    realtime = FakeRealtime()
+    kiwoom = ts_kiwoom(balance(held()), balance(held(quantity="2")))
+    async with running(realtime, kiwoom, data_dir, clock) as app:
+        connection = await watching(realtime)
+        connection.push(quote(price="+63000"))
+        await until_status(app, lambda b: b["stocks"][0]["status"] == "tracking")
+        clock.at = AT_16
+        await until_status(app, lambda b: b["not_watching_reason"] == "no_session")
+        connection.push(sell_fill(quantity="1"))
+        await wait_until(lambda: len(kiwoom.calls("kt00018")) == 2)
+        await wait_until(
+            lambda: any(
+                r.getMessage() == "trailing_stop_holdings_refreshed" and r.fields["run"] is None
+                for r in caplog.records
+            )
+        )
+        partial = await status(app)
+        connection.push(sell_fill(quantity="2"))
+        sold = await until_status(app, lambda b: b["stocks"] == [])
+
+    assert partial["not_watching_reason"] == "no_session"
+    assert [(s["code"], s["status"], s["peak"]) for s in partial["stocks"]] == [
+        ("005930", "tracking", "63000")
+    ]
+    assert sold["not_watching_reason"] == "no_session"
+    # 남은 2주를 다 판 것은 체결 수량으로 알았다. 보유종목을 다시 읽지 않는다.
+    assert len(kiwoom.calls("kt00018")) == 2
+    assert read_record(data_dir) == {"version": 1, "stocks": {}}
+    forgotten = [r for r in caplog.records if r.getMessage() == "trailing_stop_memory_forgotten"]
+    assert [r.fields["reason"] for r in forgotten] == ["sold_out"]
+    # 세션 밖에서는 시세를 다시 구독하지 않는다.
+    assert len(ts_regs(connection)) == 1
+
+
+async def test_restart_outside_the_session_rereads_holdings_on_a_fill_without_subscribing_quotes(
+    data_dir, caplog
+):
+    write_ts(data_dir)
+    write_record(data_dir, {"005930": remembered(AT_10, "64000", AT_10)})
+    realtime = FakeRealtime()
+    kiwoom = ts_kiwoom(balance(held("000660")))
+    async with running(realtime, kiwoom, data_dir, Clock(AT_16)) as app:
+        before = await status(app)
+        # 기억이 있으면 세션 밖에서도 내 계좌 체결을 받는다.
+        await wait_until(lambda: any(fill_regs(c) for c in realtime.connections))
+        connection = realtime.connections[0]
+        connection.push(sell_fill(quantity="1"))
+        after = await until_status(app, lambda b: b["stocks"] == [])
+
+    assert before["not_watching_reason"] == "no_session"
+    assert [(s["code"], s["status"], s["peak"]) for s in before["stocks"]] == [
+        ("005930", "tracking", "64000")
+    ]
+    assert after["not_watching_reason"] == "no_session"
+    assert len(kiwoom.calls("kt00018")) == 1
+    assert ts_regs(connection) == []
+    assert read_record(data_dir) == {"version": 1, "stocks": {}}
+    forgotten = [r for r in caplog.records if r.getMessage() == "trailing_stop_memory_forgotten"]
+    assert [(r.fields["code"], r.fields["reason"]) for r in forgotten] == [("005930", "not_held")]
+
+
+async def test_saving_with_the_stock_excluded_forgets_it_but_criteria_only_saves_do_not(
+    data_dir, caplog
+):
+    write_ts(data_dir)
+    realtime = FakeRealtime()
+    async with running(realtime, ts_kiwoom(), data_dir) as app:
+        connection = await watching(realtime)
+        connection.push(quote(price="+63000"))
+        await until_status(app, lambda b: b["stocks"][0]["status"] == "tracking")
+        await put_ts(app, ts_session(activation_profit="10", drop_from_peak="5"))
+        kept = await stock(app)
+        await put_ts(app, excluded=("005930",))
+        excluded = await until_status(app, lambda b: b["stocks"][0]["peak"] is None)
+        await put_ts(app)
+        included = await until_status(app, lambda b: b["watching"])
+
+    assert (kept["status"], kept["peak"]) == ("tracking", "63000")
+    assert excluded["excluded"] == ["005930"]
+    assert excluded["stocks"][0]["status"] == "waiting"
+    # 제외에서 빼도 예전 기억은 돌아오지 않는다.
+    assert included["stocks"][0]["status"] == "waiting"
+    assert read_record(data_dir) == {"version": 1, "stocks": {}}
+    forgotten = [r for r in caplog.records if r.getMessage() == "trailing_stop_memory_forgotten"]
+    assert [r.fields["reason"] for r in forgotten] == ["excluded"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{not json",
+        json.dumps({"version": 2, "stocks": {}}),
+        json.dumps({"version": 1, "stocks": {"005930": {"peak": "abc"}}}),
+    ],
+    ids=["not-json", "other-version", "bad-stock"],
+)
+async def test_unreadable_record_stops_judging_alerts_once_and_resumes_after_saving(
+    data_dir, caplog, content
+):
+    write_ts(data_dir)
+    path = record_path(data_dir)
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding="utf-8")
+    discord = FakeDiscord()
+    realtime = FakeRealtime()
+    kiwoom = ts_kiwoom()
+    async with running(realtime, kiwoom, data_dir, discord=discord) as app:
+        stopped = await status(app)
+        await alerted(discord)
+        # 고치지 않고 저장하면 다시 읽어도 멈춰 있다. 다시 알리지 않는다.
+        await put_ts(app)
+        still = await status(app)
+        assert kiwoom.calls("kt00018") == []
+        assert path.read_text(encoding="utf-8") == content
+        write_record(data_dir, {"005930": remembered(AT_10, "64000", AT_10)})
+        await put_ts(app)
+        connection = await watching(realtime)
+        resumed = await until_status(app, lambda b: b["watching"])
+        connection.push(quote(price="-62080"))
+        found = await until_status(app, lambda b: b["stocks"][0]["status"] == "triggered")
+
+    assert stopped["watching"] is False
+    assert stopped["not_watching_reason"] == "state_unreadable"
+    assert stopped["stocks"] == []
+    assert still["not_watching_reason"] == "state_unreadable"
+    assert len(ts_alerts(discord)) == 1
+    embed = ts_alerts(discord)[0]["embeds"][0]
+    assert embed["title"] == "Trailing Stop 판정 중단"
+    assert embed["description"] == UNREADABLE_RECORD_TEXT
+    assert fields(ts_alerts(discord)[0])["파일"] == str(path)
+    assert (resumed["stocks"][0]["status"], resumed["stocks"][0]["peak"]) == ("tracking", "64000")
+    assert found["stocks"][0]["triggered_price"] == "62080"
+    unreadable = [r for r in caplog.records if r.getMessage() == "trailing_stop_record_unreadable"]
+    assert [r.fields["reason"] for r in unreadable] == ["start", "settings_saved"]
+    assert unreadable[0].fields["path"] == str(path)
+    assert unreadable[0].fields["cause"]
+    resumed_logs = [r for r in caplog.records if r.getMessage() == "trailing_stop_watch_resumed"]
+    assert [r.fields["reason"] for r in resumed_logs] == ["state_recovered"]
+
+
+async def test_write_failure_alerts_once_keeps_judging_and_retries_on_the_next_write(
+    data_dir, caplog
+):
+    write_ts(data_dir)
+    path = record_path(data_dir)
+    discord = FakeDiscord()
+    realtime = FakeRealtime()
+    async with running(realtime, ts_kiwoom(), data_dir, discord=discord) as app:
+        connection = await watching(realtime)
+        # 시작한 뒤 기록 파일 자리에 폴더가 생겨 쓰지 못한다.
+        path.mkdir(parents=True)
+        connection.push(quote(price="+63000"))
+        await alerted(discord)
+        connection.push(quote(price="+64000"))
+        await wait_until(lambda: messages(caplog).count("trailing_stop_record_write_failed") >= 2)
+        tracking = await stock(app)
+        path.rmdir()
+        connection.push(quote(price="-62080"))
+        await until_status(app, lambda b: b["stocks"][0]["status"] == "triggered")
+        await wait_until(path.is_file)
+
+    assert (tracking["status"], tracking["peak"]) == ("tracking", "64000")
+    assert len(ts_alerts(discord)) == 1
+    embed = ts_alerts(discord)[0]["embeds"][0]
+    assert embed["title"] == "Trailing Stop 고점 기록 저장 실패"
+    assert fields(ts_alerts(discord)[0])["파일"] == str(path)
+    # 다시 쓸 때 메모리 전체를 쓴다.
+    item = read_record(data_dir)["stocks"]["005930"]
+    assert (item["peak"], item["triggered_price"]) == ("64000", "62080")
+    failed = next(
+        r for r in caplog.records if r.getMessage() == "trailing_stop_record_write_failed"
+    )
+    assert failed.fields["path"] == str(path)
+    assert failed.fields["cause"]
+    assert "trailing_stop_record_write_recovered" in messages(caplog)
+
+
+async def test_memory_stays_ahead_of_a_stale_record_across_session_change_and_settings_save(
+    data_dir,
+):
+    sessions = (
+        ts_session(start="09:00", end="10:01", drop_from_peak="3"),
+        ts_session(start="10:01", end="11:00", drop_from_peak="1"),
+    )
+    write_ts(data_dir, *sessions)
+    clock = Clock()
+    discord = FakeDiscord()
+    realtime = FakeRealtime()
+    kiwoom = ts_kiwoom()
+    folder = record_path(data_dir).parent
+    async with running(realtime, kiwoom, data_dir, clock, discord=discord) as app:
+        connection = await watching(realtime)
+        connection.push(quote(price="+63000"))
+        await wait_until(record_path(data_dir).is_file)
+        # 활성화를 쓴 뒤로는 쓰지 못해 파일이 63,000원에 머문다.
+        folder.chmod(0o500)
+        try:
+            connection.push(quote(price="+64000"))
+            await until_status(app, lambda b: b["stocks"][0]["peak"] == "64000")
+            clock.at = AT_10 + timedelta(minutes=1)
+            await wait_until(lambda: len(kiwoom.calls("kt00018")) == 2)
+            next_session = await until_status(app, lambda b: b["watching"])
+            connection.push(quote(price="-63360"))  # 64,000원 대비 -1%
+            await until_status(app, lambda b: b["stocks"][0]["status"] == "triggered")
+            await put_ts(app, *sessions)
+            saved = await until_status(app, lambda b: b["watching"])
+            stale = read_record(data_dir)
+        finally:
+            folder.chmod(0o700)
+        await alerted(discord)
+
+    assert next_session["stocks"][0]["peak"] == "64000"
+    [item] = saved["stocks"]
+    assert (item["status"], item["peak"], item["triggered_price"]) == (
+        "triggered",
+        "64000",
+        "63360",
+    )
+    assert stale["stocks"]["005930"]["peak"] == "63000"
+    assert len(ts_alerts(discord)) == 1
+
+
+async def test_status_lists_remembered_stocks_while_the_settings_file_is_unreadable(data_dir):
+    write_ts(data_dir)
+    realtime = FakeRealtime()
+    async with running(realtime, ts_kiwoom(), data_dir) as app:
+        connection = await watching(realtime)
+        connection.push(quote(price="+63000"))
+        await until_status(app, lambda b: b["stocks"][0]["status"] == "tracking")
+        (data_dir / "auto-trading" / "domestic_paper.json").write_text("{not json")
+        body = await status(app)
+
+    assert body["not_watching_reason"] == "settings_unreadable"
+    [item] = body["stocks"]
+    assert (item["status"], item["peak"], item["purchase_price"]) == ("tracking", "63000", None)
