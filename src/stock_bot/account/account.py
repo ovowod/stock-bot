@@ -104,6 +104,8 @@ class AccountService:
                     "profit_loss": _integer(h.profit_loss),
                     "return_rate": _float(h.return_rate),
                     "weight": _float(h.weight),
+                    # 같은 종목이 현금·신용 두 줄로 올 수 있다. 화면이 줄마다 구분한다.
+                    "credit": h.credit,
                 }
                 for h in snapshot.rows
             ],
@@ -163,6 +165,8 @@ class AccountService:
                     "return_rate": _float(h.return_rate),
                     "evaluation_amount_krw": _integer(h.evaluation_amount_krw),
                     "profit_loss_krw": _integer(h.profit_loss_krw),
+                    # 미국 잔고에는 신용 보유분이 없어 늘 False다.
+                    "credit": h.credit,
                 }
                 for h in snapshot.rows
             ],

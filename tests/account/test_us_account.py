@@ -67,6 +67,8 @@ def test_us_account_is_converted_for_the_screen(make_client):
             "return_rate": -2.94,
             "evaluation_amount_krw": 165743335,
             "profit_loss_krw": -5006383,
+            # 미국은 신용 보유분을 다루지 않아 늘 False다.
+            "credit": False,
         }
     ]
 

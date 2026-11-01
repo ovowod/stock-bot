@@ -4,16 +4,8 @@ import type { DomesticAccount, EnvironmentValue, UsAccount } from "../../api";
 import { findEnvironment } from "../../environments";
 import { useOrderPanel } from "../order/OrderPanel";
 import { formatCount, formatForeign, formatKrw, formatRate, formatTime } from "../../format";
-import {
-  AccountSkeleton,
-  Change,
-  ChangePill,
-  ErrorNotice,
-  HoldingsList,
-  MiniStat,
-  Panel,
-  Row,
-} from "./parts";
+import { HoldingsPanel } from "./HoldingsPanel";
+import { AccountSkeleton, Change, ChangePill, ErrorNotice, MiniStat, Panel, Row } from "./parts";
 import { OpenOrdersPanel } from "./OpenOrders";
 import { useAccount, useOpenOrders } from "./useAccount";
 
@@ -169,9 +161,18 @@ function DomesticView({
         </Panel>
       }
       holdings={
-        <Panel title="보유종목" aside={`${data.holdings.length}개`}>
-          <HoldingsList
-            items={data.holdings.map((h, i) => ({
+        <HoldingsPanel
+          environment={data.environment}
+          rows={data.holdings.map((h, i) => ({
+            code: h.code,
+            credit: h.credit,
+            currentPrice: h.current_price,
+            purchasePrice: h.purchase_price,
+            formatPrice: formatKrw,
+            keepInfo: [h.code],
+            keepDetails: [{ label: "종목코드", value: h.code }],
+            sellable: sellableDetail(h.quantity, h.tradable_quantity),
+            item: {
               key: `${h.code}-${i}`,
               name: h.name,
               quantity: formatCount(h.quantity),
@@ -205,9 +206,9 @@ function DomesticView({
                   <Change value={h.return_rate} format={formatRate} parens />
                 </>
               ),
-            }))}
-          />
-        </Panel>
+            },
+          }))}
+        />
       }
     />
   );
@@ -285,9 +286,21 @@ function UsView({ data, onSold, openOrders }: { data: UsAccount; onSold: () => v
         </Panel>
       }
       holdings={
-        <Panel title="보유종목" aside={`${data.holdings.length}개`}>
-          <HoldingsList
-            items={data.holdings.map((h, i) => ({
+        <HoldingsPanel
+          environment={data.environment}
+          rows={data.holdings.map((h, i) => ({
+            code: h.code,
+            credit: h.credit,
+            currentPrice: h.current_price,
+            purchasePrice: h.purchase_price,
+            formatPrice: price,
+            keepInfo: [h.code, h.exchange ?? NO_EXCHANGE],
+            keepDetails: [
+              { label: "종목코드", value: h.code },
+              { label: "거래소", value: h.exchange ?? NO_EXCHANGE },
+            ],
+            sellable: sellableDetail(h.quantity, h.sellable_quantity),
+            item: {
               key: `${h.code}-${i}`,
               name: h.name,
               quantity: formatCount(h.quantity),
@@ -329,9 +342,9 @@ function UsView({ data, onSold, openOrders }: { data: UsAccount; onSold: () => v
                   <Change value={h.return_rate} format={formatRate} parens />
                 </>
               ),
-            }))}
-          />
-        </Panel>
+            },
+          }))}
+        />
       }
     />
   );

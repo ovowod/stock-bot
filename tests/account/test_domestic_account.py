@@ -8,6 +8,7 @@ from stock_bot.app import create_app
 from tests.fake_kiwoom import (
     FAKE_ENV,
     KT00001_REPLY,
+    KT00018_HOLDING,
     KT00018_REPLY,
     ThreadedTransport,
     body_of,
@@ -101,6 +102,7 @@ def test_domestic_account_is_converted_for_the_screen(make_client):
             "profit_loss": -196888,
             "return_rate": -52.71,
             "weight": 2.12,
+            "credit": False,
         }
     ]
 
@@ -206,6 +208,19 @@ def test_empty_holdings_is_a_normal_result(make_client):
 
     assert response.status_code == 200
     assert response.json()["holdings"] == []
+
+
+def test_cash_and_credit_rows_of_the_same_stock_are_told_apart(make_client):
+    credit = {**KT00018_HOLDING, "crd_tp": "03", "rmnd_qty": "000000000000005"}
+    fake = domestic_fake().reply(
+        "kt00018", {**KT00018_REPLY, "acnt_evlt_remn_indv_tot": [KT00018_HOLDING, credit]}
+    )
+    holdings = make_client(fake).get(URL).json()["holdings"]
+
+    assert [(h["code"], h["quantity"], h["credit"]) for h in holdings] == [
+        ("005930", 3, False),
+        ("005930", 5, True),
+    ]
 
 
 def test_missing_environment_variables_are_named_without_values(make_client):
