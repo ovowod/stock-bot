@@ -13,7 +13,9 @@ from typing import Any
 
 from stock_bot.auto_trading.settings import write_atomic
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+# 상태만 계산하던 때의 형식. 평균 매입가가 없어, 읽으면 기억을 모두 버린다.
+LEGACY_VERSION = 1
 
 
 @dataclass
@@ -26,21 +28,36 @@ class Memory:
     activated_at: datetime
     peak: Decimal
     peak_at: datetime
+    # 마지막으로 확인한 평균 매입가. 앱이 체결을 받지 못한 사이 바뀌었는지 보려고 둔다.
+    purchase_price: Decimal
     triggered_at: datetime | None = None
     triggered_price: Decimal | None = None
 
 
-def load(path: Path) -> dict[str, Memory]:
-    """파일이 없으면 빈 기록이다. 읽지 못하면 OSError, 형식이 맞지 않으면 ValueError를 낸다."""
+@dataclass(frozen=True)
+class Loaded:
+    memory: dict[str, Memory]
+    # 버전 1 파일이었으면 버린 종목코드. 아니면 None이다.
+    cleared_codes: list[str] | None = None
+
+
+def load(path: Path) -> Loaded:
+    """파일이 없으면 빈 기록이다. 읽지 못하면 OSError, 형식이 맞지 않으면 ValueError를 낸다.
+
+    버전 1 파일은 기억을 모두 버린 빈 기록으로 읽는다. 다시 쓰는 것은 부르는 쪽이 한다.
+    """
     if not path.exists():
-        return {}
+        return Loaded({})
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("version") != FORMAT_VERSION:
+    version = data.get("version") if isinstance(data, dict) else None
+    if version not in (FORMAT_VERSION, LEGACY_VERSION):
         raise ValueError(f"version이 {FORMAT_VERSION}이 아닙니다")
     stocks = data.get("stocks")
     if not isinstance(stocks, dict):
         raise ValueError("stocks가 객체가 아닙니다")
-    return {code: _read(code, item) for code, item in stocks.items()}
+    if version == LEGACY_VERSION:
+        return Loaded({}, sorted(stocks))
+    return Loaded({code: _read(code, item) for code, item in stocks.items()})
 
 
 def write(path: Path, memory: dict[str, Memory]) -> None:
@@ -52,6 +69,7 @@ def write(path: Path, memory: dict[str, Memory]) -> None:
             "peak_at": format_moment(item.peak_at),
             "triggered_at": format_moment(item.triggered_at),
             "triggered_price": format_decimal(item.triggered_price),
+            "purchase_price": format_decimal(item.purchase_price),
         }
         for code, item in sorted(memory.items())
     }
@@ -71,6 +89,7 @@ def _read(code: str, item: Any) -> Memory:
         activated_at=_read_moment(item.get("activated_at"), f"{code}.activated_at"),
         peak=_read_price(item.get("peak"), f"{code}.peak"),
         peak_at=_read_moment(item.get("peak_at"), f"{code}.peak_at"),
+        purchase_price=_read_price(item.get("purchase_price"), f"{code}.purchase_price"),
         triggered_at=(
             None if triggered_at is None else _read_moment(triggered_at, f"{code}.triggered_at")
         ),

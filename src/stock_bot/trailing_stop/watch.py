@@ -523,12 +523,29 @@ class _Watch:
         cash = {row["code"] for row in rows if not row["credit"]}
         for code in sorted(self.memory.keys() - cash):
             self._forget(code, "not_held")
+        self._use_purchase_prices(checked.eligible)
         self._quantities = {
             row["code"]: Decimal(row["quantity"])
             for row in rows
             if row["code"] in checked.eligible and not row["credit"] and row["quantity"] is not None
         }
         return checked
+
+    def _use_purchase_prices(self, holdings: dict[str, Holding]) -> None:
+        """기억의 평균 매입가를 다시 읽은 값으로 바꾸고, 바뀌었으면 바로 쓴다.
+
+        트리거된 종목은 고점을 갱신하지 않아 다른 쓰기가 없다. 쓰지 않으면 재시작 뒤
+        파일의 예전 값과 다시 읽은 값이 달라 보인다.
+        """
+        changed = False
+        for code, memory in self.memory.items():
+            holding = holdings.get(code)
+            if holding is None or holding.purchase_price == memory.purchase_price:
+                continue
+            memory.purchase_price = holding.purchase_price
+            changed = True
+        if changed:
+            self._write("purchase_price")
 
     def _forget(self, code: str, reason: str) -> None:
         memory = self.memory.pop(code)
@@ -548,7 +565,7 @@ class _Watch:
     def _read_record(self, reason: str) -> bool:
         """고점 기록 파일을 읽어 기억으로 쓴다. 읽지 못하면 기억은 그대로 두고 False다."""
         try:
-            memory = record.load(self._record)
+            loaded = record.load(self._record)
         except (OSError, ValueError) as exc:
             log(
                 logger,
@@ -560,7 +577,7 @@ class _Watch:
                 cause=str(exc),
             )
             return False
-        self.memory = memory
+        self.memory = loaded.memory
         self._unwritten = False
         self._peaks.clear()
         log(
@@ -569,8 +586,18 @@ class _Watch:
             "trailing_stop_record_read",
             path=str(self._record),
             reason=reason,
-            memory_count=len(memory),
+            memory_count=len(loaded.memory),
         )
+        if loaded.cleared_codes is not None:
+            log(
+                logger,
+                logging.INFO,
+                "trailing_stop_record_migrated",
+                path=str(self._record),
+                cleared_codes=loaded.cleared_codes,
+            )
+            # 다음 시작 때 다시 옮기지 않게 버전 2로 바로 쓴다.
+            self._write("migrated")
         return True
 
     def _write(self, reason: str) -> None:
@@ -846,7 +873,9 @@ class _Watch:
         memory = self.memory.get(code)
         if memory is None:
             if price >= purchase * (1 + activation / 100):
-                memory = self.memory[code] = Memory(activated_at=at, peak=price, peak_at=at)
+                memory = self.memory[code] = Memory(
+                    activated_at=at, peak=price, peak_at=at, purchase_price=purchase
+                )
                 self._log_judged(
                     "trailing_stop_activated", code, price, purchase, memory, run, session
                 )
