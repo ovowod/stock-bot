@@ -9,11 +9,11 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
+from stock_bot.auto_trading.settings import TIMEZONES
 from stock_bot.core.config import EnvironmentSpec, Market
 from stock_bot.core.notification import Embed, EmbedField
 from stock_bot.fill.watch import LOSS_COLOR, NEUTRAL_COLOR, PRICE_FORMATS, PROFIT_COLOR
 from stock_bot.order.order import AutoSellResult
-from stock_bot.sl_tp.sl_tp import TIMEZONES
 
 TRIGGER_LABELS = {"take_profit": "익절 트리거", "stop_loss": "손절 트리거"}
 ZONE_LABELS = {Market.DOMESTIC: "한국시간", Market.US: "뉴욕시간"}

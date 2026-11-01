@@ -64,13 +64,15 @@ def write_settings(
     excluded: tuple[str, ...] = (),
     environment: str = "domestic_paper",
 ) -> None:
-    path = data_dir / "sl-tp" / f"{environment}.json"
+    path = data_dir / "auto-trading" / f"{environment}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     content = {
-        "version": 1,
-        "updated_at": None,
-        "excluded": [{"code": c, "name": "제외", "exchange": None} for c in excluded],
-        "sessions": list(sessions or (session(),)),
+        "version": 2,
+        "sl_tp": {
+            "updated_at": None,
+            "excluded": [{"code": c, "name": "제외", "exchange": None} for c in excluded],
+            "sessions": list(sessions or (session(),)),
+        },
     }
     path.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
 
@@ -173,7 +175,9 @@ def messages(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records]
 
 
-async def save(app: FastAPI, *sessions: dict[str, Any], excluded: tuple[str, ...] = ()) -> None:
+async def save(
+    app: FastAPI, *sessions: dict[str, Any], excluded: tuple[str, ...] = (), status: int = 200
+) -> None:
     """SL / TP 화면처럼 저장 API로 설정을 저장한다."""
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -186,7 +190,7 @@ async def save(app: FastAPI, *sessions: dict[str, Any], excluded: tuple[str, ...
                 "sessions": list(sessions),
             },
         )
-    assert response.status_code == 200, response.text
+    assert response.status_code == status, response.text
 
 
 def nth_call_gate(kiwoom: FakeKiwoom, api_id: str, n: int) -> Gate:
@@ -221,13 +225,15 @@ def us_session(start: str = "09:30", end: str = "16:00", **overrides: Any) -> di
 def write_us_settings(
     data_dir: Path, *sessions: dict[str, Any], excluded: tuple[str, ...] = ()
 ) -> None:
-    path = data_dir / "sl-tp" / "us_paper.json"
+    path = data_dir / "auto-trading" / "us_paper.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     content = {
-        "version": 1,
-        "updated_at": None,
-        "excluded": [{"code": c, "name": "제외", "exchange": "NASDAQ"} for c in excluded],
-        "sessions": list(sessions or (us_session(),)),
+        "version": 2,
+        "sl_tp": {
+            "updated_at": None,
+            "excluded": [{"code": c, "name": "제외", "exchange": "NASDAQ"} for c in excluded],
+            "sessions": list(sessions or (us_session(),)),
+        },
     }
     path.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
 

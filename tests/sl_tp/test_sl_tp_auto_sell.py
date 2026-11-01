@@ -527,7 +527,7 @@ async def test_real_environment_is_never_watched(data_dir):
 
 
 async def test_unreadable_settings_file_stops_the_environment(data_dir, caplog):
-    path = data_dir / "sl-tp" / "domestic_paper.json"
+    path = data_dir / "auto-trading" / "domestic_paper.json"
     path.parent.mkdir(parents=True)
     path.write_text("{broken", encoding="utf-8")
     realtime = FakeRealtime()
