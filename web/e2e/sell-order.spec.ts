@@ -142,7 +142,9 @@ async function mockApi(
 async function openSell(page: Page, environment = "국내 모의", name = "삼성전자") {
   await openDashboard(page);
   await page.getByRole("radio", { name: environment }).filter({ visible: true }).click();
-  const sell = page.getByRole("button", { name: `${name} 매도` }).filter({ visible: true });
+  // 보유종목이 그려지기 전에 세면 넓은 화면도 매도 버튼이 0개라 줄을 눌러 버린다.
+  await expect(page.getByRole("listitem").filter({ hasText: name }).filter({ visible: true }).first()).toBeVisible();
+  const sell =page.getByRole("button", { name: `${name} 매도` }).filter({ visible: true });
   if ((await sell.count()) === 0) {
     await page.getByRole("button", { name: new RegExp(name) }).filter({ visible: true }).first().click();
   }

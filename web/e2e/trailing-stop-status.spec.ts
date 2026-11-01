@@ -266,6 +266,8 @@ test("평균 매입가나 가격이 없거나 0이면 수익률과 도달 여부
 
   for (const name of ["삼성전자", "NAVER"]) {
     const item = row(page, name);
+    // 상태를 받기 전에는 배지 자리도 –라, 받은 뒤에 수익률의 –만 남는다.
+    await expect(toggle(item)).toContainText("감시 안 함");
     // 좁은 화면은 expectStatus가 상세를 펼치므로 그 전에 목록 줄의 수익률을 본다.
     await expect(visible(item, "–")).toBeVisible();
     await expectStatus(item, isMobile, "감시 안 함 · 켜진 세션 없음");
@@ -320,6 +322,8 @@ test("열려 있고 탭이 보이는 동안 3초마다 상태를 다시 받고, 
   await page.clock.pauseAt(new Date("2026-11-02T01:01:00Z"));
   await view(page, "Trailing Stop").click();
   await expect.poll(() => requests.length).toBe(1);
+  // 다음 요청 타이머는 응답을 받은 뒤에 걸린다. 응답이 화면에 보인 뒤에 시계를 흘린다.
+  await expect(toggle(row(page, "삼성전자"))).toContainText("감시 안 함");
 
   /** 화면 시계를 ms만큼 흘리고, 그 사이 나간 요청이 화면 밖까지 닿을 시간을 준다.
    * 요청이 늘어야 하는 곳은 부하가 큰 전체 실행에서도 기다리도록 expect.poll로 본다. */
