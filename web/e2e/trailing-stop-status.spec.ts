@@ -131,15 +131,29 @@ const row = (page: Page, name: string) =>
   page.getByRole("listitem").filter({ hasText: name }).filter({ visible: true }).first();
 const visible = (scope: Page | Locator, text: string) => scope.getByText(text, { exact: true }).filter({ visible: true });
 
-/** 넓은 화면은 정보 줄에, 좁은 화면은 펼친 상세에서 값을 확인한다. */
-async function expectFact(item: Locator, mobile: boolean, term: string, wide: string, narrow: string) {
+/** 화면 폭에 맞는 줄 열기 버튼. 넓은 화면과 좁은 화면 줄이 따로 있고 하나만 보인다. */
+const toggle = (item: Locator) => item.locator("button[aria-expanded]").filter({ visible: true });
+
+/** 줄을 눌러 펼친 상세에서 값을 확인한다. 넓은 화면도 상세는 펼쳐야 보인다. */
+async function expectFact(item: Locator, term: string, value: string) {
+  if ((await toggle(item).getAttribute("aria-expanded")) === "false") await toggle(item).click();
+  await expect(item.locator(`dd[data-term="${term}"]`).filter({ visible: true })).toHaveText(value);
+}
+
+/**
+ * 넓은 화면은 배지에 상태와 이유를 함께 보인다. 좁은 화면 배지는 상태 이름만 한 줄로 보인다.
+ * 이유까지 담은 상태는 펼친 상세의 "상태"에 있다.
+ */
+async function expectStatus(item: Locator, mobile: boolean, text: string) {
+  const [name, ...reasons] = text.split(" · ");
+  const shown = () => toggle(item).evaluate((el) => (el as HTMLElement).innerText);
   if (mobile) {
-    const toggle = item.locator("button[aria-expanded]");
-    if ((await toggle.getAttribute("aria-expanded")) === "false") await toggle.click();
-    await expect(item.locator(`dd[data-term="${term}"]`)).toHaveText(narrow);
+    await expect.poll(shown).toContain(name);
+    if (reasons.length > 0) expect(await shown()).not.toContain(reasons.join(" · "));
   } else {
-    await expect(item.getByText(wide, { exact: false }).filter({ visible: true })).toBeVisible();
+    await expect.poll(shown).toContain(text);
   }
+  await expectFact(item, "상태", text);
 }
 
 async function expectNoHorizontalScroll(page: Page) {
@@ -148,7 +162,7 @@ async function expectNoHorizontalScroll(page: Page) {
   expect(await page.evaluate(() => window.innerWidth)).toBe(page.viewportSize()!.width);
 }
 
-test("보기를 바꾸고 새로고침해도 고른 보기로 다시 열린다", async ({ page }) => {
+test("보기를 바꾸고 새로고침해도 고른 보기로 다시 열린다", async ({ page, isMobile }) => {
   const requests = await mockScreen(page, { domestic_paper: domestic("domestic_paper", [SAMSUNG]) });
   await openDashboard(page);
 
@@ -158,7 +172,7 @@ test("보기를 바꾸고 새로고침해도 고른 보기로 다시 열린다",
   expect(requests).toEqual([]);
 
   await view(page, "Trailing Stop").click();
-  await expect(visible(row(page, "삼성전자"), "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+  await expectStatus(row(page, "삼성전자"), isMobile, "감시 안 함 · 켜진 세션 없음");
   await expect(visible(row(page, "삼성전자"), "845,000원")).toHaveCount(0);
   await expect(
     page.getByText("수익률은 시세 체결가 기준이며 수수료·세금은 빼지 않습니다. 고점은 켜진 세션 동안의 체결가로 정합니다."),
@@ -167,14 +181,14 @@ test("보기를 바꾸고 새로고침해도 고른 보기로 다시 열린다",
 
   await page.reload();
   await expect(view(page, "Trailing Stop")).toHaveAttribute("aria-checked", "true");
-  await expect(visible(row(page, "삼성전자"), "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+  await expectStatus(row(page, "삼성전자"), isMobile, "감시 안 함 · 켜진 세션 없음");
 
   await view(page, "기본").click();
   await expect(visible(row(page, "삼성전자"), "845,000원")).toBeVisible();
   await expect(page.getByText("수수료·세금은 빼지 않습니다", { exact: false })).toHaveCount(0);
 });
 
-test("브라우저 저장소를 쓸 수 없으면 기본 보기로 연다", async ({ page }) => {
+test("브라우저 저장소를 쓸 수 없으면 기본 보기로 연다", async ({ page, isMobile }) => {
   await page.addInitScript(() => {
     Storage.prototype.getItem = () => {
       throw new Error("blocked");
@@ -189,7 +203,7 @@ test("브라우저 저장소를 쓸 수 없으면 기본 보기로 연다", asyn
   await expect(view(page, "기본")).toHaveAttribute("aria-checked", "true");
   // 저장하지 못해도 고른 보기는 지금 화면에서 동작한다.
   await view(page, "Trailing Stop").click();
-  await expect(visible(row(page, "삼성전자"), "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+  await expectStatus(row(page, "삼성전자"), isMobile, "감시 안 함 · 켜진 세션 없음");
 });
 
 test("수익률, 도달 여부, 제외종목, 감시 안 함을 보여준다", async ({ page, isMobile }, info) => {
@@ -201,19 +215,19 @@ test("수익률, 도달 여부, 제외종목, 감시 안 함을 보여준다", a
 
   // 84,500 / 70,000 = +20.71%: 기준 5% 이상이지만 감시하지 않아 활성화되지 않았다.
   const samsung = row(page, "삼성전자");
-  await expect(visible(samsung, "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+  await expectStatus(samsung, isMobile, "감시 안 함 · 켜진 세션 없음");
   await expect(visible(samsung, "+20.71%")).toBeVisible();
-  await expectFact(samsung, isMobile, "도달 여부", "005930 · 도달 (세션 밖)", "도달 (세션 밖)");
-  await expectFact(samsung, isMobile, "제외종목", "005930 · 도달 (세션 밖)", "아니요");
+  await expectFact(samsung, "도달 여부", "도달 (세션 밖)");
+  await expectFact(samsung, "제외종목", "아니요");
 
   const naver = row(page, "NAVER");
   await expect(visible(naver, "−2.60%")).toBeVisible();
-  await expectFact(naver, isMobile, "도달 여부", "035420 · 미도달 (기준 5%)", "미도달 (기준 5%)");
+  await expectFact(naver, "도달 여부", "미도달 (기준 5%)");
 
   const hynix = row(page, "SK하이닉스");
   await expect(visible(hynix, "제외종목").first()).toBeVisible();
   await expect(visible(hynix, "+1.00%")).toBeVisible();
-  await expectFact(hynix, isMobile, "제외종목", "000660 · 미도달 (기준 5%) · 제외종목", "예");
+  await expectFact(hynix, "제외종목", "예");
 
   // 매도 버튼은 그대로 둔다.
   if (isMobile) await expect(hynix.getByRole("button", { name: "SK하이닉스 매도" })).toBeVisible();
@@ -222,7 +236,7 @@ test("수익률, 도달 여부, 제외종목, 감시 안 함을 보여준다", a
   await page.screenshot({ path: `screenshots/${info.project.name}-trailing-stop-view.png`, fullPage: true });
 });
 
-test("지금 세션이 없거나 그 세션에 활성화 수익률이 없으면 도달 여부는 –다", async ({ page, isMobile }) => {
+test("지금 세션이 없거나 그 세션에 활성화 수익률이 없으면 도달 여부는 기준 없음이다", async ({ page, isMobile }) => {
   let session: unknown = null;
   await mockScreen(page, { domestic_paper: domestic("domestic_paper", [SAMSUNG]) }, (environment) => ({
     body: status(environment, { session }),
@@ -232,12 +246,12 @@ test("지금 세션이 없거나 그 세션에 활성화 수익률이 없으면 
 
   const samsung = row(page, "삼성전자");
   await expect(visible(samsung, "+20.71%")).toBeVisible();
-  await expectFact(samsung, isMobile, "도달 여부", "005930 · 도달 여부 –", "–");
+  await expectFact(samsung, "도달 여부", "기준 없음 (세션 없음)");
 
   // 꺼진 세션은 기준이 비어 있을 수 있다.
   session = { start: "09:00", end: "15:30", enabled: false, activation_profit: null, drop_from_peak: null };
   await page.reload();
-  await expectFact(row(page, "삼성전자"), isMobile, "도달 여부", "005930 · 도달 여부 –", "–");
+  await expectFact(row(page, "삼성전자"), "도달 여부", "기준 없음");
 });
 
 test("평균 매입가나 가격이 없거나 0이면 수익률과 도달 여부는 –다", async ({ page, isMobile }) => {
@@ -250,14 +264,12 @@ test("평균 매입가나 가격이 없거나 0이면 수익률과 도달 여부
   await openDashboard(page);
   await view(page, "Trailing Stop").click();
 
-  for (const [name, code] of [
-    ["삼성전자", "005930"],
-    ["NAVER", "035420"],
-  ]) {
+  for (const name of ["삼성전자", "NAVER"]) {
     const item = row(page, name);
-    await expect(visible(item, "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+    // 좁은 화면은 expectStatus가 상세를 펼치므로 그 전에 목록 줄의 수익률을 본다.
     await expect(visible(item, "–")).toBeVisible();
-    await expectFact(item, isMobile, "도달 여부", `${code} · 도달 여부 –`, "–");
+    await expectStatus(item, isMobile, "감시 안 함 · 켜진 세션 없음");
+    await expectFact(item, "도달 여부", "–");
   }
 });
 
@@ -274,17 +286,18 @@ test("실전 환경은 제외종목도 감시 안 함 · 실전투자이고 제�
   await envButton(page, "국내 실전").click();
   await view(page, "Trailing Stop").click();
 
+  // 실전은 제외종목도 배지가 감시 안 함이다. expectStatus가 상세를 펼쳐 "제외종목" 칸 이름이 보이기 전에 센다.
+  await expect(page.getByText("제외종목", { exact: true }).filter({ visible: true })).toHaveCount(0);
   for (const name of ["삼성전자", "SK하이닉스"]) {
-    await expect(visible(row(page, name), "감시 안 함 · 실전투자")).toBeVisible();
+    await expectStatus(row(page, name), isMobile, "감시 안 함 · 실전투자");
   }
-  await expect(page.getByText("제외종목", { exact: true }).filter({ visible: true })).toHaveCount(isMobile ? 0 : 1);
   await expect(visible(row(page, "삼성전자"), "+20.71%")).toBeVisible();
-  await expectFact(row(page, "SK하이닉스"), isMobile, "제외종목", "000660 · 미도달 (기준 5%) · 제외종목", "예");
+  await expectFact(row(page, "SK하이닉스"), "제외종목", "예");
   // 실전은 세션 밖이 아니라 감시하지 않는 것이다.
-  await expectFact(row(page, "삼성전자"), isMobile, "도달 여부", "005930 · 도달 (감시 안 함)", "도달 (감시 안 함)");
+  await expectFact(row(page, "삼성전자"), "도달 여부", "도달 (감시 안 함)");
 });
 
-test("같은 종목의 신용 줄은 대상 아님 · 신용이고 현금 줄은 따로 판정한다", async ({ page }) => {
+test("같은 종목의 신용 줄은 대상 아님 · 신용이고 현금 줄은 따로 판정한다", async ({ page, isMobile }) => {
   await mockScreen(page, {
     domestic_paper: domestic("domestic_paper", [
       SAMSUNG,
@@ -295,8 +308,8 @@ test("같은 종목의 신용 줄은 대상 아님 · 신용이고 현금 줄은
   await view(page, "Trailing Stop").click();
 
   const rows = page.getByRole("listitem").filter({ hasText: "삼성전자" });
-  await expect(visible(rows.nth(0), "감시 안 함 · 켜진 세션 없음")).toBeVisible();
-  await expect(visible(rows.nth(1), "대상 아님 · 신용")).toBeVisible();
+  await expectStatus(rows.nth(0), isMobile, "감시 안 함 · 켜진 세션 없음");
+  await expectStatus(rows.nth(1), isMobile, "대상 아님 · 신용");
 });
 
 test("열려 있고 탭이 보이는 동안 3초마다 상태를 다시 받고, 탭이 숨으면 멈춘다", async ({ page }) => {
@@ -342,7 +355,7 @@ test("열려 있고 탭이 보이는 동안 3초마다 상태를 다시 받고, 
   expect(requests.length).toBe(5);
 });
 
-test("조회가 실패하면 마지막 상태를 두고 실패 안내를 보인다", async ({ page }) => {
+test("조회가 실패하면 마지막 상태를 두고 실패 안내를 보인다", async ({ page, isMobile }) => {
   await page.clock.install();
   let failing = false;
   await mockScreen(page, { domestic_paper: domestic("domestic_paper", [SAMSUNG]) }, (environment) =>
@@ -352,14 +365,14 @@ test("조회가 실패하면 마지막 상태를 두고 실패 안내를 보인�
   );
   await openDashboard(page);
   await view(page, "Trailing Stop").click();
-  await expect(visible(row(page, "삼성전자"), "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+  await expectStatus(row(page, "삼성전자"), isMobile, "감시 안 함 · 켜진 세션 없음");
 
   failing = true;
   await page.clock.runFor(3000);
   const alert = page.getByRole("alert");
   await expect(alert).toContainText("Trailing Stop 상태를 불러오지 못했습니다. 마지막으로 받은 상태를 보여줍니다.");
   await expect(alert).toContainText("서버 내부 오류가 발생했습니다.");
-  await expect(visible(row(page, "삼성전자"), "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+  await expectStatus(row(page, "삼성전자"), isMobile, "감시 안 함 · 켜진 세션 없음");
 
   // 다시 받으면 안내를 지운다.
   failing = false;
@@ -381,7 +394,8 @@ test("한 번도 받지 못했으면 상태 칸을 –로 둔다", async ({ page
   // 수익률은 계좌 응답으로 계산할 수 있다. 상태와 도달 여부, 제외종목 여부는 모른다.
   await expect(visible(samsung, "+20.71%")).toBeVisible();
   await expect(visible(samsung, "–")).toBeVisible();
-  await expectFact(samsung, isMobile, "제외종목", "005930 · 도달 여부 –", "–");
+  await expectFact(samsung, "도달 여부", "–");
+  await expectFact(samsung, "제외종목", "–");
 });
 
 test("미국 계좌는 외화 표기를 그대로 두고 거래소 확인 불가 안내도 유지한다", async ({ page, isMobile }) => {
@@ -403,16 +417,16 @@ test("미국 계좌는 외화 표기를 그대로 두고 거래소 확인 불가
   // 275.24 / 282.1603 = −2.45%
   const apple = row(page, "애플");
   await expect(visible(apple, "−2.45%")).toBeVisible();
-  await expect(visible(apple, "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+  await expectStatus(apple, isMobile, "감시 안 함 · 켜진 세션 없음");
   // 원화 평가금액 줄은 Trailing Stop 보기에 두지 않는다. 수량·현재가 줄은 그대로다.
   await expect(visible(apple, "165,743,335원")).toHaveCount(0);
-  await expectFact(apple, isMobile, "도달 여부", "AAPL · NASDAQ · 미도달 (기준 5%)", "미도달 (기준 5%)");
+  await expectFact(apple, "도달 여부", "미도달 (기준 5%)");
   if (!isMobile) await expect(visible(apple, "395주 · 현재가 $275.24")).toBeVisible();
 
   // 31.5 / 30 = +5.00%: 기준과 같으면 도달이다.
   const ewz = row(page, "MSCI 브라질");
   await expect(visible(ewz, "+5.00%")).toBeVisible();
-  await expectFact(ewz, isMobile, "도달 여부", "EWZ · 거래소 확인 불가 · 도달 (세션 밖)", "도달 (세션 밖)");
+  await expectFact(ewz, "도달 여부", "도달 (세션 밖)");
   await expect(visible(ewz, "앱에서 매도")).toBeVisible();
   await expect(page.getByRole("button", { name: "MSCI 브라질 매도" })).toHaveCount(0);
 });
@@ -502,42 +516,38 @@ test("감시 중이면 상태·고점·하락률·시각을 보이고 서버의 
   const samsung = row(page, "삼성전자");
   await expect(visible(samsung, "고점 추적 중")).toBeVisible();
   await expect(visible(samsung, "+2.00%")).toBeVisible();
-  await expectFact(samsung, isMobile, "도달 여부", "005930 · 도달 · 10:03 · 고점 대비 −1.0% · 고점 61,800원 (11:10)", "도달 · 10:03");
-  if (isMobile) {
-    await expectFact(samsung, true, "고점 대비", "", "−1.0%");
-    await expectFact(samsung, true, "고점", "", "61,800원");
-    await expectFact(samsung, true, "고점 시각", "", "11:10");
-    await expectFact(samsung, true, "활성화 시각", "", "10:03");
-    await expectFact(samsung, true, "매도 조건 충족", "", "–");
-    await expectFact(samsung, true, "지금 세션 기준", "", "09:00–15:30 · 활성화 +5% · 고점 대비 −3%");
+  if (!isMobile) {
+    // 넓은 화면 정보 줄은 핵심 하나만 둔다. 고점과 시각은 줄을 눌러 펼친 상세에 있다.
+    expect(await toggle(samsung).innerText()).toContain("005930 · 고점 대비 −1.0%");
+    expect(await toggle(samsung).innerText()).not.toContain("61,800원");
   }
+  await expectFact(samsung, "도달 여부", "도달 · 10:03");
+  await expectFact(samsung, "고점 대비", "−1.0%");
+  await expectFact(samsung, "고점", "61,800원");
+  await expectFact(samsung, "고점 시각", "11:10");
+  await expectFact(samsung, "활성화 시각", "10:03");
+  await expectFact(samsung, "매도 조건 충족", "–");
+  await expectFact(samsung, "지금 세션 기준", "09:00–15:30 · 활성화 +5% · 고점 대비 −3%");
 
   const naver = row(page, "NAVER");
   await expect(visible(naver, "활성화 대기")).toBeVisible();
   await expect(visible(naver, "−2.60%")).toBeVisible();
-  await expectFact(naver, isMobile, "도달 여부", "035420 · 미도달 (기준 5%)", "미도달 (기준 5%)");
-  if (isMobile) await expectFact(naver, true, "고점 대비", "", "–");
-  else await expect(naver.getByText("고점 대비", { exact: false }).filter({ visible: true })).toHaveCount(0);
+  await expectFact(naver, "도달 여부", "미도달 (기준 5%)");
+  await expectFact(naver, "고점 대비", "–");
 
   // 107,000 / 100,000 = +7.00%, 107,000 / 110,000 = −2.73%
   const hynix = row(page, "SK하이닉스");
   await expect(visible(hynix, "매도 조건 충족")).toBeVisible();
   await expect(visible(hynix, "+7.00%")).toBeVisible();
-  await expectFact(
-    hynix,
-    isMobile,
-    "매도 조건 충족",
-    "000660 · 도달 · 11/01 10:03 · 고점 대비 −2.7% · 고점 110,000원 (11/01 14:20) · 매도 조건 충족 10:30 · 106,700원",
-    "10:30 · 106,700원",
-  );
+  await expectFact(hynix, "매도 조건 충족", "10:30 · 106,700원");
 
   const lg = row(page, "LG화학");
   await expect(visible(lg, "활성화 대기")).toBeVisible();
-  await expectFact(lg, isMobile, "도달 여부", "051910 · 도달 (판정 전)", "도달 (판정 전)");
+  await expectFact(lg, "도달 여부", "도달 (판정 전)");
 
   const kakao = row(page, "카카오");
-  await expect(visible(kakao, "대상 아님 · 매입가 없음")).toBeVisible();
-  await expectFact(kakao, isMobile, "도달 여부", "035720 · 도달 여부 –", "–");
+  await expectStatus(kakao, isMobile, "대상 아님 · 매입가 없음");
+  await expectFact(kakao, "도달 여부", "–");
 
   await expectNoHorizontalScroll(page);
   await page.screenshot({ path: `screenshots/${info.project.name}-trailing-stop-watching.png`, fullPage: true });
@@ -576,17 +586,17 @@ test("장애로 멈추면 활성화된 종목은 고점 추적 중 · <멈춘 �
   await view(page, "Trailing Stop").click();
 
   const samsung = row(page, "삼성전자");
-  await expect(visible(samsung, "고점 추적 중 · 실시간 연결이 밀려남")).toBeVisible();
+  await expectStatus(samsung, isMobile, "고점 추적 중 · 실시간 연결이 밀려남");
   // 84,500 / 70,000 = +20.71%, 84,500 / 90,000 = −6.11%
   await expect(visible(samsung, "+20.71%")).toBeVisible();
-  await expectFact(samsung, isMobile, "고점 대비", "005930 · 도달 · 10:03 · 고점 대비 −6.1%", "−6.1%");
-  await expect(visible(row(page, "SK하이닉스"), "매도 조건 충족 · 실시간 연결이 밀려남")).toBeVisible();
-  await expect(visible(row(page, "NAVER"), "감시 안 함 · 실시간 연결이 밀려남")).toBeVisible();
+  await expectFact(samsung, "고점 대비", "−6.1%");
+  await expectStatus(row(page, "SK하이닉스"), isMobile, "매도 조건 충족 · 실시간 연결이 밀려남");
+  await expectStatus(row(page, "NAVER"), isMobile, "감시 안 함 · 실시간 연결이 밀려남");
 
   reason = "holdings_pending";
   await page.clock.runFor(3000);
-  await expect(visible(row(page, "삼성전자"), "고점 추적 중 · 보유종목 확인 중")).toBeVisible();
-  await expect(visible(row(page, "NAVER"), "감시 안 함 · 보유종목 확인 중")).toBeVisible();
+  await expectStatus(row(page, "삼성전자"), isMobile, "고점 추적 중 · 보유종목 확인 중");
+  await expectStatus(row(page, "NAVER"), isMobile, "감시 안 함 · 보유종목 확인 중");
 });
 
 test("세션 밖에서도 기억한 종목은 세션 밖, 갱신 멈춤이고 고점 기록을 읽지 못하면 그 이유로 보인다", async ({
@@ -623,19 +633,19 @@ test("세션 밖에서도 기억한 종목은 세션 밖, 갱신 멈춤이고 �
   await view(page, "Trailing Stop").click();
 
   const samsung = row(page, "삼성전자");
-  await expect(visible(samsung, "고점 추적 중 · 세션 밖, 갱신 멈춤")).toBeVisible();
+  await expectStatus(samsung, isMobile, "고점 추적 중 · 세션 밖, 갱신 멈춤");
   // 84,500 / 90,000 = −6.11%. 세션 밖에서는 계좌 현재가로 계산한다.
-  await expectFact(samsung, isMobile, "고점 대비", "005930 · 도달 · 11/01 10:03 · 고점 대비 −6.1%", "−6.1%");
+  await expectFact(samsung, "고점 대비", "−6.1%");
   const hynix = row(page, "SK하이닉스");
-  await expect(visible(hynix, "매도 조건 충족 · 세션 밖, 갱신 멈춤")).toBeVisible();
-  await expectFact(hynix, isMobile, "매도 조건 충족", "매도 조건 충족 10:30 · 106,700원", "10:30 · 106,700원");
-  await expect(visible(row(page, "NAVER"), "감시 안 함 · 켜진 세션 없음")).toBeVisible();
+  await expectStatus(hynix, isMobile, "매도 조건 충족 · 세션 밖, 갱신 멈춤");
+  await expectFact(hynix, "매도 조건 충족", "10:30 · 106,700원");
+  await expectStatus(row(page, "NAVER"), isMobile, "감시 안 함 · 켜진 세션 없음");
 
   // 고점 기록을 읽지 못해 멈춘 것은 세션 밖과 구분해 멈춘 이유를 붙인다.
   reason = "state_unreadable";
   await page.clock.runFor(3000);
-  await expect(visible(row(page, "삼성전자"), "고점 추적 중 · 고점 기록을 읽지 못함")).toBeVisible();
-  await expect(visible(row(page, "SK하이닉스"), "매도 조건 충족 · 고점 기록을 읽지 못함")).toBeVisible();
+  await expectStatus(row(page, "삼성전자"), isMobile, "고점 추적 중 · 고점 기록을 읽지 못함");
+  await expectStatus(row(page, "SK하이닉스"), isMobile, "매도 조건 충족 · 고점 기록을 읽지 못함");
   await expect(page.getByText("세션 밖, 갱신 멈춤", { exact: false }).filter({ visible: true })).toHaveCount(0);
 });
 
@@ -671,11 +681,5 @@ test("미국 감시 종목은 외화로 고점을 보이고 뉴욕시간으로 �
   const apple = row(page, "애플");
   await expect(visible(apple, "고점 추적 중")).toBeVisible();
   await expect(visible(apple, "+6.50%")).toBeVisible();
-  await expectFact(
-    apple,
-    isMobile,
-    "고점",
-    "AAPL · NASDAQ · 도달 · 09:35 · 고점 대비 −1.6% · 고점 $305.25 (09:50)",
-    "$305.25",
-  );
+  await expectFact(apple, "고점", "$305.25");
 });

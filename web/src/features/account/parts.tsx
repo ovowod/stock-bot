@@ -131,7 +131,11 @@ export interface HoldingView {
   sellNote?: string;
 }
 
-export function HoldingsList({ items }: { items: HoldingView[] }) {
+/**
+ * expandable이면 넓은 화면에서도 줄을 눌러 세부 정보를 펼친다. 정보 줄은 짧게 두고,
+ * 나머지는 펼친 칸에서 이름과 함께 본다(Trailing Stop 보기).
+ */
+export function HoldingsList({ items, expandable = false }: { items: HoldingView[]; expandable?: boolean }) {
   if (items.length === 0) {
     return (
       <div className="flex flex-col items-center gap-2 py-12 text-center">
@@ -146,34 +150,97 @@ export function HoldingsList({ items }: { items: HoldingView[] }) {
   return (
     <ul className="-mx-2">
       {items.map((item) => (
-        <li key={item.key}>
-          {/* 넓은 화면: 세부 정보까지 3줄로 모두 보여준다. */}
-          <div className="hidden items-start gap-3 rounded-2xl px-2 py-3 transition hover:bg-canvas/70 md:flex">
-            <Avatar name={item.name} />
-            {/* 왼쪽은 종목 정보, 오른쪽은 평가금액과 손익이다. 두 칸은 각자 위에서부터 쌓아, 이름이 길어도 어긋나지 않는다. */}
-            <div className="min-w-0 flex-1">
-              {/* 한글 이름은 띄어쓰기 자리에서만 줄을 바꾼다("아이셰어/즈"처럼 끊지 않는다). */}
-              <p className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[15px] font-semibold break-words break-keep">{item.name}</span>
-              </p>
-              <Parts parts={item.position} className={SUB_TEXT} />
-              <Parts parts={item.info} className={SUB_TEXT} />
-            </div>
-            <div className="shrink-0 text-right">
-              <p className="text-[15px] font-bold">{item.value}</p>
-              {item.valueSub && <p className={SUB_TEXT}>{item.valueSub}</p>}
-              <p className="text-[13px] font-medium">{item.change}</p>
-            </div>
-            {/* 매도 버튼과 안내는 같은 폭을 차지해, 줄마다 평가금액의 오른쪽 끝이 맞는다. */}
-            {item.onSell && <SellButton item={item} className="w-18 self-center py-2" />}
-            {!item.onSell && item.sellNote && (
-              <p className="w-18 shrink-0 self-center text-center text-[11px] leading-snug break-keep text-muted">{item.sellNote}</p>
-            )}
-          </div>
+        // 펼친 카드끼리 테두리가 붙지 않게 넓은 화면 줄 사이에 간격을 늘 둔다.
+        // 펼칠 때만 간격을 주면 그 줄이 아래로 밀려 위치가 바뀐다.
+        <li key={item.key} className={expandable ? "md:mb-2 md:last:mb-0" : undefined}>
+          {expandable ? <WideExpandableHolding item={item} /> : <WideHolding item={item} />}
           <MobileHolding item={item} />
         </li>
       ))}
     </ul>
+  );
+}
+
+/** 넓은 화면: 세부 정보까지 3줄로 모두 보여준다. */
+function WideHolding({ item }: { item: HoldingView }) {
+  return (
+    <div className="hidden items-start gap-3 rounded-2xl px-2 py-3 transition hover:bg-canvas/70 md:flex">
+      <Avatar name={item.name} />
+      {/* 왼쪽은 종목 정보, 오른쪽은 평가금액과 손익이다. 두 칸은 각자 위에서부터 쌓아, 이름이 길어도 어긋나지 않는다. */}
+      <div className="min-w-0 flex-1">
+        {/* 한글 이름은 띄어쓰기 자리에서만 줄을 바꾼다("아이셰어/즈"처럼 끊지 않는다). */}
+        <p className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[15px] font-semibold break-words break-keep">{item.name}</span>
+        </p>
+        <Parts parts={item.position} className={SUB_TEXT} />
+        <Parts parts={item.info} className={SUB_TEXT} />
+      </div>
+      <div className="shrink-0 text-right">
+        <p className="text-[15px] font-bold">{item.value}</p>
+        {item.valueSub && <p className={SUB_TEXT}>{item.valueSub}</p>}
+        <p className="text-[13px] font-medium">{item.change}</p>
+      </div>
+      {/* 매도 버튼과 안내는 같은 폭을 차지해, 줄마다 평가금액의 오른쪽 끝이 맞는다. */}
+      {item.onSell && <SellButton item={item} className="w-18 self-center py-2" />}
+      {!item.onSell && item.sellNote && (
+        <p className="w-18 shrink-0 self-center text-center text-[11px] leading-snug break-keep text-muted">{item.sellNote}</p>
+      )}
+    </div>
+  );
+}
+
+/** 넓은 화면에서 줄을 눌러 세부 정보를 펼친다. 매도 버튼은 펼치지 않아도 줄 오른쪽에 있다. */
+function WideExpandableHolding({ item }: { item: HoldingView }) {
+  const [open, setOpen] = useState(false);
+  // 펼치면 줄과 상세를 테두리 하나로 묶는다. 펼친 줄은 마우스를 올려도 회색이 되지 않아,
+  // 아래 상세의 회색 칸과 두 덩어리로 겹쳐 보이지 않는다.
+  return (
+    // 테두리는 ring(그림자)이라 안쪽 칸의 아래 margin이 카드 밖으로 빠진다. 아래 여백은 카드의 padding으로 둔다.
+    <div className={`hidden rounded-2xl md:block ${open ? "pb-3 ring-1 ring-line" : ""}`}>
+      <div
+        className={`flex items-start gap-3 rounded-2xl px-2 py-3 transition ${open ? "" : "hover:bg-canvas/70"}`}
+      >
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className="flex min-w-0 flex-1 items-start gap-3 text-left"
+        >
+          <Avatar name={item.name} />
+          <span className="min-w-0 flex-1">
+            <span className="block text-[15px] font-semibold break-words break-keep">{item.name}</span>
+            <Parts parts={item.position} className={`block ${SUB_TEXT}`} as="span" />
+            <Parts parts={item.info} className={`block ${SUB_TEXT}`} as="span" />
+          </span>
+          <span className="shrink-0 text-right">
+            <span className="block text-[15px] font-bold">{item.value}</span>
+            <span className="block text-[13px] font-medium">{item.change}</span>
+          </span>
+        </button>
+        {item.onSell && <SellButton item={item} className="w-18 self-center py-2" />}
+        {!item.onSell && item.sellNote && (
+          <p className="w-18 shrink-0 self-center text-center text-[11px] leading-snug break-keep text-muted">{item.sellNote}</p>
+        )}
+      </div>
+      {open && <Details item={item} className="mx-3 grid-cols-4" />}
+    </div>
+  );
+}
+
+/** 펼친 세부 정보. 칸마다 이름과 값을 둔다. */
+function Details({ item, className, children }: { item: HoldingView; className: string; children?: ReactNode }) {
+  return (
+    <dl className={`grid gap-x-4 gap-y-2 rounded-2xl bg-canvas px-4 py-3 ${className}`}>
+      {item.details.map((detail) => (
+        <div key={detail.label} className="min-w-0">
+          <dt className="text-xs text-muted">{detail.label}</dt>
+          <dd data-term={detail.label} className="text-sm font-medium break-words">
+            {detail.value}
+          </dd>
+        </div>
+      ))}
+      {children}
+    </dl>
   );
 }
 
@@ -203,18 +270,10 @@ function MobileHolding({ item }: { item: HoldingView }) {
         </span>
       </button>
       {open && (
-        <dl className="mx-2 mb-2 grid grid-cols-2 gap-x-4 gap-y-2 rounded-2xl bg-canvas px-4 py-3">
-          {item.details.map((detail) => (
-            <div key={detail.label} className="min-w-0">
-              <dt className="text-xs text-muted">{detail.label}</dt>
-              <dd data-term={detail.label} className="text-sm font-medium break-words">
-                {detail.value}
-              </dd>
-            </div>
-          ))}
+        <Details item={item} className="mx-2 mb-2 grid-cols-2">
           {item.onSell && <SellButton item={item} className="col-span-2 py-2.5" />}
           {!item.onSell && item.sellNote && <p className="col-span-2 text-center text-xs text-muted">{item.sellNote}</p>}
-        </dl>
+        </Details>
       )}
     </div>
   );
@@ -254,16 +313,17 @@ function Badge({ text }: { text?: string }) {
 }
 
 /** 가운뎃점으로 이은 한 줄. 좁으면 가운뎃점 자리에서만 줄을 바꾸고, 각 덩어리 안에서는 끊지 않는다. */
-function Parts({ parts, className }: { parts: string[]; className: string }) {
+function Parts({ parts, className, as: Tag = "p" }: { parts: string[]; className: string; as?: "p" | "span" }) {
+  // 버튼 안에는 p를 둘 수 없어 span으로 그린다.
   return (
-    <p className={`min-w-0 ${className}`}>
+    <Tag className={`min-w-0 ${className}`}>
       {parts.map((part, index) => (
         <span key={part}>
           {index > 0 && " · "}
           <span className="whitespace-nowrap">{part}</span>
         </span>
       ))}
-    </p>
+    </Tag>
   );
 }
 

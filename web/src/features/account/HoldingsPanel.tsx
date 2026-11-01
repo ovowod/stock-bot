@@ -80,7 +80,10 @@ export function HoldingsPanel({ environment, rows }: { environment: EnvironmentV
           {status?.session && <p className="text-xs break-keep text-sub">지금 세션 {criteriaText(status)}</p>}
         </div>
       )}
-      <HoldingsList items={rows.map((row) => (trailing ? trailingStopItem(row, status) : row.item))} />
+      <HoldingsList
+        items={rows.map((row) => (trailing ? trailingStopItem(row, status) : row.item))}
+        expandable={trailing}
+      />
     </Panel>
   );
 }
@@ -244,17 +247,13 @@ function trailingStopItem(row: HoldingRow, status: TrailingStopStatus | null): H
     change: <Change value={rate} format={formatRate} />,
     info: [
       ...row.keepInfo,
-      reach === EMPTY ? `도달 여부 ${EMPTY}` : reach,
-      // 넓은 화면은 상세를 펼치지 않으므로 고점과 트리거도 정보 줄에 둔다.
-      // 고점이 없는 종목은 정보 줄을 짧게 두고, 상세에서 –로 보인다.
-      ...(peak === null
-        ? []
-        : [`고점 대비 ${dropText}`, `고점 ${row.formatPrice(peak)} (${stamp(stock?.peak_at)})`]),
-      ...(triggered === EMPTY ? [] : [`매도 조건 충족 ${triggered}`]),
-      ...(excluded ? ["제외종목"] : []),
+      // 정보 줄에는 핵심 하나만 둔다. 활성화됐으면 고점 대비 하락률, 아니면 도달 여부다.
+      // 나머지는 줄을 눌러 펼친 상세에서 본다. 가격을 몰라 알 수 없으면 정보 줄에서 뺀다.
+      ...(peak !== null ? [`고점 대비 ${dropText}`] : reach === EMPTY ? [] : [reach]),
       ...row.sellable.map((d) => `${d.label} ${d.value}`),
     ],
     details: [
+      { label: "상태", value: label ? label.parts.join(" · ") : EMPTY },
       ...row.keepDetails,
       { label: "도달 여부", value: reach },
       { label: "고점 대비", value: dropText },
@@ -281,8 +280,10 @@ function reachText(
   purchase: number,
   status: TrailingStopStatus,
 ): string {
-  const activation = status.session?.activation_profit;
-  if (!activation) return EMPTY;
+  // 비교할 기준이 없으면 –보다 왜 없는지를 보인다.
+  if (!status.session) return "기준 없음 (세션 없음)";
+  const activation = status.session.activation_profit;
+  if (!activation) return "기준 없음";
   // 서버 판정(가격 ≥ 평균 매입가 × (1 + 활성화 수익률/100))과 같은 식을 나눗셈 없이 비교해 경계에서 어긋나지 않게 한다.
   const reached = (current - purchase) * 100 >= purchase * Number(activation);
   if (!reached) return `미도달 (기준 ${activation}%)`;
@@ -335,11 +336,13 @@ function stampText(iso: string, timeZone: string): string {
 function StatusBadge({ label }: { label: StatusLabel | null }) {
   if (!label) return <span className="text-muted">{EMPTY}</span>;
   return (
-    // 좁은 화면에서 이름 칸을 밀어내지 않게 폭을 막는다. 낱말 안에서는 줄을 바꾸지 않는다.
+    // 좁은 화면은 상태 이름만 한 줄로 두고, 이유는 줄을 눌러 펼친 상세의 "상태"에 둔다.
+    // 이유까지 넣으면 오른쪽 칸에서 두 줄로 꺾여 목록 줄 높이가 들쭉날쭉해진다.
     <span
-      className={`inline-block max-w-32 rounded-lg px-2 py-0.5 text-xs leading-snug font-bold break-keep md:max-w-56 ${TONE[label.tone]}`}
+      className={`inline-block rounded-lg px-2 py-0.5 text-xs leading-snug font-bold whitespace-nowrap md:max-w-56 md:whitespace-normal md:break-keep ${TONE[label.tone]}`}
     >
-      {label.parts.join(" · ")}
+      {label.parts[0]}
+      {label.parts.length > 1 && <span className="hidden md:inline"> · {label.parts.slice(1).join(" · ")}</span>}
     </span>
   );
 }
