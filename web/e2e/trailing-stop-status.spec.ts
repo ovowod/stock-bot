@@ -307,7 +307,8 @@ test("열려 있고 탭이 보이는 동안 3초마다 상태를 다시 받고, 
   await view(page, "Trailing Stop").click();
   await expect.poll(() => requests.length).toBe(1);
 
-  /** 화면 시계를 ms만큼 흘리고, 그 사이 나간 요청이 화면 밖까지 닿을 시간을 준다. */
+  /** 화면 시계를 ms만큼 흘리고, 그 사이 나간 요청이 화면 밖까지 닿을 시간을 준다.
+   * 요청이 늘어야 하는 곳은 부하가 큰 전체 실행에서도 기다리도록 expect.poll로 본다. */
   const advance = async (ms: number) => {
     await page.clock.runFor(ms);
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -315,9 +316,9 @@ test("열려 있고 탭이 보이는 동안 3초마다 상태를 다시 받고, 
   await advance(2900);
   expect(requests.length).toBe(1);
   await advance(100);
-  expect(requests.length).toBe(2);
+  await expect.poll(() => requests.length).toBe(2);
   await advance(3000);
-  expect(requests.length).toBe(3);
+  await expect.poll(() => requests.length).toBe(3);
 
   const setVisibility = (state: "hidden" | "visible") =>
     page.evaluate((value) => {
@@ -332,7 +333,7 @@ test("열려 있고 탭이 보이는 동안 3초마다 상태를 다시 받고, 
   await setVisibility("visible");
   await expect.poll(() => requests.length).toBe(4);
   await advance(3000);
-  expect(requests.length).toBe(5);
+  await expect.poll(() => requests.length).toBe(5);
 
   // 기본 보기로 바꾸면 받지 않는다.
   await view(page, "기본").click();
