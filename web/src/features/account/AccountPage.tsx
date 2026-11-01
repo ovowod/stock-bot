@@ -168,6 +168,7 @@ function DomesticView({
             credit: h.credit,
             currentPrice: h.current_price,
             purchasePrice: h.purchase_price,
+            formatPrice: formatKrw,
             keepInfo: [h.code],
             keepDetails: [{ label: "종목코드", value: h.code }],
             sellable: sellableDetail(h.quantity, h.tradable_quantity),
@@ -292,6 +293,7 @@ function UsView({ data, onSold, openOrders }: { data: UsAccount; onSold: () => v
             credit: h.credit,
             currentPrice: h.current_price,
             purchasePrice: h.purchase_price,
+            formatPrice: price,
             keepInfo: [h.code, h.exchange ?? NO_EXCHANGE],
             keepDetails: [
               { label: "종목코드", value: h.code },

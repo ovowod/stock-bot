@@ -19,6 +19,8 @@ export interface HoldingRow {
   credit: boolean;
   currentPrice: number | null;
   purchasePrice: number | null;
+  /** 이 시장의 가격 표기(국내 원, 미국 외화). 고점·트리거 가격에 쓴다. */
+  formatPrice: (value: number | null) => string;
   /** Trailing Stop 보기에서도 그대로 두는 정보 줄 앞부분과 상세 칸(종목코드, 거래소). */
   keepInfo: string[];
   keepDetails: Detail[];
@@ -75,6 +77,7 @@ export function HoldingsPanel({ environment, rows }: { environment: EnvironmentV
           <p className="text-xs break-keep text-muted">
             수익률은 시세 체결가 기준이며 수수료·세금은 빼지 않습니다. 고점은 켜진 세션 동안의 체결가로 정합니다.
           </p>
+          {status?.session && <p className="text-xs break-keep text-sub">지금 세션 {criteriaText(status)}</p>}
         </div>
       )}
       <HoldingsList items={rows.map((row) => (trailing ? trailingStopItem(row, status) : row.item))} />
@@ -217,9 +220,23 @@ function trailingStopItem(row: HoldingRow, status: TrailingStopStatus | null): H
   const purchase = price(stock?.purchase_price) ?? row.purchasePrice;
   const known = current !== null && purchase !== null && current !== 0 && purchase !== 0;
   const rate = known ? (current / purchase - 1) * 100 : null;
-  const reach = status && known ? reachText(current, purchase, status) : EMPTY;
+  const reach = !status
+    ? EMPTY
+    : stock?.activated_at
+      ? `도달 · ${stampText(stock.activated_at, status.timezone)}`
+      : known
+        ? reachText(current, purchase, status)
+        : EMPTY;
+  const peak = price(stock?.peak);
+  // 고점 대비 하락률. 고점이 없거나 가격을 모르면 계산하지 않는다.
+  const drop = peak !== null && peak !== 0 && current !== null && current !== 0 ? (current / peak - 1) * 100 : null;
+  const dropText = drop === null ? EMPTY : formatDrop(drop);
   const excluded = status ? status.excluded.includes(row.code) : null;
   const label = status ? statusLabel(row, status, stock) : null;
+  const stamp = (iso: string | null | undefined) => (status && iso ? stampText(iso, status.timezone) : EMPTY);
+  const triggered = stock?.triggered_at
+    ? `${stamp(stock.triggered_at)} · ${row.formatPrice(price(stock.triggered_price))}`
+    : EMPTY;
   return {
     ...row.item,
     value: <StatusBadge label={label} />,
@@ -228,12 +245,24 @@ function trailingStopItem(row: HoldingRow, status: TrailingStopStatus | null): H
     info: [
       ...row.keepInfo,
       reach === EMPTY ? `도달 여부 ${EMPTY}` : reach,
+      // 넓은 화면은 상세를 펼치지 않으므로 고점과 트리거도 정보 줄에 둔다.
+      // 고점이 없는 종목은 정보 줄을 짧게 두고, 상세에서 –로 보인다.
+      ...(peak === null
+        ? []
+        : [`고점 대비 ${dropText}`, `고점 ${row.formatPrice(peak)} (${stamp(stock?.peak_at)})`]),
+      ...(triggered === EMPTY ? [] : [`매도 조건 충족 ${triggered}`]),
       ...(excluded ? ["제외종목"] : []),
       ...row.sellable.map((d) => `${d.label} ${d.value}`),
     ],
     details: [
       ...row.keepDetails,
       { label: "도달 여부", value: reach },
+      { label: "고점 대비", value: dropText },
+      { label: "고점", value: peak === null ? EMPTY : row.formatPrice(peak) },
+      { label: "고점 시각", value: stamp(stock?.peak_at) },
+      { label: "활성화 시각", value: stamp(stock?.activated_at) },
+      { label: "매도 조건 충족", value: triggered },
+      { label: "지금 세션 기준", value: status ? criteriaText(status) : EMPTY },
       { label: "제외종목", value: excluded === null ? EMPTY : excluded ? "예" : "아니요" },
       ...row.sellable,
     ],
@@ -241,8 +270,10 @@ function trailingStopItem(row: HoldingRow, status: TrailingStopStatus | null): H
 }
 
 /**
- * 활성화 수익률 도달 여부. 지금 시각을 포함하는 세션의 기준과 비교한다.
+ * 아직 활성화되지 않은 종목의 활성화 수익률 도달 여부. 지금 시각을 포함하는 세션의 기준과 비교한다.
  * 세션이 없거나 그 세션에 활성화 수익률이 없으면(꺼진 세션은 비어 있을 수 있다) 비교하지 않는다.
+ * 감시 중이 아니면 활성화되지 않으므로 "세션 밖"이다. 감시 중인데 활성화 전이면 서버가 그 가격의
+ * 시세 체결을 아직 판정하지 않은 것이다(계좌 현재가로 계산한 경우).
  */
 function reachText(
   current: number,
@@ -253,7 +284,50 @@ function reachText(
   if (!activation) return EMPTY;
   // 서버 판정(가격 ≥ 평균 매입가 × (1 + 활성화 수익률/100))과 같은 식을 나눗셈 없이 비교해 경계에서 어긋나지 않게 한다.
   const reached = (current - purchase) * 100 >= purchase * Number(activation);
-  return reached ? "도달 (세션 밖)" : `미도달 (기준 ${activation}%)`;
+  if (!reached) return `미도달 (기준 ${activation}%)`;
+  return status.watching ? "도달 (판정 전)" : "도달 (세션 밖)";
+}
+
+/** 고점 대비 하락률. 소수 첫째 자리까지, 내려가면 −를 붙인다(예: −1.0%). */
+function formatDrop(value: number): string {
+  const rounded = Math.round(value * 10) / 10;
+  if (rounded === 0) return "0.0%";
+  return `${rounded < 0 ? "−" : "+"}${Math.abs(rounded).toFixed(1)}%`;
+}
+
+/** 지금 세션의 기준. 꺼진 세션은 기준이 비어 있을 수 있다. */
+function criteriaText(status: TrailingStopStatus): string {
+  const session = status.session;
+  if (!session) return EMPTY;
+  const parts = [
+    session.activation_profit ? `활성화 +${session.activation_profit}%` : null,
+    session.drop_from_peak ? `고점 대비 −${session.drop_from_peak}%` : null,
+  ].filter((part) => part !== null);
+  const span = `${session.start}–${session.end}${session.enabled ? "" : " (꺼짐)"}`;
+  return parts.length ? `${span} · ${parts.join(" · ")}` : span;
+}
+
+/** 투자 환경 시간대의 시각. 그 시간대에서 오늘이 아니면 날짜를 붙인다(예: 11/01 10:03). */
+function stampText(iso: string, timeZone: string): string {
+  const parts = (date: Date) =>
+    Object.fromEntries(
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      })
+        .formatToParts(date)
+        .map((part) => [part.type, part.value]),
+    );
+  const at = parts(new Date(iso));
+  const today = parts(new Date());
+  const time = `${at.hour}:${at.minute}`;
+  const sameDay = at.year === today.year && at.month === today.month && at.day === today.day;
+  return sameDay ? time : `${at.month}/${at.day} ${time}`;
 }
 
 function StatusBadge({ label }: { label: StatusLabel | null }) {

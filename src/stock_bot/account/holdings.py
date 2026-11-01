@@ -181,7 +181,7 @@ class Holdings:
             self._reading_balance.discard(environment)
 
     async def positions(self, spec: EnvironmentSpec) -> list[dict[str, Any]]:
-        """SL / TP가 지켜볼 보유종목 줄. 매입가를 읽지 못한 칸은 None이다.
+        """SL / TP와 Trailing Stop이 지켜볼 보유종목 줄. 매입가·수량을 읽지 못한 칸은 None이다.
 
         미국은 종목 목록의 거래소를 붙이고, 목록에 없으면 None이다.
         종목 목록을 받지 못하면 오류다. 거래소 없이 모든 종목을 조용히 빼지 않게 한다.
@@ -196,6 +196,7 @@ class Holdings:
                 "code": h.code,
                 "name": h.name,
                 "purchase_price": h.purchase_price,
+                "quantity": h.quantity,
                 "credit": h.credit,
                 "exchange": h.exchange,
             }

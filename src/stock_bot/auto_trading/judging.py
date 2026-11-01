@@ -24,6 +24,8 @@ MARKET_TYPE_FIELD = "290"
 # 장구분(290)의 정규장 값. 국내 2는 장중, 미국 0은 정규장이다.
 # 국내 장전·장후 시간외, 미국 프리마켓·애프터마켓·주간거래 체결은 판정하지 않는다.
 REGULAR_MARKET = {Market.DOMESTIC: "2", Market.US: "0"}
+# 시세 실시간 항목. 0B는 국내 주식체결, FE는 미국주식 실시간 체결가다.
+QUOTE_TYPES = {Market.DOMESTIC: "0B", Market.US: "FE"}
 
 
 @dataclass(frozen=True)
@@ -132,3 +134,13 @@ def read_price(values: dict[str, Any]) -> tuple[Decimal | None, str | None]:
     if not price.is_finite() or price <= 0:
         return None, "not_positive"
     return price, None
+
+
+def quote_items(market: Market, codes: Sequence[str], holdings: dict[str, Holding]) -> list[Any]:
+    """시세 등록 항목. 국내는 접두어 없는 종목코드, 미국은 {티커, 거래소 코드} 객체다."""
+    if market is Market.DOMESTIC:
+        return list(codes)
+    return [
+        {"jmcode": code, "stex_tp": US_EXCHANGE_CODES[holdings[code].exchange or ""]}
+        for code in codes
+    ]

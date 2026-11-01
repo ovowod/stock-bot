@@ -1,8 +1,6 @@
 """Trailing Stop 상태 조회: 계좌 확인의 Trailing Stop 보기가 3초마다 부른다.
 
-키움을 부르지 않는다. 설정은 자동매매 설정 파일에서 읽는다.
-Trailing Stop 감시는 아직 없어 늘 감시 안 함이고 종목도 없다. 감시가 생기면 _watch_state가
-감시의 메모리에서 감시 여부, 이유, 종목을 받는다.
+키움을 부르지 않는다. 설정은 자동매매 설정 파일에서, 감시 여부·이유·종목은 감시의 메모리에서 읽는다.
 """
 
 import logging
@@ -16,6 +14,7 @@ from stock_bot.core.config import EnvironmentSpec
 from stock_bot.core.errors import AppError
 from stock_bot.core.logging_setup import log
 from stock_bot.kiwoom.kiwoom import KiwoomClient
+from stock_bot.trailing_stop.watch import TrailingStopWatcher
 
 logger = logging.getLogger("stock_bot.trailing_stop")
 
@@ -25,11 +24,13 @@ class TrailingStopStatus:
         self,
         kiwoom: KiwoomClient,
         settings: FeatureSettingsStore,
+        watcher: TrailingStopWatcher,
         now: Callable[[], datetime],
     ) -> None:
         # 인증정보가 있는지만 본다. 키움에 요청하지 않는다.
         self._kiwoom = kiwoom
         self._settings = settings
+        self._watcher = watcher
         self._now = now
 
     def read(self, spec: EnvironmentSpec) -> dict[str, Any]:
@@ -77,4 +78,6 @@ class TrailingStopStatus:
             return False, "no_credentials", []
         if not settings_ok:
             return False, "settings_unreadable", []
-        return False, "no_session", []
+        state = self._watcher.state(spec)
+        # 감시가 아직 시작되지 않았으면(서버 시작 전) 켜진 세션이 없는 것과 같다.
+        return (False, "no_session", []) if state is None else state

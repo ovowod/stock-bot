@@ -157,7 +157,7 @@ test("자동매매 → SL / TP 아래의 Trailing Stop에서 안내 문구와 �
     ),
   ).toBeVisible();
   await expect(
-    page.getByText("Trailing Stop 자동 매도는 아직 동작하지 않습니다. 지금은 설정만 저장됩니다."),
+    page.getByText("지금은 상태만 계산하고 팔지 않습니다. 계좌 확인 화면의 Trailing Stop 보기에서 확인하세요."),
   ).toBeVisible();
   await expect(page.getByText("제외종목이 없습니다")).toBeVisible();
   await expect(page.getByText("모든 Trailing Stop 세션에 똑같이 적용됩니다")).toBeVisible();

@@ -432,3 +432,198 @@ test("좁은 화면에서도 긴 상태가 잘리지 않고 가로로 넘치지 
   await expectNoHorizontalScroll(page);
   await page.screenshot({ path: `screenshots/${info.project.name}-trailing-stop-narrow.png`, fullPage: true });
 });
+
+const stock = (code: string, overrides: Record<string, unknown> = {}) => ({
+  code,
+  status: "waiting",
+  ineligible_reason: null,
+  purchase_price: null,
+  last_price: null,
+  last_price_at: null,
+  activated_at: null,
+  peak: null,
+  peak_at: null,
+  triggered_at: null,
+  triggered_price: null,
+  ...overrides,
+});
+
+test("감시 중이면 상태·고점·하락률·시각을 보이고 서버의 매입가와 가격으로 수익률을 계산한다", async ({
+  page,
+  isMobile,
+}, info) => {
+  // 한국시간 2026-11-02 11:15. 오늘이 아닌 시각에는 날짜를 붙인다.
+  await page.clock.install({ time: new Date("2026-11-02T02:15:00Z") });
+  const LG = holding("051910", "LG화학", { purchase_price: 300_000, current_price: 320_000 });
+  const KAKAO = holding("035720", "카카오", { purchase_price: 0 });
+  await mockScreen(
+    page,
+    { domestic_paper: domestic("domestic_paper", [SAMSUNG, NAVER, HYNIX, LG, KAKAO]) },
+    (environment) => ({
+      body: status(environment, {
+        watching: true,
+        not_watching_reason: null,
+        stocks: [
+          // 추가 매수로 계좌 응답(70,000원)보다 새로운 매입가를 서버가 쓰고 있다.
+          stock("005930", {
+            status: "tracking",
+            purchase_price: "60000",
+            last_price: "61200",
+            last_price_at: "2026-11-02T02:11:00+00:00",
+            activated_at: "2026-11-02T01:03:00+00:00",
+            peak: "61800",
+            peak_at: "2026-11-02T02:10:12+00:00",
+          }),
+          stock("035420", { purchase_price: "200000", last_price: "194800" }),
+          stock("000660", {
+            status: "triggered",
+            purchase_price: "100000",
+            last_price: "107000",
+            activated_at: "2026-11-01T01:03:00+00:00",
+            peak: "110000",
+            peak_at: "2026-11-01T05:20:00+00:00",
+            triggered_at: "2026-11-02T01:30:00+00:00",
+            triggered_price: "106700",
+          }),
+          // 시세 체결을 아직 받지 못해 계좌 현재가(+6.67%)로 계산한다.
+          stock("051910", { purchase_price: "300000" }),
+          stock("035720", { status: "ineligible", ineligible_reason: "no_purchase_price" }),
+        ],
+      }),
+    }),
+  );
+  await openDashboard(page);
+  await view(page, "Trailing Stop").click();
+  await expect(page.getByText("지금 세션 09:00–15:30 · 활성화 +5% · 고점 대비 −3%")).toBeVisible();
+
+  // 61,200 / 60,000 = +2.00%, 61,200 / 61,800 = −0.97%
+  const samsung = row(page, "삼성전자");
+  await expect(visible(samsung, "고점 추적 중")).toBeVisible();
+  await expect(visible(samsung, "+2.00%")).toBeVisible();
+  await expectFact(samsung, isMobile, "도달 여부", "005930 · 도달 · 10:03 · 고점 대비 −1.0% · 고점 61,800원 (11:10)", "도달 · 10:03");
+  if (isMobile) {
+    await expectFact(samsung, true, "고점 대비", "", "−1.0%");
+    await expectFact(samsung, true, "고점", "", "61,800원");
+    await expectFact(samsung, true, "고점 시각", "", "11:10");
+    await expectFact(samsung, true, "활성화 시각", "", "10:03");
+    await expectFact(samsung, true, "매도 조건 충족", "", "–");
+    await expectFact(samsung, true, "지금 세션 기준", "", "09:00–15:30 · 활성화 +5% · 고점 대비 −3%");
+  }
+
+  const naver = row(page, "NAVER");
+  await expect(visible(naver, "활성화 대기")).toBeVisible();
+  await expect(visible(naver, "−2.60%")).toBeVisible();
+  await expectFact(naver, isMobile, "도달 여부", "035420 · 미도달 (기준 5%)", "미도달 (기준 5%)");
+  if (isMobile) await expectFact(naver, true, "고점 대비", "", "–");
+  else await expect(naver.getByText("고점 대비", { exact: false }).filter({ visible: true })).toHaveCount(0);
+
+  // 107,000 / 100,000 = +7.00%, 107,000 / 110,000 = −2.73%
+  const hynix = row(page, "SK하이닉스");
+  await expect(visible(hynix, "매도 조건 충족")).toBeVisible();
+  await expect(visible(hynix, "+7.00%")).toBeVisible();
+  await expectFact(
+    hynix,
+    isMobile,
+    "매도 조건 충족",
+    "000660 · 도달 · 11/01 10:03 · 고점 대비 −2.7% · 고점 110,000원 (11/01 14:20) · 매도 조건 충족 10:30 · 106,700원",
+    "10:30 · 106,700원",
+  );
+
+  const lg = row(page, "LG화학");
+  await expect(visible(lg, "활성화 대기")).toBeVisible();
+  await expectFact(lg, isMobile, "도달 여부", "051910 · 도달 (판정 전)", "도달 (판정 전)");
+
+  const kakao = row(page, "카카오");
+  await expect(visible(kakao, "대상 아님 · 매입가 없음")).toBeVisible();
+  await expectFact(kakao, isMobile, "도달 여부", "035720 · 도달 여부 –", "–");
+
+  await expectNoHorizontalScroll(page);
+  await page.screenshot({ path: `screenshots/${info.project.name}-trailing-stop-watching.png`, fullPage: true });
+});
+
+test("장애로 멈추면 활성화된 종목은 고점 추적 중 · <멈춘 이유>이고 계좌 값으로 수익률을 계산한다", async ({
+  page,
+  isMobile,
+}) => {
+  await page.clock.install({ time: new Date("2026-11-02T02:15:00Z") });
+  let reason = "connection_replaced";
+  await mockScreen(page, { domestic_paper: domestic("domestic_paper", [SAMSUNG, NAVER, HYNIX]) }, (environment) => ({
+    body: status(environment, {
+      watching: false,
+      not_watching_reason: reason,
+      // 감시 중이 아니면 기억이 있는 종목만 오고, 판정에 쓰는 매입가와 가격은 비어 있다.
+      stocks: [
+        stock("005930", {
+          status: "tracking",
+          activated_at: "2026-11-02T01:03:00+00:00",
+          peak: "90000",
+          peak_at: "2026-11-02T02:00:00+00:00",
+        }),
+        stock("000660", {
+          status: "triggered",
+          activated_at: "2026-11-02T01:03:00+00:00",
+          peak: "110000",
+          peak_at: "2026-11-02T01:10:00+00:00",
+          triggered_at: "2026-11-02T01:30:00+00:00",
+          triggered_price: "106700",
+        }),
+      ],
+    }),
+  }));
+  await openDashboard(page);
+  await view(page, "Trailing Stop").click();
+
+  const samsung = row(page, "삼성전자");
+  await expect(visible(samsung, "고점 추적 중 · 실시간 연결이 밀려남")).toBeVisible();
+  // 84,500 / 70,000 = +20.71%, 84,500 / 90,000 = −6.11%
+  await expect(visible(samsung, "+20.71%")).toBeVisible();
+  await expectFact(samsung, isMobile, "고점 대비", "005930 · 도달 · 10:03 · 고점 대비 −6.1%", "−6.1%");
+  await expect(visible(row(page, "SK하이닉스"), "매도 조건 충족 · 실시간 연결이 밀려남")).toBeVisible();
+  await expect(visible(row(page, "NAVER"), "감시 안 함 · 실시간 연결이 밀려남")).toBeVisible();
+
+  reason = "holdings_pending";
+  await page.clock.runFor(3000);
+  await expect(visible(row(page, "삼성전자"), "고점 추적 중 · 보유종목 확인 중")).toBeVisible();
+  await expect(visible(row(page, "NAVER"), "감시 안 함 · 보유종목 확인 중")).toBeVisible();
+});
+
+test("미국 감시 종목은 외화로 고점을 보이고 뉴욕시간으로 시각을 보인다", async ({ page, isMobile }) => {
+  // 뉴욕 2026-11-02 10:00(서머타임 끝).
+  await page.clock.install({ time: new Date("2026-11-02T15:00:00Z") });
+  await mockScreen(
+    page,
+    { domestic_paper: domestic("domestic_paper", []), us_paper: us("us_paper", [usHolding("AAPL", "애플")]) },
+    (environment) => ({
+      body: status(environment, {
+        watching: true,
+        not_watching_reason: null,
+        session: { ...ON, start: "09:30", end: "16:00" },
+        stocks: [
+          stock("AAPL", {
+            status: "tracking",
+            purchase_price: "282.1603",
+            last_price: "300.5",
+            activated_at: "2026-11-02T14:35:00+00:00",
+            peak: "305.25",
+            peak_at: "2026-11-02T14:50:00+00:00",
+          }),
+        ],
+      }),
+    }),
+  );
+  await openDashboard(page);
+  await envButton(page, "미국 모의").click();
+  await view(page, "Trailing Stop").click();
+
+  // 300.5 / 282.1603 = +6.50%, 300.5 / 305.25 = −1.56%
+  const apple = row(page, "애플");
+  await expect(visible(apple, "고점 추적 중")).toBeVisible();
+  await expect(visible(apple, "+6.50%")).toBeVisible();
+  await expectFact(
+    apple,
+    isMobile,
+    "고점",
+    "AAPL · NASDAQ · 도달 · 09:35 · 고점 대비 −1.6% · 고점 $305.25 (09:50)",
+    "$305.25",
+  );
+});

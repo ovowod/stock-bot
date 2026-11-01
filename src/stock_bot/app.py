@@ -49,6 +49,7 @@ from stock_bot.sl_tp.sl_tp import SL_TP
 from stock_bot.sl_tp.watch import SlTpWatcher
 from stock_bot.trailing_stop.settings import TRAILING_STOP
 from stock_bot.trailing_stop.status import TrailingStopStatus
+from stock_bot.trailing_stop.watch import TrailingStopWatcher
 
 logger = logging.getLogger("stock_bot.api")
 
@@ -132,21 +133,27 @@ def create_app(
     # 예전 SL / TP 파일은 서버가 시작할 때 한 번 옮긴다. 옮기지 못하면 서버를 시작하지 않는다.
     auto_trading.migrate(data_dir / "sl-tp", SL_TP)
     sl_tp = FeatureSettingsStore(auto_trading, SL_TP)
-    # Trailing Stop은 아직 설정만 저장한다. 저장해도 SL / TP 감시에는 알리지 않는다.
     trailing_stop = FeatureSettingsStore(auto_trading, TRAILING_STOP)
-    trailing_stop_status = TrailingStopStatus(kiwoom, trailing_stop, now)
     sl_tp_watch = SlTpWatcher(
         kiwoom, sl_tp, holdings.positions, auto_sell, realtime, feed, notifier, now
     )
     sl_tp.on_saved = sl_tp_watch.settings_saved
+    # Trailing Stop은 상태만 판정하고 팔지 않는다. 주문 경로(auto_sell)를 넘기지 않는다.
+    trailing_stop_watch = TrailingStopWatcher(
+        kiwoom, trailing_stop, holdings.positions, realtime, feed, notifier, now
+    )
+    trailing_stop.on_saved = trailing_stop_watch.settings_saved
+    trailing_stop_status = TrailingStopStatus(kiwoom, trailing_stop, trailing_stop_watch, now)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         fills.start()
         sl_tp_watch.start()
+        trailing_stop_watch.start()
         try:
             yield
         finally:
+            await trailing_stop_watch.stop()
             await sl_tp_watch.stop()
             await fills.stop()
             await feed.stop()

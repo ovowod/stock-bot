@@ -176,6 +176,7 @@ async def test_sl_tp_positions_ignore_a_missing_screen_only_cell():
             "code": "AAPL",
             "name": "애플",
             "purchase_price": Decimal("282.1603"),
+            "quantity": 395,
             "credit": False,
             "exchange": "NASDAQ",
         }

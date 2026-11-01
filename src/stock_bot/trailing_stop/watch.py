@@ -1,0 +1,763 @@
+"""Trailing Stop 감시: 모의투자 보유종목의 시세 체결로 활성화, 고점, 트리거를 판정한다.
+
+켜진 Trailing Stop 세션 동안 보유종목을 읽고 공유 실시간 연결로 시세 체결을 구독한다.
+트리거가 일어나도 매도 주문은 내지 않는다. 주문 경로(AutoSell·OrderService)에 기대지 않는다.
+기억(활성화·고점·트리거)은 투자 환경마다 서버 메모리에 두고,
+서버가 켜져 있는 동안 세션을 넘겨 이어 간다.
+실전투자 환경은 만들지 않는다. 수익률에 수수료·세금은 반영하지 않는다.
+
+세션·보유종목 다시 읽기·연결 추적은 SL / TP 감시(sl_tp/watch.py)와 같은 규칙이다.
+"""
+
+import asyncio
+import logging
+import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from stock_bot.auto_trading.judging import (
+    PRICE_FIELD,
+    QUOTE_TYPES,
+    Holding,
+    check_holdings,
+    is_regular_market,
+    quote_items,
+    read_price,
+    session_at,
+)
+from stock_bot.auto_trading.settings import TIMEZONES, FeatureSettingsStore
+from stock_bot.core.config import ENVIRONMENTS, EnvironmentSpec
+from stock_bot.core.errors import AppError
+from stock_bot.core.logging_setup import environment_var, log, request_id_var
+from stock_bot.core.notification import DiscordNotifier, Embed, EmbedField
+from stock_bot.fill.feed import FeedState, FeedStatus, Fill, FillFeed
+from stock_bot.kiwoom.kiwoom import KiwoomClient
+from stock_bot.kiwoom.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
+
+logger = logging.getLogger("stock_bot.trailing_stop_watch")
+
+# 공유 연결에서 Trailing Stop의 시세 구독이 쓰는 그룹 번호. 체결 feed는 1, SL / TP 시세는 2다.
+# 같은 종목을 그룹 둘에 등록할 때 실시간 시세 200종목 한도를 어떻게 세는지는 문서로 확인하지 못했다.
+GROUP_NO = "3"
+# 지금 켜진 Trailing Stop 세션을 다시 계산하는 간격. 설정을 저장할 때도 다시 계산한다.
+SESSION_CHECK_SECONDS = 1.0
+# 보유종목 읽기가 실패하면 이 간격으로 다시 읽는다. 실패가 이어지면 두 배씩 늘린다.
+HOLDINGS_RETRY_INITIAL_SECONDS = 1.0
+HOLDINGS_RETRY_MAX_SECONDS = 60.0
+# 보유종목 읽기가 첫 실패부터 이만큼 계속 실패하면 판정 중단 알림을 한 번 보낸다.
+HOLDINGS_ALERT_AFTER = timedelta(minutes=5)
+NEUTRAL_COLOR = 0x8B8F98
+
+PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
+# (감시 중인지, 감시 안 함의 이유, 상태 조회의 stocks)
+WatchState = tuple[bool, str | None, list[dict[str, Any]]]
+
+
+@dataclass
+class Memory:
+    """종목 하나의 기억. 보유하는 동안 세션을 넘겨 이어 간다. 시각은 시세 체결을 받은 시각이다."""
+
+    activated_at: datetime
+    peak: Decimal
+    peak_at: datetime
+    triggered_at: datetime | None = None
+    triggered_price: Decimal | None = None
+
+
+@dataclass
+class _Run:
+    """켜진 Trailing Stop 세션이 새로 시작될 때마다 하나. 보유종목 읽기와 구독을 묶는다.
+
+    기억은 실행에 묶이지 않는다. 실행이 바뀌어도 이어 간다.
+    """
+
+    number: int
+    day: date
+    span: str
+    # 이 실행을 시작한 시각. 그보다 먼저 받은 시세는 앞 실행의 것이다.
+    started_at: datetime
+    # 지금 쓰는 보유종목을 읽을 때의 연결 번호. 다른 번호로 다시 연결되면 다시 읽는다.
+    connection: int | None = None
+    # 보유종목 다시 읽기 작업과, 읽는 동안 새로 온 계기.
+    refresh: asyncio.Task[None] | None = None
+    pending: list[str] = field(default_factory=list)
+    # 보유종목 읽기가 처음 실패한 시각과 판정 중단을 알렸는지. 성공하면 지운다.
+    failed_since: datetime | None = None
+    failure_alerted: bool = False
+
+    def covers(self, found: tuple[date, dict[str, Any]] | None) -> bool:
+        """그 날짜·세션이 이 실행의 것인가. 기준만 바뀌면 같은 실행이다."""
+        return found is not None and found[0] == self.day and _span(found[1]) == self.span
+
+
+class TrailingStopWatcher:
+    def __init__(
+        self,
+        kiwoom: KiwoomClient,
+        settings: FeatureSettingsStore,
+        positions: PositionLookup,
+        hub: RealtimeHub,
+        feed: FillFeed,
+        notifier: DiscordNotifier,
+        now: Callable[[], datetime],
+    ) -> None:
+        self.kiwoom = kiwoom
+        self.settings = settings
+        self.positions = positions
+        self.hub = hub
+        # 내 계좌 체결. 체결되면 매입가·보유수량이 바뀌므로 보유종목을 다시 읽는다.
+        self.feed = feed
+        self.notifier = notifier
+        self.now = now
+        self._watches: list[_Watch] = []
+
+    def start(self) -> None:
+        """모의투자 환경만 지켜본다. 인증정보가 없는 환경은 건너뛴다."""
+        for spec in (s for s in ENVIRONMENTS.values() if not s.is_real):
+            environment_var.set(spec.environment.value)
+            try:
+                self.kiwoom.credentials(spec)
+            except AppError as exc:
+                log(logger, logging.INFO, "trailing_stop_watch_skipped", cause=exc.message)
+                continue
+            watch = _Watch(self, spec)
+            self._watches.append(watch)
+            watch.start()
+        environment_var.set("-")
+
+    async def stop(self) -> None:
+        for watch in self._watches:
+            await watch.stop()
+        self._watches.clear()
+
+    def settings_saved(self, spec: EnvironmentSpec, settings: dict[str, Any]) -> None:
+        for watch in self._watches:
+            if watch.spec is spec:
+                watch.settings_saved(settings)
+
+    def state(self, spec: EnvironmentSpec) -> WatchState | None:
+        """상태 조회가 읽는다. 지켜보지 않는 환경(실전, 인증정보 없음, 시작 전)은 None이다."""
+        for watch in self._watches:
+            if watch.spec is spec:
+                return watch.state()
+        return None
+
+
+class _Watch:
+    """투자 환경 하나의 Trailing Stop 감시."""
+
+    def __init__(self, owner: TrailingStopWatcher, spec: EnvironmentSpec) -> None:
+        self._owner = owner
+        self.spec = spec
+        # 서버 종료로 멈췄다. 밀려남은 채널이 바로 알려 준다.
+        self._stopped = False
+        # 시작 때 설정 파일을 읽지 못했다. 정상 설정이 저장될 때까지 멈춰 있다.
+        self._settings_broken = False
+        self._sessions: list[dict[str, Any]] = []
+        self._excluded: set[str] = set()
+        self._run: _Run | None = None
+        self._runs = 0
+        # 종목코드 -> 매입가·거래소. 현금잔고이고 판정할 수 있는 종목만 담는다. 제외종목도 담는다.
+        self._holdings: dict[str, Holding] = {}
+        # 현금잔고가 있지만 판정할 수 없는 종목코드 -> 이유. 신용 보유분만 있는 종목은 담지 않는다.
+        self._ineligible: dict[str, str] = {}
+        # 종목코드 -> 마지막으로 읽은 현금 보유 수량. 매도 체결을 받으면 바로 뺀다.
+        self._quantities: dict[str, Decimal] = {}
+        self._holdings_ready = False
+        # 종목코드 -> 기억. 서버 메모리에만 있다.
+        self.memory: dict[str, Memory] = {}
+        # 종목코드 -> 이 실행에서 판정한 마지막 시세 체결가와 받은 시각.
+        self._last_prices: dict[str, tuple[Decimal, datetime]] = {}
+        self._subscribed: list[str] | None = None
+        # 연결이 LOGIN까지 되면 깨운다. 보유종목은 연결이 있을 때 읽어야 그 뒤 체결을 놓치지 않는다.
+        self._wake = asyncio.Event()
+        self._quotes_rejected = False
+        self._fills_rejected = False
+        self._unsubscribe_fills: Callable[[], None] | None = None
+        # 같은 이유의 건너뜀·잘못된 체결가 로그를 반복해 남기지 않으려고
+        # 종목마다 마지막 이유를 둔다.
+        self._skips: dict[str, str] = {}
+        self._invalid: dict[str, str] = {}
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._channel = owner.hub.channel(spec, "trailing_stop", "Trailing Stop", self._on_event)
+
+    def start(self) -> None:
+        self._spawn(self._tick())
+        try:
+            settings = self._owner.settings.read(self.spec)
+        except AppError as exc:
+            # 깨진 설정을 빈 설정으로 착각해 동작하지 않는다. 알림은 SL / TP가 같은 파일로 보낸다.
+            self._settings_broken = True
+            log(
+                logger,
+                logging.ERROR,
+                "trailing_stop_watch_stopped",
+                reason="settings_unreadable",
+                cause=exc.message,
+            )
+            return
+        self._apply(settings)
+        self._refresh_run()
+
+    async def stop(self) -> None:
+        self._stopped = True
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+
+    def settings_saved(self, settings: dict[str, Any]) -> None:
+        token = environment_var.set(self.spec.environment.value)
+        try:
+            if self._settings_broken:
+                log(logger, logging.INFO, "trailing_stop_watch_resumed", reason="settings_saved")
+            self._settings_broken = False
+            excluded = self._excluded
+            run = self._run
+            self._apply(settings)
+            self._refresh_run()
+            if self._run is run and run is not None and excluded != self._excluded:
+                # 같은 실행 안에서 제외종목만 바뀌었다. 구독만 맞춘다.
+                if self._holdings_ready:
+                    self._subscribe()
+        finally:
+            environment_var.reset(token)
+
+    def state(self) -> WatchState:
+        """감시 중이면 읽은 보유종목을, 아니면 기억이 있는 종목을 종목코드마다 하나씩 담는다."""
+        reason = self._not_watching_reason()
+        if reason is None:
+            codes = sorted(self._holdings.keys() | self._ineligible.keys())
+        else:
+            codes = sorted(self.memory)
+        return reason is None, reason, [self._stock(code, reason is None) for code in codes]
+
+    def _not_watching_reason(self) -> str | None:
+        if self._channel.stopped:
+            return "connection_replaced"
+        if self._settings_broken:
+            return "settings_unreadable"
+        if self._run is None:
+            return "no_session"
+        if self._fills_rejected:
+            return "fills_rejected"
+        if self._quotes_rejected:
+            return "quotes_rejected"
+        if not self._holdings_ready:
+            return "holdings_pending"
+        return None
+
+    def _stock(self, code: str, watching: bool) -> dict[str, Any]:
+        """감시 중이 아니면 판정에 쓰는 매입가와 가격을 비운다. 화면은 계좌 값을 쓴다."""
+        memory = self.memory.get(code)
+        ineligible = self._ineligible.get(code) if watching else None
+        holding = self._holdings.get(code) if watching else None
+        last = self._last_prices.get(code) if holding is not None else None
+        if ineligible is not None:
+            status = "ineligible"
+        elif memory is None:
+            status = "waiting"
+        else:
+            status = "tracking" if memory.triggered_at is None else "triggered"
+        return {
+            "code": code,
+            "status": status,
+            "ineligible_reason": ineligible,
+            "purchase_price": None if holding is None else _decimal(holding.purchase_price),
+            "last_price": None if last is None else _decimal(last[0]),
+            "last_price_at": None if last is None else _moment(last[1]),
+            "activated_at": None if memory is None else _moment(memory.activated_at),
+            "peak": None if memory is None else _decimal(memory.peak),
+            "peak_at": None if memory is None else _moment(memory.peak_at),
+            "triggered_at": None if memory is None else _moment(memory.triggered_at),
+            "triggered_price": None if memory is None else _decimal(memory.triggered_price),
+        }
+
+    async def _tick(self) -> None:
+        while True:
+            await asyncio.sleep(SESSION_CHECK_SECONDS)
+            try:
+                self._refresh_run()
+            except Exception as exc:
+                # 한 번의 계산 오류로 세션 전환이 멈추지 않게 한다.
+                logger.error(
+                    "trailing_stop_session_check_failed",
+                    exc_info=exc,
+                    extra={"fields": {"error_type": type(exc).__name__}},
+                )
+
+    def _apply(self, settings: dict[str, Any]) -> None:
+        self._excluded = {item["code"] for item in settings["excluded"]}
+        self._sessions = settings["sessions"]
+
+    def _session_at(self, moment: datetime) -> tuple[date, dict[str, Any]] | None:
+        return session_at(self._sessions, moment, self.spec.market)
+
+    def _is_stopped(self) -> bool:
+        return self._stopped or self._settings_broken or self._channel.stopped
+
+    def _refresh_run(self) -> None:
+        """지금 켜진 세션에 맞춰 실행을 시작하거나 끝낸다. 기억은 그대로 둔다."""
+        if self._is_stopped():
+            return
+        found = self._session_at(self._owner.now())
+        run = self._run
+        if run is not None and run.covers(found):
+            return
+        if run is not None:
+            self._end_run(run)
+        if found is None:
+            if run is not None:
+                self._subscribed = None
+                self._channel.subscribe(None)
+                if self._unsubscribe_fills is not None:
+                    self._unsubscribe_fills()
+                    self._unsubscribe_fills = None
+            return
+        self._runs += 1
+        new = _Run(self._runs, found[0], _span(found[1]), self._owner.now())
+        new.connection = self._channel.connection
+        self._run = new
+        self._subscribed = None
+        self._last_prices.clear()
+        log(
+            logger,
+            logging.INFO,
+            "trailing_stop_session_started",
+            **_run_fields(new),
+            previous_run=None if run is None else run.number,
+            memory_count=len(self.memory),
+        )
+        if self._unsubscribe_fills is None:
+            self._unsubscribe_fills = self._owner.feed.subscribe(
+                self.spec, "trailing_stop", "Trailing Stop", self._on_feed
+            )
+        self._request_refresh(new, "session_started")
+
+    def _end_run(self, run: _Run) -> None:
+        log(logger, logging.INFO, "trailing_stop_session_ended", **_run_fields(run))
+        self._run = None
+        self._holdings_ready = False
+        if run.refresh is not None and not run.refresh.done():
+            run.refresh.cancel()
+            if run.failed_since is not None:
+                log(logger, logging.INFO, "trailing_stop_holdings_retry_stopped", run=run.number)
+
+    def _request_refresh(self, run: _Run, reason: str) -> None:
+        """보유종목을 다시 읽는다. 새 결과가 반영될 때까지 판정하지 않는다.
+
+        읽는 중에 다시 오면 끝난 뒤 한 번 더 읽는다. 짧은 시간에 여러 번 와도 한 번으로 합친다.
+        """
+        if self._holdings_ready:
+            log(logger, logging.INFO, "trailing_stop_judging_paused", run=run.number, reason=reason)
+        self._holdings_ready = False
+        run.pending.append(reason)
+        if run.refresh is None or run.refresh.done():
+            run.refresh = self._spawn(self._refresh(run))
+
+    async def _refresh(self, run: _Run) -> None:
+        # 다시 읽기는 여러 체결을 합치므로 어느 한 체결의 요청 ID로 남기지 않는다.
+        request_id_var.set("-")
+        delay = HOLDINGS_RETRY_INITIAL_SECONDS
+        while True:
+            # 연결이 없으면 읽지 않고 기다린다. 읽은 뒤 연결되면 그사이 체결을 놓친다.
+            while self._channel.connection is None:
+                if run is not self._run or self._is_stopped():
+                    return
+                self._wake.clear()
+                await self._wake.wait()
+            if run is not self._run or self._is_stopped():
+                return
+            reasons, run.pending = run.pending, []
+            connection = self._channel.connection
+            try:
+                rows = await self._owner.positions(self.spec)
+            except AppError as exc:
+                if run.failed_since is None:
+                    run.failed_since = self._owner.now()
+                run.pending = reasons + run.pending
+                log(
+                    logger,
+                    logging.WARNING,
+                    "trailing_stop_holdings_failed",
+                    run=run.number,
+                    reasons=reasons,
+                    kind=exc.kind,
+                    cause=exc.message,
+                    failed_since=run.failed_since.isoformat(),
+                    wait_seconds=delay,
+                )
+                if (
+                    not run.failure_alerted
+                    and self._owner.now() - run.failed_since >= HOLDINGS_ALERT_AFTER
+                ):
+                    run.failure_alerted = True
+                    self._alert_holdings_failing(run.failed_since, exc.message)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, HOLDINGS_RETRY_MAX_SECONDS)
+                continue
+            if run.failed_since is not None:
+                log(
+                    logger,
+                    logging.INFO,
+                    "trailing_stop_holdings_recovered",
+                    run=run.number,
+                    failed_since=run.failed_since.isoformat(),
+                )
+                run.failed_since = None
+                run.failure_alerted = False
+            if run is not self._run or self._is_stopped():
+                log(
+                    logger,
+                    logging.INFO,
+                    "trailing_stop_holdings_discarded",
+                    run=run.number,
+                    reason="run",
+                )
+                return
+            if self._channel.connection != connection or run.pending:
+                # 조회하는 동안 다시 연결됐거나 체결이 더 왔다. 이 결과는 쓰지 않고 한 번 더 읽는다.
+                log(
+                    logger,
+                    logging.INFO,
+                    "trailing_stop_holdings_discarded",
+                    run=run.number,
+                    reason="newer_trigger" if run.pending else "connection",
+                )
+                continue
+            run.connection = connection
+            self._use_holdings(run, rows, reasons)
+            return
+
+    def _use_holdings(self, run: _Run, rows: list[dict[str, Any]], reasons: list[str]) -> None:
+        checked = check_holdings(self.spec.market, rows)
+        # 현금잔고가 없는 종목의 기억은 버린다. 판정할 수 없게 됐을 뿐인 종목은 기억을 둔다.
+        cash = {row["code"] for row in rows if not row["credit"]}
+        for code in sorted(self.memory.keys() - cash):
+            self._forget(code, "not_held")
+        self._holdings = checked.eligible
+        self._ineligible = {c: r for c, r in checked.ineligible.items() if r != "credit"}
+        self._quantities = {
+            row["code"]: Decimal(row["quantity"])
+            for row in rows
+            if row["code"] in checked.eligible and not row["credit"] and row["quantity"] is not None
+        }
+        self._holdings_ready = True
+        log(
+            logger,
+            logging.INFO,
+            "trailing_stop_holdings_refreshed",
+            run=run.number,
+            reasons=reasons,
+            count=len(self._holdings),
+            excluded=len(self._holdings.keys() & self._excluded),
+            memory_count=len(self.memory),
+            unknown_exchange_codes=checked.unknown_exchange_codes,
+            **checked.counts,
+        )
+        log(logger, logging.INFO, "trailing_stop_judging_resumed", run=run.number)
+        self._subscribe()
+
+    def _forget(self, code: str, reason: str) -> None:
+        memory = self.memory.pop(code)
+        log(
+            logger,
+            logging.INFO,
+            "trailing_stop_memory_forgotten",
+            code=code,
+            reason=reason,
+            peak=_decimal(memory.peak),
+            triggered=memory.triggered_at is not None,
+        )
+
+    def _subscribe(self) -> None:
+        """감시 대상이 바뀌었을 때만 구독을 다시 낸다. 실행이 새로 시작되면 늘 다시 낸다."""
+        codes = sorted(code for code in self._holdings if code not in self._excluded)
+        if codes == self._subscribed:
+            return
+        self._subscribed = codes
+        log(logger, logging.INFO, "trailing_stop_subscription_changed", codes=codes)
+        if not codes:
+            self._channel.subscribe(None)
+            return
+        market = self.spec.market
+        self._channel.subscribe(
+            Subscription(
+                GROUP_NO,
+                quote_items(market, codes, self._holdings),
+                [QUOTE_TYPES[market]],
+                refresh="0",
+            )
+        )
+
+    async def _on_event(self, event: RealtimeEvent) -> None:
+        environment_var.set(self.spec.environment.value)
+        run = self._run
+        if event.kind is EventKind.CONNECTED:
+            self._wake.set()
+            if (
+                run is not None
+                and run.connection is not None
+                and run.connection != event.connection
+            ):
+                # 지금 보유종목을 읽은 뒤 끊긴 적이 있다. 끊긴 동안 놓친 체결이 있을 수 있다.
+                self._request_refresh(run, "reconnected")
+        elif event.kind is EventKind.REGISTERED:
+            if self._quotes_rejected:
+                log(logger, logging.INFO, "trailing_stop_watch_resumed", reason="quotes_registered")
+            self._quotes_rejected = False
+        elif event.kind is EventKind.REJECTED:
+            # 다음 세션 시작, 감시 종목 변경, 재연결 때 다시 등록한다(SL / TP와 같다).
+            log(
+                logger,
+                logging.WARNING,
+                "trailing_stop_subscription_rejected",
+                subscription="quotes",
+                group=event.group,
+                **event.detail,
+            )
+            self._quotes_rejected = True
+        elif event.kind is EventKind.STOPPED:
+            self._wake.set()
+            log(logger, logging.ERROR, "trailing_stop_watch_stopped", reason="connection_replaced")
+        elif event.kind is EventKind.REAL:
+            for item in event.items:
+                self._judge(item, event)
+
+    def _on_feed(self, value: Fill | FeedStatus) -> None:
+        """체결 feed가 받는 자리에서 바로 부른다. 그래서 그 뒤의 시세보다 먼저 판정을 멈춘다."""
+        environment_var.set(self.spec.environment.value)
+        if isinstance(value, Fill):
+            self._on_fill(value)
+        elif value.state is FeedState.LIVE:
+            was_rejected = self._fills_rejected
+            self._fills_rejected = False
+            if was_rejected and self._run is not None:
+                # 거부된 동안의 체결은 받지 못했다. 바뀐 매입가를 반영한 뒤 판정한다.
+                log(logger, logging.INFO, "trailing_stop_watch_resumed", reason="fills_registered")
+                self._request_refresh(self._run, "fills_registered")
+        else:
+            log(
+                logger,
+                logging.WARNING,
+                "trailing_stop_subscription_rejected",
+                subscription="fills",
+                **value.detail,
+            )
+            # 체결을 받지 못하면 바뀐 매입가·보유수량을 모른 채 판정하게 되므로 판정도 멈춘다.
+            self._fills_rejected = True
+
+    def _on_fill(self, fill: Fill) -> None:
+        """내 계좌 체결(앱 밖 주문 포함). 매도면 보유 수량을 바로 빼고, 보유종목을 다시 읽는다."""
+        self._subtract(fill)
+        run = self._run
+        if run is None:
+            reason = "outside_session"
+        elif fill.connection != self._channel.connection:
+            reason = "old_connection"
+        else:
+            log(logger, logging.INFO, "trailing_stop_fill_seen", run=run.number, code=fill.code)
+            self._request_refresh(run, "fill")
+            return
+        log(logger, logging.DEBUG, "trailing_stop_fill_ignored", reason=reason)
+
+    def _subtract(self, fill: Fill) -> None:
+        """전량 매도 직후 다시 사서 합쳐진 다시 읽기에 보유 중으로 나와도 예전 고점이 남지 않게,
+        다시 읽기를 기다리지 않고 매도 수량을 빼서 0 이하면 바로 기억을 버린다."""
+        code = fill.code
+        if fill.side != "sell" or code is None or code not in self.memory:
+            return
+        held = self._quantities.get(code)
+        if held is None or fill.quantity is None:
+            return
+        left = held - fill.quantity
+        self._quantities[code] = left
+        if left <= 0:
+            self._forget(code, "sold_out")
+
+    def _judge(self, item: dict[str, Any], event: RealtimeEvent) -> None:
+        code = str(item.get("item") or "").strip()
+        values = item.get("values")
+        values = values if isinstance(values, dict) else {}
+        log(
+            logger,
+            logging.DEBUG,
+            "trailing_stop_quote_received",
+            code=code,
+            price=values.get(PRICE_FIELD),
+        )
+        if event.connection != self._channel.connection:
+            log(
+                logger,
+                logging.DEBUG,
+                "trailing_stop_quote_dropped",
+                code=code,
+                reason="old_connection",
+            )
+            return
+        run = self._run
+        if run is None:
+            self._skip(code, "outside_session")
+            return
+        found = self._session_at(event.received_at)
+        if event.received_at < run.started_at or found is None or not run.covers(found):
+            # 큐 처리가 세션 경계를 넘어 밀려도 앞 세션의 시세를 지금 세션 기준으로 판정하지 않는다.
+            log(logger, logging.DEBUG, "trailing_stop_quote_dropped", code=code, reason="other_run")
+            return
+        reason = self._skip_reason(code, values)
+        if reason is not None:
+            self._skip(code, reason)
+            return
+        price = self._price(code, values)
+        if price is None:
+            return
+        self._skips.pop(code, None)
+        at = event.received_at
+        self._last_prices[code] = (price, at)
+        # 기준 값은 그 시세 체결 시각에 켜진 세션의 값이다. 켜진 세션은 두 값이 모두 있다.
+        session = found[1]
+        activation = Decimal(session["activation_profit"])
+        drop = Decimal(session["drop_from_peak"])
+        purchase = self._holdings[code].purchase_price
+        memory = self.memory.get(code)
+        if memory is None:
+            if price >= purchase * (1 + activation / 100):
+                memory = self.memory[code] = Memory(activated_at=at, peak=price, peak_at=at)
+                self._log_judged(
+                    "trailing_stop_activated", code, price, purchase, memory, run, session
+                )
+            return
+        if memory.triggered_at is not None:
+            # 트리거 뒤에는 아무것도 바꾸지 않는다.
+            return
+        if price > memory.peak:
+            # 고점 갱신은 시세 체결마다 로그로 남기지 않는다.
+            memory.peak, memory.peak_at = price, at
+        elif price <= memory.peak * (1 - drop / 100):
+            memory.triggered_at, memory.triggered_price = at, price
+            self._log_judged("trailing_stop_triggered", code, price, purchase, memory, run, session)
+
+    def _log_judged(
+        self,
+        event: str,
+        code: str,
+        price: Decimal,
+        purchase: Decimal,
+        memory: Memory,
+        run: _Run,
+        session: dict[str, Any],
+    ) -> None:
+        """활성화·트리거 로그. 나중에 판정이 맞았는지 확인하도록 요청 ID와 적용한 기준을 담는다."""
+        token = request_id_var.set(uuid.uuid4().hex[:12])
+        try:
+            log(
+                logger,
+                logging.INFO,
+                event,
+                code=code,
+                **_run_fields(run),
+                price=_decimal(price),
+                purchase_price=_decimal(purchase),
+                activation_profit=session["activation_profit"],
+                drop_from_peak=session["drop_from_peak"],
+                peak=_decimal(memory.peak),
+                peak_at=_moment(memory.peak_at),
+                activated_at=_moment(memory.activated_at),
+            )
+        finally:
+            request_id_var.reset(token)
+
+    def _skip_reason(self, code: str, values: dict[str, Any]) -> str | None:
+        if self._is_stopped():
+            return "stopped"
+        if self._quotes_rejected:
+            return "subscription_rejected"
+        if self._fills_rejected:
+            return "fills_subscription_rejected"
+        if not self._holdings_ready:
+            return "holdings_pending"
+        if not is_regular_market(self.spec.market, values):
+            return "not_regular_market"
+        if code not in self._holdings or code in self._excluded:
+            return "not_watched"
+        return None
+
+    def _skip(self, code: str, reason: str) -> None:
+        """같은 이유가 이어지면 처음 한 번만 INFO로 남긴다."""
+        if self._skips.get(code) == reason:
+            return
+        self._skips[code] = reason
+        log(logger, logging.INFO, "trailing_stop_judge_skipped", code=code, reason=reason)
+
+    def _price(self, code: str, values: dict[str, Any]) -> Decimal | None:
+        price, reason = read_price(values)
+        if price is not None:
+            self._invalid.pop(code, None)
+            return price
+        if reason is not None and self._invalid.get(code) != reason:
+            self._invalid[code] = reason
+            log(
+                logger,
+                logging.WARNING,
+                "trailing_stop_price_unreadable",
+                code=code,
+                reason=reason,
+                raw=str(values.get(PRICE_FIELD))[:40],
+            )
+        return None
+
+    def _alert_holdings_failing(self, failed_since: datetime, cause: str) -> None:
+        """판정 중단 알림. 판정·이벤트 처리가 기다리지 않게 따로 보낸다."""
+        local = failed_since.astimezone(ZoneInfo(TIMEZONES[self.spec.market]))
+        embed = Embed(
+            title="Trailing Stop 판정 중단",
+            description=(
+                f"보유종목을 {int(HOLDINGS_ALERT_AFTER.total_seconds() // 60)}분 넘게 읽지 못해 "
+                "판정을 멈췄습니다. 계속 다시 읽고, 성공하면 판정을 이어 갑니다."
+            ),
+            color=NEUTRAL_COLOR,
+            fields=(
+                EmbedField("투자 환경", self.spec.label, inline=True),
+                EmbedField("첫 실패", f"{local:%Y-%m-%d %H:%M:%S} ({TIMEZONES[self.spec.market]})"),
+                EmbedField("원인", cause),
+            ),
+        )
+
+        async def send() -> None:
+            sent = await self._owner.notifier.send(embed=embed, spec=self.spec)
+            log(
+                logger,
+                logging.INFO,
+                "trailing_stop_stop_notified",
+                reason="holdings_failing",
+                sent=sent,
+            )
+
+        self._spawn(send())
+
+    def _spawn(self, work: Awaitable[None]) -> asyncio.Task[None]:
+        task = asyncio.ensure_future(work)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+
+def _span(session: dict[str, Any]) -> str:
+    return f"{session['start']}-{session['end']}"
+
+
+def _run_fields(run: _Run) -> dict[str, Any]:
+    return {"run": run.number, "session": run.span, "day": run.day.isoformat()}
+
+
+def _decimal(value: Decimal | None) -> str | None:
+    """지수 표기 없이, 끝의 0을 뗀 문자열 소수. 200.0000 → 200."""
+    return None if value is None else format(value.normalize(), "f")
+
+
+def _moment(value: datetime | None) -> str | None:
+    return None if value is None else value.astimezone(UTC).isoformat(timespec="seconds")

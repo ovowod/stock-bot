@@ -1,4 +1,4 @@
-"""Trailing Stop 상태 조회 API. 감시가 아직 없어 늘 감시 안 함이고, 키움을 부르지 않는다."""
+"""Trailing Stop 상태 조회 API. 감시를 시작하지 않은 채 응답 모양과 이유를 본다."""
 
 import json
 import logging
@@ -93,7 +93,8 @@ def test_paper_environment_answers_with_the_session_covering_now(status_client, 
     response = status_client().get(URL.format("domestic_paper"))
 
     assert response.status_code == 200
-    # 감시가 아직 없어 켜진 세션이 지금 시각을 포함해도 감시 안 함이다.
+    # 서버 시작(lifespan) 없이 띄워 감시가 시작되지 않았다. 켜진 세션이 지금 시각을 포함해도
+    # 감시 안 함이다. 감시 중인 상태는 test_watch.py가 본다.
     assert response.json() == {
         "environment": "domestic_paper",
         "market": "domestic",

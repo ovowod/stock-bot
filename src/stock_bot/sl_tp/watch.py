@@ -16,21 +16,22 @@ from typing import Any
 
 from stock_bot.auto_trading.judging import (
     PRICE_FIELD,
+    QUOTE_TYPES,
     Holding,
     check_holdings,
     is_regular_market,
+    quote_items,
     read_price,
     session_at,
 )
 from stock_bot.auto_trading.settings import FeatureSettingsStore
-from stock_bot.core.config import ENVIRONMENTS, EnvironmentSpec, Market
+from stock_bot.core.config import ENVIRONMENTS, EnvironmentSpec
 from stock_bot.core.errors import AppError
 from stock_bot.core.logging_setup import environment_var, log, request_id_var
 from stock_bot.core.notification import DiscordNotifier, Embed, EmbedField
 from stock_bot.fill.feed import FeedState, FeedStatus, Fill, FillFeed
 from stock_bot.kiwoom.kiwoom import KiwoomClient
 from stock_bot.kiwoom.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
-from stock_bot.kiwoom.us_exchange import US_EXCHANGE_CODES
 from stock_bot.order.auto_sell import AutoSell
 from stock_bot.sl_tp.alerts import (
     AutoSellTrigger,
@@ -45,8 +46,6 @@ logger = logging.getLogger("stock_bot.sl_tp_watch")
 
 # 체결 알림에 "SL / TP 자동 매도"로 표시된다.
 AUTO_SELL_SOURCE = "SL / TP"
-# 시세 실시간 항목. 0B는 국내 주식체결, FE는 미국주식 실시간 체결가다.
-QUOTE_TYPES = {Market.DOMESTIC: "0B", Market.US: "FE"}
 # 공유 연결에서 SL / TP의 시세 구독이 쓰는 그룹 번호. 내 계좌 체결은 체결 feed가 그룹 1로 받는다.
 GROUP_NO = "2"
 # 지금 켜진 SL/TP 세션을 다시 계산하는 간격. 설정을 저장할 때도 다시 계산한다.
@@ -463,20 +462,15 @@ class _Watch:
         if not codes:
             self._channel.subscribe(None)
             return
+        market = self.spec.market
         self._channel.subscribe(
             Subscription(
-                GROUP_NO, self._quote_items(codes), [QUOTE_TYPES[self.spec.market]], refresh="0"
+                GROUP_NO,
+                quote_items(market, codes, self._holdings),
+                [QUOTE_TYPES[market]],
+                refresh="0",
             )
         )
-
-    def _quote_items(self, codes: list[str]) -> list[Any]:
-        """국내는 접두어 없는 종목코드, 미국은 {티커, 거래소 코드} 객체로 등록한다."""
-        if self.spec.market is Market.DOMESTIC:
-            return list(codes)
-        return [
-            {"jmcode": code, "stex_tp": US_EXCHANGE_CODES[self._holdings[code].exchange or ""]}
-            for code in codes
-        ]
 
     async def _on_event(self, event: RealtimeEvent) -> None:
         environment_var.set(self.spec.environment.value)
