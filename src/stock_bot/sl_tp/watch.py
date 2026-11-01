@@ -11,11 +11,18 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
-from zoneinfo import ZoneInfo
 
-from stock_bot.auto_trading.settings import TIMEZONES, FeatureSettingsStore
+from stock_bot.auto_trading.judging import (
+    PRICE_FIELD,
+    Holding,
+    check_holdings,
+    is_regular_market,
+    read_price,
+    session_at,
+)
+from stock_bot.auto_trading.settings import FeatureSettingsStore
 from stock_bot.core.config import ENVIRONMENTS, EnvironmentSpec, Market
 from stock_bot.core.errors import AppError
 from stock_bot.core.logging_setup import environment_var, log, request_id_var
@@ -40,9 +47,6 @@ logger = logging.getLogger("stock_bot.sl_tp_watch")
 AUTO_SELL_SOURCE = "SL / TP"
 # 시세 실시간 항목. 0B는 국내 주식체결, FE는 미국주식 실시간 체결가다.
 QUOTE_TYPES = {Market.DOMESTIC: "0B", Market.US: "FE"}
-# 장구분(290)의 정규장 값. 국내 2는 장중, 미국 0은 정규장이다.
-# 국내 장전·장후 시간외, 미국 프리마켓·애프터마켓·주간거래 체결은 판정하지 않는다.
-REGULAR_MARKET = {Market.DOMESTIC: "2", Market.US: "0"}
 # 공유 연결에서 SL / TP의 시세 구독이 쓰는 그룹 번호. 내 계좌 체결은 체결 feed가 그룹 1로 받는다.
 GROUP_NO = "2"
 # 지금 켜진 SL/TP 세션을 다시 계산하는 간격. 설정을 저장할 때도 다시 계산한다.
@@ -61,19 +65,21 @@ PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 
 
 @dataclass(frozen=True)
-class _Holding:
-    name: str
-    purchase_price: Decimal
-    # 미국 종목의 거래소(NYSE·NASDAQ·AMEX). 국내는 None이다.
-    exchange: str | None
-
-
-@dataclass(frozen=True)
 class _Session:
     start: time
     end: time
     take_profit: Decimal | None
     stop_loss: Decimal | None
+
+    @classmethod
+    def of(cls, item: dict[str, Any]) -> _Session:
+        """설정의 세션 항목에서 SL / TP 기준을 읽는다."""
+        return cls(
+            time.fromisoformat(item["start"]),
+            time.fromisoformat(item["end"]),
+            None if item["take_profit"] is None else Decimal(item["take_profit"]),
+            None if item["stop_loss"] is None else Decimal(item["stop_loss"]),
+        )
 
     @property
     def span(self) -> str:
@@ -167,18 +173,18 @@ class _Watch:
     def __init__(self, owner: SlTpWatcher, spec: EnvironmentSpec) -> None:
         self._owner = owner
         self.spec = spec
-        self._zone = ZoneInfo(TIMEZONES[spec.market])
         # 밀려남·서버 종료로 멈췄다. 멈추면 판정도 주문도 하지 않는다.
         self._stopped = False
         # 시작 때 설정 파일을 읽지 못했다. 정상 설정이 저장될 때까지 멈춰 있다.
         self._settings_broken = False
-        self._sessions: list[_Session] = []
+        # 설정의 세션 항목. 꺼진 세션도 담는다. 찾을 때 켜진 세션만 본다.
+        self._sessions: list[dict[str, Any]] = []
         self._excluded: set[str] = set()
         self._run: _Run | None = None
         self._runs = 0
         # 종목코드 -> 매입가·거래소. 현금잔고이고 매입가를 읽을 수 있으며, 미국은 거래소를 아는
         # 종목만 담는다. 제외종목도 담는다.
-        self._holdings: dict[str, _Holding] = {}
+        self._holdings: dict[str, Holding] = {}
         self._holdings_ready = False
         # 지금 구독한 시세 종목. 실행이 바뀌면 None으로 되돌려 다시 등록한다.
         self._subscribed: list[str] | None = None
@@ -263,28 +269,12 @@ class _Watch:
 
     def _apply(self, settings: dict[str, Any]) -> None:
         self._excluded = {item["code"] for item in settings["excluded"]}
-        self._sessions = [
-            _Session(
-                time.fromisoformat(s["start"]),
-                time.fromisoformat(s["end"]),
-                None if s["take_profit"] is None else Decimal(s["take_profit"]),
-                None if s["stop_loss"] is None else Decimal(s["stop_loss"]),
-            )
-            for s in settings["sessions"]
-            if s["enabled"]
-        ]
+        self._sessions = settings["sessions"]
 
     def _session_at(self, moment: datetime) -> tuple[date, _Session] | None:
-        """그 시각(그 시장 시간대)에 켜진 세션.
-
-        시작은 포함하고 종료는 빼므로 맞닿은 시각은 뒤 세션이다.
-        """
-        local = moment.astimezone(self._zone)
-        at = local.time()
-        for session in self._sessions:
-            if session.start <= at < session.end:
-                return local.date(), session
-        return None
+        """그 시각(그 시장 시간대)에 켜진 세션."""
+        found = session_at(self._sessions, moment, self.spec.market)
+        return None if found is None else (found[0], _Session.of(found[1]))
 
     def _is_stopped(self) -> bool:
         # 밀려남은 채널 큐를 거치기 전에 공유 연결에서 바로 읽는다.
@@ -440,29 +430,8 @@ class _Watch:
             return
 
     def _use_holdings(self, run: _Run, rows: list[dict[str, Any]], reasons: list[str]) -> None:
-        holdings: dict[str, _Holding] = {}
-        counts = {"credit": 0, "no_purchase_price": 0, "duplicate": 0, "unknown_exchange": 0}
-        duplicated: set[str] = set()
-        unknown_exchange: list[str] = []
-        for row in rows:
-            code, price, exchange = row["code"], row["purchase_price"], row["exchange"]
-            if row["credit"]:
-                # 현금 매도 주문으로 신용 보유분을 팔려다 실패하지 않게 다루지 않는다.
-                counts["credit"] += 1
-            elif price is None or price <= 0:
-                counts["no_purchase_price"] += 1
-            elif self.spec.market is Market.US and exchange not in US_EXCHANGE_CODES:
-                # 종목 목록에서 거래소를 찾지 못한 종목은 다루지 않는다.
-                # 거래소 없이 주문을 보내다 실패하지 않기 위해서다.
-                counts["unknown_exchange"] += 1
-                unknown_exchange.append(code)
-            elif code in holdings or code in duplicated:
-                # 같은 종목의 현금잔고가 여러 줄이면 어느 매입가인지 모른다.
-                duplicated.add(code)
-                holdings.pop(code, None)
-                counts["duplicate"] += 1
-            else:
-                holdings[code] = _Holding(row["name"], price, exchange)
+        checked = check_holdings(self.spec.market, rows)
+        holdings = checked.eligible
         removed = sorted(self._holdings.keys() - holdings.keys())
         self._holdings = holdings
         self._holdings_ready = True
@@ -475,8 +444,8 @@ class _Watch:
             count=len(holdings),
             excluded=len(holdings.keys() & self._excluded),
             removed=removed,
-            unknown_exchange_codes=unknown_exchange,
-            **counts,
+            unknown_exchange_codes=checked.unknown_exchange_codes,
+            **checked.counts,
         )
         log(logger, logging.INFO, "sl_tp_judging_resumed", run=run.number)
         self._subscribe()
@@ -622,7 +591,7 @@ class _Watch:
         code = str(item.get("item") or "").strip()
         values = item.get("values")
         values = values if isinstance(values, dict) else {}
-        log(logger, logging.DEBUG, "sl_tp_quote_received", code=code, price=values.get("10"))
+        log(logger, logging.DEBUG, "sl_tp_quote_received", code=code, price=values.get(PRICE_FIELD))
         run = self._run
         if event.connection != self._channel.connection:
             # 끊긴 뒤 큐에 남아 있던 시세나 재연결 전 연결의 시세는 판정하지 않는다.
@@ -697,7 +666,7 @@ class _Watch:
             return "fills_subscription_rejected"
         if not self._holdings_ready:
             return "holdings_pending"
-        if str(values.get("290", "")).strip() != REGULAR_MARKET[self.spec.market]:
+        if not is_regular_market(self.spec.market, values):
             return "not_regular_market"
         if code not in self._holdings or code in self._excluded:
             return "not_watched"
@@ -714,12 +683,11 @@ class _Watch:
 
     def _price(self, code: str, values: dict[str, Any]) -> Decimal | None:
         """체결가(10)의 절댓값. 부호는 등락 방향이다. 읽을 수 없으면 None이다."""
-        raw = values.get("10")
-        reason = _unreadable_price(raw)
-        if reason is None:
+        price, reason = read_price(values)
+        if price is not None:
             self._invalid.pop(code, None)
-            return abs(Decimal(str(raw).strip()))
-        if self._invalid.get(code) != reason:
+            return price
+        if reason is not None and self._invalid.get(code) != reason:
             self._invalid[code] = reason
             log(
                 logger,
@@ -727,7 +695,7 @@ class _Watch:
                 "sl_tp_price_unreadable",
                 code=code,
                 reason=reason,
-                raw=str(raw)[:40],
+                raw=str(values.get(PRICE_FIELD))[:40],
             )
         return None
 
@@ -796,18 +764,6 @@ class _Watch:
     @staticmethod
     def _run_fields(run: _Run) -> dict[str, Any]:
         return {"run": run.number, "session": run.session.span, "day": run.day.isoformat()}
-
-
-def _unreadable_price(raw: Any) -> str | None:
-    """체결가를 판정에 쓸 수 없는 이유. 쓸 수 있으면 None이다."""
-    text = "" if raw is None else str(raw).strip()
-    if not text:
-        return "empty"
-    try:
-        price = abs(Decimal(text))
-    except InvalidOperation:
-        return "not_a_number"
-    return None if price.is_finite() and price > 0 else "not_positive"
 
 
 def _minutes(span: timedelta) -> int:
