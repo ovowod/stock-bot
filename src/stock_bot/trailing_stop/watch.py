@@ -218,6 +218,12 @@ class _Watch:
         self._quotes_rejected = False
         self._fills_rejected = False
         self._unsubscribe_fills: Callable[[], None] | None = None
+        # 평균 매입가가 앱이 받은 체결로 바뀐 것인지 보려고 둔다. 지난 비교 뒤 체결을 받은 종목,
+        # 지난 비교 때의 연결 번호(None이면 서버 시작 뒤 비교 전), 그 뒤 체결 등록이 거부됐는지.
+        # 연결이 바뀌었거나 거부됐으면 그사이 체결을 놓쳤을 수 있어 받은 체결로 인정하지 않는다.
+        self._filled: set[str] = set()
+        self._compared_connection: int | None = None
+        self._fills_gap = False
         # 같은 이유의 건너뜀·잘못된 체결가 로그를 반복해 남기지 않으려고
         # 종목마다 마지막 이유를 둔다.
         self._skips: dict[str, str] = {}
@@ -514,7 +520,7 @@ class _Watch:
             return
 
     def _use_holdings(self, run: _Run, rows: list[dict[str, Any]], reasons: list[str]) -> None:
-        checked = self._use_quantities(rows)
+        checked = self._use_quantities(rows, run.connection)
         self._holdings = checked.eligible
         self._ineligible = {c: r for c, r in checked.ineligible.items() if r != "credit"}
         self._holdings_ready = True
@@ -533,16 +539,16 @@ class _Watch:
         log(logger, logging.INFO, "trailing_stop_judging_resumed", run=run.number)
         self._subscribe()
 
-    def _use_quantities(self, rows: list[dict[str, Any]]) -> HoldingsCheck:
+    def _use_quantities(self, rows: list[dict[str, Any]], connection: int | None) -> HoldingsCheck:
         """다시 읽은 보유종목으로 보유 수량을 바꾸고, 현금잔고가 없는 종목의 기억은 버린다.
 
-        판정할 수 없게 됐을 뿐인 종목은 기억을 둔다.
+        판정할 수 없게 됐을 뿐인 종목은 기억을 둔다. connection은 읽을 때의 연결 번호다.
         """
         checked = check_holdings(self.spec.market, rows)
         cash = {row["code"] for row in rows if not row["credit"]}
         for code in sorted(self.memory.keys() - cash):
             self._forget(code, "not_held")
-        self._use_purchase_prices(checked.eligible)
+        self._use_purchase_prices(checked.eligible, connection)
         self._quantities = {
             row["code"]: Decimal(row["quantity"])
             for row in rows
@@ -550,23 +556,52 @@ class _Watch:
         }
         return checked
 
-    def _use_purchase_prices(self, holdings: dict[str, Holding]) -> None:
-        """기억의 평균 매입가를 다시 읽은 값으로 바꾸고, 바뀌었으면 바로 쓴다.
+    def _use_purchase_prices(self, holdings: dict[str, Holding], connection: int | None) -> None:
+        """기억의 평균 매입가를 다시 읽은 값과 비교한다.
 
-        트리거된 종목은 고점을 갱신하지 않아 다른 쓰기가 없다. 쓰지 않으면 재시작 뒤
-        파일의 예전 값과 다시 읽은 값이 달라 보인다.
+        앱이 받은 체결로 바뀌었으면 새 값으로 바꾸고 바로 쓴다. 트리거된 종목은 고점을
+        갱신하지 않아 다른 쓰기가 없다. 쓰지 않으면 재시작 뒤 앱이 봤던 변경이 못 본 변경으로
+        보인다. 받은 체결로 설명되지 않으면 팔고 다시 산 것일 수 있어 기억을 버린다.
         """
         changed = False
-        for code, memory in self.memory.items():
+        for code in sorted(self.memory):
             holding = holdings.get(code)
-            if holding is None or holding.purchase_price == memory.purchase_price:
+            if holding is None:
                 continue
-            memory.purchase_price = holding.purchase_price
-            changed = True
+            if self._accept_purchase_price(code, holding.purchase_price, connection):
+                changed = True
+        self._filled.clear()
+        self._compared_connection = connection
+        self._fills_gap = self._fills_rejected
         if changed:
             self._write("purchase_price")
 
-    def _forget(self, code: str, reason: str) -> None:
+    def _accept_purchase_price(self, code: str, purchase: Decimal, connection: int | None) -> bool:
+        """다시 읽은 평균 매입가가 기억과 다르면 받은 체결로 설명될 때만 받아들인다.
+
+        받아들여 기억을 바꿨으면 True다. 설명되지 않으면 기억을 버리고 False다.
+        """
+        memory = self.memory[code]
+        if purchase == memory.purchase_price:
+            return False
+        seen = (
+            code in self._filled
+            and connection is not None
+            and connection == self._compared_connection
+            and not self._fills_gap
+        )
+        if not seen:
+            self._forget(
+                code,
+                "purchase_price_changed",
+                previous_purchase_price=format_decimal(memory.purchase_price),
+                purchase_price=format_decimal(purchase),
+            )
+            return False
+        memory.purchase_price = purchase
+        return True
+
+    def _forget(self, code: str, reason: str, **detail: Any) -> None:
         memory = self.memory.pop(code)
         self._peaks.discard(code)
         log(
@@ -577,6 +612,7 @@ class _Watch:
             reason=reason,
             peak=format_decimal(memory.peak),
             triggered=memory.triggered_at is not None,
+            **detail,
         )
         self._write("forgotten")
         self._sync_fills()
@@ -744,6 +780,7 @@ class _Watch:
             )
             # 체결을 받지 못하면 바뀐 매입가·보유수량을 모른 채 판정하게 되므로 판정도 멈춘다.
             self._fills_rejected = True
+            self._fills_gap = True
 
     def _on_fill(self, fill: Fill) -> None:
         """내 계좌 체결(앱 밖 주문 포함). 매도면 보유 수량을 바로 빼고, 보유종목을 다시 읽는다.
@@ -751,6 +788,8 @@ class _Watch:
         세션 밖에서는 기억이 있는 종목의 체결만 다룬다.
         """
         remembered = fill.code in self.memory
+        if fill.code is not None:
+            self._filled.add(fill.code)
         self._subtract(fill)
         run = self._run
         if run is None:
@@ -781,6 +820,7 @@ class _Watch:
         request_id_var.set("-")
         while True:
             self._outside_pending = False
+            connection = self._channel.connection
             try:
                 rows = await self._owner.positions(self.spec)
             except AppError as exc:
@@ -816,7 +856,7 @@ class _Watch:
                     reason="newer_trigger",
                 )
                 continue
-            checked = self._use_quantities(rows)
+            checked = self._use_quantities(rows, connection)
             log(
                 logger,
                 logging.INFO,
@@ -1008,6 +1048,7 @@ class _Watch:
             source=AUTO_SELL_SOURCE,
             request_id=request_id,
             ready=lambda: self._may_send(run, code),
+            confirm=lambda holding: self._confirm_holding(run, code, holding),
         )
         run.auto_sells[code] = _result_attempt(result, self._owner.now())
         log(
@@ -1034,6 +1075,29 @@ class _Watch:
                 code=code,
                 sent=sent,
             )
+
+    def _confirm_holding(self, run: _Run, code: str, holding: dict[str, Any]) -> bool:
+        """주문 직전에 다시 읽은 평균 매입가를 보유종목을 다시 읽을 때와 같은 규칙으로 판단한다.
+
+        트리거와 주문 사이에 연결이 끊긴 채 팔고 다시 산 새 보유분을 예전 트리거로 팔지 않는다.
+        보유하지 않으면 판단하지 않는다(매도 가능 수량 0으로 보내지 않는다).
+        """
+        purchase = holding.get("purchase_price")
+        if purchase is None or code not in self.memory:
+            return True
+        if self._accept_purchase_price(code, purchase, self._channel.connection):
+            self._write("purchase_price")
+        if code in self.memory:
+            return True
+        log(
+            logger,
+            logging.INFO,
+            "trailing_stop_send_refused",
+            code=code,
+            run=run.number,
+            reason="purchase_price_changed",
+        )
+        return False
 
     def _may_send(self, run: _Run, code: str) -> bool:
         """키움에 보내기 직전 확인. 거절하면 보내지 않고 다음 실행에서 다시 시도한다.

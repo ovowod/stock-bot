@@ -6,7 +6,6 @@
 import json
 import logging
 from datetime import timedelta
-from typing import Any
 
 import httpx
 import pytest
@@ -40,6 +39,7 @@ from tests.trailing_stop.helpers import (
     put_ts,
     read_record,
     record_path,
+    rejecting,
     remembered,
     sell_fill,
     status,
@@ -406,20 +406,6 @@ async def test_replaced_connection_stops_judging_and_keeps_the_memory(data_dir, 
     assert item["last_price"] is None
     replaced = next(r for r in caplog.records if r.getMessage() == "realtime_session_replaced")
     assert json.loads(replaced.fields["names"]) == ["Trailing Stop"]
-
-
-REJECTED_REG = {"trnm": "REG", "return_code": 1, "return_msg": "등록 실패"}
-
-
-def rejecting(group: str, flag: dict[str, bool]) -> FakeRealtime:
-    """flag["on"]인 동안 그 그룹의 REG를 거부한다."""
-
-    def respond(message: dict[str, Any]) -> dict[str, Any]:
-        if message["trnm"] == "REG" and message["grp_no"] == group and flag["on"]:
-            return REJECTED_REG
-        return {"trnm": message["trnm"], "return_code": 0, "return_msg": ""}
-
-    return FakeRealtime(responder=respond)
 
 
 async def test_rejected_fill_registration_stops_judging_until_it_is_registered(data_dir, caplog):
@@ -1102,8 +1088,8 @@ async def test_purchase_price_is_recorded_on_activation_and_kept_up_to_date_acro
     monkeypatch.setattr(ts_watch, "RECORD_WRITE_SECONDS", 60)
     write_ts(data_dir)
     realtime = FakeRealtime()
-    # 트리거된 뒤 추가 매수로 평균 매입가가 50,000원이 됐다.
-    kiwoom = ts_kiwoom(balance(held()), balance(held(price="50000", quantity="5")))
+    # 세션 시작, 트리거 매도 직전 확인, 추가 매수 뒤 다시 읽기. 평균 매입가가 50,000원이 됐다.
+    kiwoom = ts_kiwoom(balance(held()), balance(held()), balance(held(price="50000", quantity="5")))
     async with running(realtime, kiwoom, data_dir) as app:
         connection = await watching(realtime)
         connection.push(quote(price="+63000"))

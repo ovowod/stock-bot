@@ -33,6 +33,9 @@ from tests.support import wait_until
 from tests.trailing_stop.helpers import (
     held,
     put_ts,
+    read_record,
+    rejecting,
+    remembered,
     sell_fill,
     ts_kiwoom,
     ts_session,
@@ -40,6 +43,7 @@ from tests.trailing_stop.helpers import (
     until_status,
     utc,
     watching,
+    write_record,
     write_ts,
 )
 
@@ -516,3 +520,119 @@ async def test_late_result_of_the_previous_run_does_not_change_the_current_run(d
     # 앞 실행의 접수는 알리지만, 새 실행에서는 아직 시도하지 않은 것으로 보인다.
     assert sell_alerts(discord)[0]["embeds"][0]["title"] == "Trailing Stop 자동 매도 접수"
     assert body["stocks"][0]["auto_sell"] is None
+
+
+def forgotten(caplog) -> list[dict[str, Any]]:
+    return [r.fields for r in caplog.records if r.getMessage() == "trailing_stop_memory_forgotten"]
+
+
+@pytest.mark.parametrize(("purchase", "kept"), [("60000", True), ("57000", False)])
+async def test_purchase_price_changed_while_the_server_was_off_forgets_and_does_not_sell(
+    data_dir, caplog, purchase, kept
+):
+    """서버가 꺼진 사이 팔고 57,000원에 다시 샀다. 예전 고점 63,000원으로 팔지 않는다."""
+    write_ts(data_dir)
+    write_record(data_dir, {"005930": remembered(AT_10, "63000", AT_10)})
+    realtime = FakeRealtime()
+    kiwoom = ts_kiwoom(balance(held(price=purchase)))
+    async with running(realtime, kiwoom, data_dir) as app:
+        connection = await watching(realtime)
+        await until_status(app, lambda b: b["watching"])
+        connection.push(quote(price="-58000"))  # 고점 대비 -7.9%, 57,000원 대비 +1.75%
+        body = await until_status(app, lambda b: b["stocks"][0]["last_price"] == "58000")
+        await settle()
+
+    if kept:
+        assert body["stocks"][0]["status"] == "triggered"
+        assert len(kiwoom.calls("kt10001")) == 1
+        assert forgotten(caplog) == []
+    else:
+        assert body["stocks"][0]["status"] == "waiting"
+        assert kiwoom.calls("kt10001") == []
+        [log] = forgotten(caplog)
+        assert (log["code"], log["reason"]) == ("005930", "purchase_price_changed")
+        assert (log["previous_purchase_price"], log["purchase_price"]) == ("60000", "57000")
+        assert read_record(data_dir) == {"version": 2, "stocks": {}}
+
+
+@pytest.mark.parametrize("fill_at", ["before_the_gap", "after_the_gap"])
+async def test_fills_around_a_reconnect_do_not_explain_a_changed_purchase_price(
+    data_dir, caplog, fill_at
+):
+    write_ts(data_dir)
+    realtime = FakeRealtime()
+    kiwoom = ts_kiwoom(balance(held()), balance(held(price="57000")))
+    # 두 번째 잔고 조회를 붙잡아 둔 사이 연결이 끊겨, 그 결과는 버려진다.
+    gate = nth_call_gate(kiwoom, "kt00018", 2)
+    async with running(realtime, gate, data_dir) as app:
+        first = await watching(realtime)
+        first.push(quote(price="+63000"))
+        await until_status(app, lambda b: b["stocks"][0]["status"] == "tracking")
+        if fill_at == "before_the_gap":
+            first.push(fill_event())  # 매수 체결을 받고 다시 읽는 중에 끊긴다.
+        first.drop()
+        await wait_until(lambda: len(realtime.connections) == 2)
+        second = realtime.connections[1]
+        if fill_at == "after_the_gap":
+            # 다시 연결된 뒤 첫 비교 전에 매수 체결을 받는다.
+            await gate.hit.wait()
+            second.push(fill_event())
+        gate.open.set()
+        await until_status(app, lambda b: b["watching"] and b["stocks"][0]["status"] == "waiting")
+        second.push(quote(price="-58000"))
+        await until_status(app, lambda b: b["stocks"][0]["last_price"] == "58000")
+        await settle()
+
+    assert kiwoom.calls("kt10001") == []
+    assert [f["reason"] for f in forgotten(caplog)] == ["purchase_price_changed"]
+
+
+async def test_fills_rejected_while_the_purchase_price_changed_forget_the_memory(data_dir, caplog):
+    write_ts(data_dir)
+    write_record(data_dir, {"005930": remembered(AT_10, "63000", AT_10)})
+    flag = {"on": True}
+    realtime = rejecting("1", flag)
+    kiwoom = ts_kiwoom(balance(held(price="57000")))
+    async with running(realtime, kiwoom, data_dir) as app:
+        await until_status(app, lambda b: b["not_watching_reason"] == "fills_rejected")
+        flag["on"] = False
+        body = await until_status(app, lambda b: b["watching"])
+
+    assert body["stocks"][0]["status"] == "waiting"
+    assert [f["reason"] for f in forgotten(caplog)] == ["purchase_price_changed"]
+
+
+@pytest.mark.parametrize("bought", [False, True], ids=["unexplained", "after-a-buy-fill"])
+async def test_purchase_price_rechecked_right_before_sending(data_dir, caplog, bought):
+    write_ts(data_dir)
+    realtime = FakeRealtime()
+    discord = FakeDiscord()
+    # 주문 직전 잔고 재확인에서 평균 매입가가 57,000원이다.
+    kiwoom = ts_kiwoom(balance(held()), balance(held(price="57000")))
+    gate = nth_call_gate(kiwoom, "kt00018", 2)
+    async with running(realtime, gate, data_dir, discord=discord):
+        connection = await watching(realtime)
+        triggered(connection)
+        await gate.hit.wait()
+        if bought:
+            connection.push(fill_event())  # 공백 없이 받은 매수 체결로 설명된다.
+        gate.open.set()
+        await wait_until(lambda: "trailing_stop_auto_sell_finished" in messages(caplog))
+        await settle()
+
+    finished = next(
+        r.fields for r in caplog.records if r.getMessage() == "trailing_stop_auto_sell_finished"
+    )
+    if bought:
+        assert finished["outcome"] == "accepted"
+        assert len(kiwoom.calls("kt10001")) == 1
+        assert forgotten(caplog) == []
+    else:
+        assert finished["outcome"] == "cancelled"
+        assert kiwoom.calls("kt10001") == []
+        assert sell_alerts(discord) == []
+        assert [f["reason"] for f in forgotten(caplog)] == ["purchase_price_changed"]
+        refused = [
+            r.fields for r in caplog.records if r.getMessage() == "trailing_stop_send_refused"
+        ]
+        assert refused[0]["reason"] == "purchase_price_changed"

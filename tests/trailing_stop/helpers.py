@@ -211,3 +211,17 @@ async def alerted(discord: FakeDiscord) -> None:
 
 AT_16 = AT_10.replace(hour=16)
 NEXT_DAY_10 = AT_10 + timedelta(days=1)
+
+
+REJECTED_REG = {"trnm": "REG", "return_code": 1, "return_msg": "등록 실패"}
+
+
+def rejecting(group: str, flag: dict[str, bool]) -> FakeRealtime:
+    """flag["on"]인 동안 그 그룹의 REG를 거부한다."""
+
+    def respond(message: dict[str, Any]) -> dict[str, Any]:
+        if message["trnm"] == "REG" and message["grp_no"] == group and flag["on"]:
+            return REJECTED_REG
+        return {"trnm": message["trnm"], "return_code": 0, "return_msg": ""}
+
+    return FakeRealtime(responder=respond)
