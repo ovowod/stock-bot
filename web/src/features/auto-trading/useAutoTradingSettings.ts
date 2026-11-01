@@ -1,16 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, fetchSlTp, saveSlTp, type EnvironmentValue, type SlTpDraft, type SlTpSettings } from "../../api";
+import { ApiError, type EnvironmentValue, type FeatureSettings, type SettingsDraft } from "../../api";
 import { useReportUnsavedChanges } from "../../unsavedChanges";
 import { useToast } from "../toast/Toasts";
 
-export type LoadState =
+/** 자동매매 기능 하나. name은 토스트 문구에 쓴다(예: "SL / TP"). */
+export interface FeatureApi<S> {
+  name: string;
+  fetch: (environment: EnvironmentValue, signal: AbortSignal) => Promise<FeatureSettings<S>>;
+  save: (environment: EnvironmentValue, draft: SettingsDraft<S>) => Promise<FeatureSettings<S>>;
+}
+
+export type LoadState<S> =
   | { status: "loading" }
   | { status: "error"; error: ApiError }
-  | { status: "ready"; saved: SlTpSettings };
+  | { status: "ready"; saved: FeatureSettings<S> };
 
-const EMPTY_DRAFT: SlTpDraft = { excluded: [], sessions: [] };
-
-const draftOf = (settings: SlTpSettings): SlTpDraft => ({
+const draftOf = <S,>(settings: FeatureSettings<S>): SettingsDraft<S> => ({
   excluded: settings.excluded,
   sessions: settings.sessions,
 });
@@ -19,12 +24,12 @@ const asApiError = (error: unknown) =>
   error instanceof ApiError ? error : new ApiError("unknown", "알 수 없는 오류입니다.", null);
 
 /**
- * 한 투자 환경의 SL / TP 설정. 서버에 저장된 값과 편집 중인 값을 따로 두고,
+ * 한 투자 환경에서 자동매매 기능 하나의 설정. 서버에 저장된 값과 편집 중인 값을 따로 두고,
  * 저장 버튼을 눌러야 편집 중인 값을 서버에 보낸다(환경이 바뀌면 컴포넌트가 새로 만들어진다).
  */
-export function useSlTp(environment: EnvironmentValue) {
-  const [state, setState] = useState<LoadState>({ status: "loading" });
-  const [draft, setDraft] = useState<SlTpDraft>(EMPTY_DRAFT);
+export function useAutoTradingSettings<S>(environment: EnvironmentValue, feature: FeatureApi<S>) {
+  const [state, setState] = useState<LoadState<S>>({ status: "loading" });
+  const [draft, setDraft] = useState<SettingsDraft<S>>({ excluded: [], sessions: [] });
   const [saving, setSaving] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const toast = useToast();
@@ -35,7 +40,7 @@ export function useSlTp(environment: EnvironmentValue) {
     controller.current = current;
     setState({ status: "loading" });
     try {
-      const settings = await fetchSlTp(environment, current.signal);
+      const settings = await feature.fetch(environment, current.signal);
       if (current.signal.aborted) return;
       setState({ status: "ready", saved: settings });
       setDraft(draftOf(settings));
@@ -59,15 +64,15 @@ export function useSlTp(environment: EnvironmentValue) {
     if (!dirty || saving) return;
     setSaving(true);
     try {
-      const settings = await saveSlTp(environment, draft);
+      const settings = await feature.save(environment, draft);
       setState({ status: "ready", saved: settings });
       setDraft(draftOf(settings));
-      toast({ tone: "success", title: "SL / TP 설정을 저장했습니다" });
+      toast({ tone: "success", title: `${feature.name} 설정을 저장했습니다` });
     } catch (error) {
       const apiError = asApiError(error);
       toast({
         tone: "error",
-        title: "SL / TP 설정을 저장하지 못했습니다",
+        title: `${feature.name} 설정을 저장하지 못했습니다`,
         body: apiError.message,
         meta: apiError.requestId ? [`요청 ID ${apiError.requestId}`] : undefined,
       });

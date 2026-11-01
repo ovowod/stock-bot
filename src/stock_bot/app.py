@@ -20,6 +20,7 @@ from stock_bot.account.account import AccountService
 from stock_bot.account.holdings import Holdings
 from stock_bot.auth.auth import AuthService, load_password
 from stock_bot.auth.login import install_login
+from stock_bot.auto_trading.settings import AutoTradingSettingsFile, FeatureSettingsStore
 from stock_bot.core.config import (
     DATA_DIR,
     ENVIRONMENTS,
@@ -44,8 +45,9 @@ from stock_bot.order.alerts import cancel_embed
 from stock_bot.order.auto_sell import AutoSell
 from stock_bot.order.open_order import OpenOrderService
 from stock_bot.order.order import OrderService
-from stock_bot.sl_tp.sl_tp import SlTpSettingsStore
+from stock_bot.sl_tp.sl_tp import SL_TP
 from stock_bot.sl_tp.watch import SlTpWatcher
+from stock_bot.trailing_stop.settings import TRAILING_STOP
 
 logger = logging.getLogger("stock_bot.api")
 
@@ -122,7 +124,13 @@ def create_app(
     auto_sell = AutoSell(orders)
     feed = FillFeed(realtime)
     fills = FillWatcher(kiwoom, open_orders, notifier, feed, auto_sell)
-    sl_tp = SlTpSettingsStore((data_dir or DATA_DIR) / "sl-tp")
+    data_dir = data_dir or DATA_DIR
+    auto_trading = AutoTradingSettingsFile(data_dir / "auto-trading", [SL_TP, TRAILING_STOP])
+    # 예전 SL / TP 파일은 서버가 시작할 때 한 번 옮긴다. 옮기지 못하면 서버를 시작하지 않는다.
+    auto_trading.migrate(data_dir / "sl-tp", SL_TP)
+    sl_tp = FeatureSettingsStore(auto_trading, SL_TP)
+    # Trailing Stop은 아직 설정만 저장한다. 저장해도 SL / TP 감시에는 알리지 않는다.
+    trailing_stop = FeatureSettingsStore(auto_trading, TRAILING_STOP)
     sl_tp_watch = SlTpWatcher(
         kiwoom, sl_tp, holdings.positions, auto_sell, realtime, feed, notifier, now
     )
@@ -250,6 +258,14 @@ def create_app(
     @app.put("/api/environments/{environment}/sl-tp")
     async def put_sl_tp(spec: Spec, request: Request) -> dict[str, Any]:
         return await sl_tp.save(spec, await json_body(request))
+
+    @app.get("/api/environments/{environment}/trailing-stop")
+    async def get_trailing_stop(spec: Spec) -> dict[str, Any]:
+        return trailing_stop.read(spec)
+
+    @app.put("/api/environments/{environment}/trailing-stop")
+    async def put_trailing_stop(spec: Spec, request: Request) -> dict[str, Any]:
+        return await trailing_stop.save(spec, await json_body(request))
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from stock_bot.auto_trading.settings import TIMEZONES, FeatureSettingsStore
 from stock_bot.core.config import ENVIRONMENTS, EnvironmentSpec, Market
 from stock_bot.core.errors import AppError
 from stock_bot.core.logging_setup import environment_var, log, request_id_var
@@ -32,7 +33,6 @@ from stock_bot.sl_tp.alerts import (
     stopped_embed,
     unknown_embed,
 )
-from stock_bot.sl_tp.sl_tp import TIMEZONES, SlTpSettingsStore
 
 logger = logging.getLogger("stock_bot.sl_tp_watch")
 
@@ -114,7 +114,7 @@ class SlTpWatcher:
     def __init__(
         self,
         kiwoom: KiwoomClient,
-        settings: SlTpSettingsStore,
+        settings: FeatureSettingsStore,
         positions: PositionLookup,
         auto_sell: AutoSell,
         hub: RealtimeHub,
@@ -211,8 +211,9 @@ class _Watch:
                 "settings_unreadable",
                 stopped_embed(
                     self.spec,
-                    "SL / TP 설정 파일을 읽지 못해 이 환경의 SL / TP를 멈췄습니다. "
-                    "SL / TP 화면에서 설정을 다시 저장하면 그때부터 동작합니다.",
+                    "자동매매 설정 파일을 읽지 못해 이 환경의 SL / TP를 멈췄습니다. "
+                    "자동매매 설정 파일을 고치거나 지운 뒤 SL / TP 화면에서 다시 저장하면 "
+                    "그때부터 동작합니다. 지우면 이 환경의 Trailing Stop 설정도 사라집니다.",
                 ),
             )
             return

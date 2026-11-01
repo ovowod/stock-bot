@@ -429,8 +429,8 @@ async def test_holdings_read_by_an_old_run_are_not_used(data_dir, caplog):
     assert [m["data"][0]["item"] for m in quote_regs(connection)] == [["000660"]]
 
 
-async def test_unreadable_settings_answer_no_until_a_valid_save(data_dir, caplog):
-    path = data_dir / "sl-tp" / "domestic_paper.json"
+async def test_unreadable_settings_answer_no_until_fixed_and_saved(data_dir, caplog):
+    path = data_dir / "auto-trading" / "domestic_paper.json"
     path.parent.mkdir(parents=True)
     path.write_text("{broken", encoding="utf-8")
     realtime = FakeRealtime()
@@ -438,6 +438,10 @@ async def test_unreadable_settings_answer_no_until_a_valid_save(data_dir, caplog
     async with running(realtime, kiwoom, data_dir) as app:
         await settle()
         assert realtime.connections == []
+        # 깨진 파일 위에는 저장하지 않는다. 사용자가 파일을 고치거나 지운 뒤 저장해야 한다.
+        await save(app, session(), status=500)
+        assert path.read_text(encoding="utf-8") == "{broken"
+        path.unlink()
         await save(app, session())
         connection = await watching(realtime)
         connection.push(quote())

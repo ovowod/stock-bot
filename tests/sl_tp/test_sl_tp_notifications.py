@@ -464,7 +464,7 @@ async def test_rejected_fill_registration_is_announced_once_while_retrying(
 
 
 async def test_unreadable_settings_file_is_announced_once(data_dir):
-    path = data_dir / "sl-tp" / "domestic_paper.json"
+    path = data_dir / "auto-trading" / "domestic_paper.json"
     path.parent.mkdir(parents=True)
     path.write_text("{broken", encoding="utf-8")
     realtime = FakeRealtime()
@@ -475,7 +475,10 @@ async def test_unreadable_settings_file_is_announced_once(data_dir):
 
     [payload] = titled(discord, "SL / TP 판정 중단")
     assert payload["content"] == "[국내 모의]"
-    assert "설정 파일을 읽지 못해" in payload["embeds"][0]["description"]
+    description = payload["embeds"][0]["description"]
+    assert "자동매매 설정 파일을 읽지 못해" in description
+    assert "고치거나 지운 뒤 SL / TP 화면에서 다시 저장" in description
+    assert "Trailing Stop 설정도 사라집니다" in description
 
 
 async def test_replaced_connection_names_every_stopped_feature_once(data_dir):

@@ -49,9 +49,10 @@ def test_saved_excluded_stocks_survive_a_server_restart(make_client, data_dir):
     restarted = make_client().get(GET.format("domestic_paper")).json()
     assert restarted["excluded"] == [SAMSUNG]
     assert restarted["updated_at"] == saved.json()["updated_at"]
-    stored = json.loads((data_dir / "sl-tp" / "domestic_paper.json").read_text())
-    assert stored["version"] == 1
-    assert "extra" not in stored
+    stored = json.loads((data_dir / "auto-trading" / "domestic_paper.json").read_text())
+    assert stored["version"] == 2
+    assert stored["sl_tp"]["excluded"] == [SAMSUNG]
+    assert "extra" not in stored["sl_tp"]
 
 
 def test_each_environment_keeps_its_own_file(make_client, data_dir):
@@ -65,7 +66,7 @@ def test_each_environment_keeps_its_own_file(make_client, data_dir):
     assert client.get(GET.format("us_paper")).json()["excluded"] == [APPLE]
     assert client.get(GET.format("domestic_real")).json()["excluded"] == []
     assert client.get(GET.format("us_real")).json()["updated_at"] is None
-    assert sorted(p.name for p in (data_dir / "sl-tp").iterdir()) == [
+    assert sorted(p.name for p in (data_dir / "auto-trading").iterdir()) == [
         "domestic_paper.json",
         "domestic_real.json",
         "us_paper.json",
@@ -94,11 +95,11 @@ def test_invalid_excluded_stocks_are_rejected_without_writing(
     assert response.status_code == 400
     assert response.json()["error"]["kind"] == "invalid_sl_tp_settings"
     assert response.json()["error"]["message"].startswith(message)
-    assert not (data_dir / "sl-tp").exists()
+    assert not (data_dir / "auto-trading").exists()
 
 
 def test_broken_file_is_reported_and_left_untouched(make_client, data_dir):
-    path = data_dir / "sl-tp" / "domestic_paper.json"
+    path = data_dir / "auto-trading" / "domestic_paper.json"
     path.parent.mkdir(parents=True)
     path.write_text("{not json")
 
@@ -111,7 +112,7 @@ def test_broken_file_is_reported_and_left_untouched(make_client, data_dir):
 
 def test_unreadable_file_is_logged_with_error_type(make_client, data_dir, caplog):
     caplog.set_level(logging.INFO, logger="stock_bot")
-    path = data_dir / "sl-tp" / "domestic_paper.json"
+    path = data_dir / "auto-trading" / "domestic_paper.json"
     path.parent.mkdir(parents=True)
     path.write_text("{not json")
 
@@ -123,9 +124,11 @@ def test_unreadable_file_is_logged_with_error_type(make_client, data_dir, caplog
 
 
 def test_file_breaking_the_rules_is_unreadable(make_client, data_dir):
-    path = data_dir / "sl-tp" / "domestic_paper.json"
+    path = data_dir / "auto-trading" / "domestic_paper.json"
     path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"version": 1, "excluded": [SAMSUNG, SAMSUNG], "sessions": []}))
+    path.write_text(
+        json.dumps({"version": 2, "sl_tp": {"excluded": [SAMSUNG, SAMSUNG], "sessions": []}})
+    )
 
     response = make_client().get(GET.format("domestic_paper"))
 
@@ -135,7 +138,7 @@ def test_file_breaking_the_rules_is_unreadable(make_client, data_dir):
 def test_write_failure_keeps_the_previous_file(make_client, data_dir):
     client = make_client()
     client.put(GET.format("domestic_paper"), json={"excluded": [SAMSUNG], "sessions": []})
-    folder = data_dir / "sl-tp"
+    folder = data_dir / "auto-trading"
     before = (folder / "domestic_paper.json").read_text()
     folder.chmod(0o500)
     try:
@@ -268,7 +271,7 @@ def test_invalid_session_times_are_rejected(make_client, data_dir, environment, 
     assert response.status_code == 400
     assert response.json()["error"]["kind"] == "invalid_sl_tp_settings"
     assert response.json()["error"]["message"].startswith(message)
-    assert not (data_dir / "sl-tp").exists()
+    assert not (data_dir / "auto-trading").exists()
 
 
 @pytest.mark.parametrize(
@@ -316,7 +319,7 @@ def test_invalid_thresholds_are_rejected(make_client, data_dir, change, message)
 
     assert response.status_code == 400
     assert response.json()["error"]["message"].startswith(message)
-    assert not (data_dir / "sl-tp").exists()
+    assert not (data_dir / "auto-trading").exists()
 
 
 def test_real_environment_refuses_enabled_sessions_and_keeps_the_file(make_client, data_dir):
@@ -324,7 +327,7 @@ def test_real_environment_refuses_enabled_sessions_and_keeps_the_file(make_clien
     off = session("09:00", "10:00", take_profit="5")
     saved = client.put(GET.format("domestic_real"), json={"excluded": [], "sessions": [off]})
     assert saved.status_code == 200
-    before = (data_dir / "sl-tp" / "domestic_real.json").read_text()
+    before = (data_dir / "auto-trading" / "domestic_real.json").read_text()
 
     response = client.put(
         GET.format("domestic_real"),
@@ -334,7 +337,7 @@ def test_real_environment_refuses_enabled_sessions_and_keeps_the_file(make_clien
     assert response.status_code == 403
     assert response.json()["error"]["kind"] == "sl_tp_enable_not_allowed"
     assert response.json()["error"]["message"] == "실전투자에서는 SL/TP 세션을 켤 수 없습니다."
-    assert (data_dir / "sl-tp" / "domestic_real.json").read_text() == before
+    assert (data_dir / "auto-trading" / "domestic_real.json").read_text() == before
 
 
 def test_invalid_input_is_reported_before_the_real_enable_rule(make_client):
@@ -347,14 +350,16 @@ def test_invalid_input_is_reported_before_the_real_enable_rule(make_client):
 
 
 def test_real_file_with_an_enabled_session_is_unreadable(make_client, data_dir):
-    path = data_dir / "sl-tp" / "us_real.json"
+    path = data_dir / "auto-trading" / "us_real.json"
     path.parent.mkdir(parents=True)
     content = json.dumps(
         {
-            "version": 1,
-            "updated_at": None,
-            "excluded": [],
-            "sessions": [session("09:30", "10:00", enabled=True, take_profit="5")],
+            "version": 2,
+            "sl_tp": {
+                "updated_at": None,
+                "excluded": [],
+                "sessions": [session("09:30", "10:00", enabled=True, take_profit="5")],
+            },
         }
     )
     path.write_text(content)

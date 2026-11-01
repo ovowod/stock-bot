@@ -406,19 +406,30 @@ export interface ExcludedStock {
   exchange: string | null;
 }
 
-export interface SlTpSession {
+/** 자동매매 기능들이 함께 쓰는 세션 칸. 기준 칸은 기능마다 다르다. */
+export interface BaseSession {
   /** HH:MM. 시작 시각은 포함하고 종료 시각은 뺀다. */
   start: string;
   end: string;
   enabled: boolean;
+}
+
+export interface SlTpSession extends BaseSession {
   /** 소수점 둘째 자리까지의 양수 문자열. 정하지 않으면 null. */
   take_profit: string | null;
   stop_loss: string | null;
 }
 
-export interface SlTpDraft {
+export interface TrailingStopSession extends BaseSession {
+  /** 소수점 둘째 자리까지의 양수 문자열. 정하지 않으면 null. */
+  activation_profit: string | null;
+  drop_from_peak: string | null;
+}
+
+/** 화면에서 고치고 저장하는 값. */
+export interface SettingsDraft<S> {
   excluded: ExcludedStock[];
-  sessions: SlTpSession[];
+  sessions: S[];
 }
 
 /** 정규장. HH:MM, 그 시장의 시간대 기준. */
@@ -427,33 +438,51 @@ export interface RegularHours {
   end: string;
 }
 
-export interface SlTpSettings extends SlTpDraft {
+/** 자동매매 기능 하나의 설정. 자동매매 설정 파일의 그 기능 칸이다. */
+export interface FeatureSettings<S> extends SettingsDraft<S> {
   environment: EnvironmentValue;
   market: "domestic" | "us";
   timezone: string;
   regular_hours: RegularHours;
-  /** 실전투자는 false. SL/TP 세션을 켤 수 없다. */
+  /** 실전투자는 false. 세션을 켤 수 없다. */
   can_enable: boolean;
   updated_at: string | null;
 }
+
+export type SlTpDraft = SettingsDraft<SlTpSession>;
+export type SlTpSettings = FeatureSettings<SlTpSession>;
+export type TrailingStopDraft = SettingsDraft<TrailingStopSession>;
+export type TrailingStopSettings = FeatureSettings<TrailingStopSession>;
 
 export function fetchSlTp(environment: EnvironmentValue, signal: AbortSignal): Promise<SlTpSettings> {
   return getJson<SlTpSettings>(`/api/environments/${environment}/sl-tp`, signal);
 }
 
-export async function saveSlTp(environment: EnvironmentValue, draft: SlTpDraft): Promise<SlTpSettings> {
+export function saveSlTp(environment: EnvironmentValue, draft: SlTpDraft): Promise<SlTpSettings> {
+  return putJson<SlTpSettings>(`/api/environments/${environment}/sl-tp`, draft);
+}
+
+export function fetchTrailingStop(environment: EnvironmentValue, signal: AbortSignal): Promise<TrailingStopSettings> {
+  return getJson<TrailingStopSettings>(`/api/environments/${environment}/trailing-stop`, signal);
+}
+
+export function saveTrailingStop(environment: EnvironmentValue, draft: TrailingStopDraft): Promise<TrailingStopSettings> {
+  return putJson<TrailingStopSettings>(`/api/environments/${environment}/trailing-stop`, draft);
+}
+
+async function putJson<T>(url: string, body: unknown): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`/api/environments/${environment}/sl-tp`, {
+    response = await fetch(url, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
+      body: JSON.stringify(body),
     });
   } catch {
     throw networkError();
   }
   if (!response.ok) throw await responseError(response);
-  return (await response.json()) as SlTpSettings;
+  return (await response.json()) as T;
 }
 
 /** 투자 환경별 주문 허용. 서버의 주문 허용 스위치다. */
