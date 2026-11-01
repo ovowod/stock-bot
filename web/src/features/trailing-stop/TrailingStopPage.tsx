@@ -10,7 +10,7 @@ const TRAILING_STOP: FeatureApi<TrailingStopSession> = {
   save: saveTrailingStop,
 };
 
-/** Trailing Stop 설정 화면. 매도 동작은 아직 없다. 서버는 상태만 계산한다. */
+/** Trailing Stop 설정 화면. 매도는 서버가 모의투자에서만 낸다. */
 export function TrailingStopPage({ environment }: { environment: EnvironmentValue }) {
   return (
     <AutoTradingSettingsPage
@@ -18,7 +18,7 @@ export function TrailingStopPage({ environment }: { environment: EnvironmentValu
       feature={TRAILING_STOP}
       notice={[
         "평균 매입가 대비 수익률이 활성화 수익률 이상이 되면 그때부터 고점을 따라가고, 시세 체결가가 고점 대비 하락률만큼 떨어지면 그 종목의 매도 가능 수량 전량을 시장가로 매도합니다. 제외종목은 매도하지 않습니다.",
-        "지금은 상태만 계산하고 팔지 않습니다. 계좌 확인 화면의 Trailing Stop 보기에서 확인하세요.",
+        "매도 조건 충족이 되면 매도 가능 수량 전량을 시장가로 팝니다(모의투자만). 계좌 확인 화면의 Trailing Stop 보기에서 상태를 확인하세요.",
       ]}
       sessionName="Trailing Stop 세션"
       idPrefix="trailing-stop"

@@ -461,6 +461,7 @@ const stock = (code: string, overrides: Record<string, unknown> = {}) => ({
   peak_at: null,
   triggered_at: null,
   triggered_price: null,
+  auto_sell: null,
   ...overrides,
 });
 
@@ -682,4 +683,79 @@ test("미국 감시 종목은 외화로 고점을 보이고 뉴욕시간으로 �
   await expect(visible(apple, "고점 추적 중")).toBeVisible();
   await expect(visible(apple, "+6.50%")).toBeVisible();
   await expectFact(apple, "고점", "$305.25");
+});
+
+const autoSell = (state: string, overrides: Record<string, unknown> = {}) => ({
+  state,
+  reason: null,
+  quantity: null,
+  order_no: null,
+  at: "2026-11-02T01:30:05+00:00",
+  ...overrides,
+});
+
+test("매도 조건 충족 종목에는 자동 매도가 어디까지 왔는지 보인다", async ({ page, isMobile }) => {
+  await page.clock.install({ time: new Date("2026-11-02T02:15:00Z") });
+  const LG = holding("051910", "LG화학", { purchase_price: 300_000, current_price: 320_000 });
+  const KAKAO = holding("035720", "카카오", { purchase_price: 40_000, current_price: 41_000 });
+  const triggered = (code: string, auto_sell: unknown) =>
+    stock(code, {
+      status: "triggered",
+      activated_at: "2026-11-02T01:03:00+00:00",
+      peak: "110000",
+      peak_at: "2026-11-02T01:10:00+00:00",
+      triggered_at: "2026-11-02T01:30:00+00:00",
+      triggered_price: "106700",
+      auto_sell,
+    });
+  let reason: string | null = null;
+  await mockScreen(
+    page,
+    { domestic_paper: domestic("domestic_paper", [SAMSUNG, NAVER, HYNIX, LG, KAKAO]) },
+    (environment) => ({
+      body: status(environment, {
+        watching: reason === null,
+        not_watching_reason: reason,
+        stocks:
+          reason === null
+            ? [
+                triggered("005930", autoSell("sending", { at: "2026-11-02T01:30:00+00:00" })),
+                triggered("035420", autoSell("accepted", { quantity: 10, order_no: "0000138" })),
+                triggered("000660", autoSell("failed", { reason: "rejected", quantity: 10 })),
+                triggered("051910", null),
+                triggered("035720", autoSell("failed", { reason: "no_sellable", quantity: 0 })),
+              ]
+            : [triggered("051910", null), stock("035720", { status: "tracking", peak: "41000" })],
+      }),
+    }),
+  );
+  await openDashboard(page);
+  await view(page, "Trailing Stop").click();
+  await expect(visible(page, "매도 조건 충족이 되면 매도 가능 수량 전량을 시장가로 팝니다(모의투자만).")).toBeVisible();
+
+  // 상태 이름은 그대로 매도 조건 충족이고, 자동 매도가 어디까지 왔는지는 펼친 상세에 있다.
+  const samsung = row(page, "삼성전자");
+  await expectStatus(samsung, isMobile, "매도 조건 충족");
+  await expectFact(samsung, "자동 매도", "보내는 중");
+  await expectFact(row(page, "NAVER"), "자동 매도", "접수 · 0000138 · 10주 · 10:30");
+  await expectFact(row(page, "SK하이닉스"), "자동 매도", "실패 · 다음 세션에 다시 시도 · 거부");
+  await expectFact(row(page, "LG화학"), "자동 매도", "다음 시세에서 매도");
+  await expectFact(row(page, "카카오"), "자동 매도", "실패 · 다음 세션에 다시 시도 · 매도 가능 수량 없음");
+
+  // 세션 밖이면 다음 세션에 판다. 매도 조건 충족이 아닌 종목에는 자동 매도 칸이 없다.
+  reason = "no_session";
+  await page.clock.runFor(3000);
+  const lg = row(page, "LG화학");
+  await expectStatus(lg, isMobile, "매도 조건 충족 · 세션 밖, 갱신 멈춤");
+  await expectFact(lg, "자동 매도", "세션 밖 · 다음 세션에 매도");
+  const kakao = row(page, "카카오");
+  await expectStatus(kakao, isMobile, "고점 추적 중 · 세션 밖, 갱신 멈춤");
+  await expect(kakao.locator('dd[data-term="자동 매도"]')).toHaveCount(0);
+
+  // 장애로 멈추면 자동 매도 칸 없이 멈춘 이유만 보인다.
+  reason = "connection_replaced";
+  await page.clock.runFor(3000);
+  await expectStatus(lg, isMobile, "매도 조건 충족 · 실시간 연결이 밀려남");
+  await expect(lg.locator('dd[data-term="자동 매도"]')).toHaveCount(0);
+  await expectNoHorizontalScroll(page);
 });

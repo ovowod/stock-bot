@@ -1,7 +1,7 @@
 """Trailing Stop 감시: 모의투자 보유종목의 시세 체결로 활성화, 고점, 트리거를 판정한다.
 
 켜진 Trailing Stop 세션 동안 보유종목을 읽고 공유 실시간 연결로 시세 체결을 구독한다.
-트리거가 일어나도 매도 주문은 내지 않는다. 주문 경로(AutoSell·OrderService)에 기대지 않는다.
+트리거가 일어나면 공용 자동 매도(AutoSell)로 매도 가능 수량 전량을 시장가로 판다.
 기억(활성화·고점·트리거)은 투자 환경마다 메모리에 두고 고점 기록 파일(record.py)에 써서,
 세션과 날짜를 넘기고 서버를 다시 시작해도 이어 간다. 파일은 서버가 시작할 때와
 읽지 못한 상태에서 복구할 때만 읽는다. 그 밖에는 메모리가 기준이다.
@@ -40,7 +40,10 @@ from stock_bot.core.notification import DiscordNotifier, Embed, EmbedField
 from stock_bot.fill.feed import FeedState, FeedStatus, Fill, FillFeed
 from stock_bot.kiwoom.kiwoom import KiwoomClient
 from stock_bot.kiwoom.realtime import EventKind, RealtimeEvent, RealtimeHub, Subscription
+from stock_bot.order.auto_sell import AutoSell
+from stock_bot.order.order import AutoSellResult
 from stock_bot.trailing_stop import record
+from stock_bot.trailing_stop.alerts import RESULT_EMBEDS, SellTrigger
 from stock_bot.trailing_stop.record import Memory, format_decimal, format_moment
 
 logger = logging.getLogger("stock_bot.trailing_stop_watch")
@@ -58,6 +61,16 @@ HOLDINGS_ALERT_AFTER = timedelta(minutes=5)
 # 고점 갱신을 모아 고점 기록 파일에 쓰는 간격. 활성화·트리거·기억 삭제는 바로 쓴다.
 RECORD_WRITE_SECONDS = 5.0
 NEUTRAL_COLOR = 0x8B8F98
+# 체결 알림과 로그에 남는 자동 매도 기능 이름.
+AUTO_SELL_SOURCE = "Trailing Stop"
+# 보내지 않았거나 접수되지 않은 자동 매도 결과 -> 상태 조회의 실패 이유.
+FAILED_REASONS = {
+    "rejected": "rejected",
+    "unknown": "unknown",
+    "in_progress": "in_progress",
+    "skipped": "no_sellable",
+    "cancelled": "cancelled",
+}
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 
@@ -94,6 +107,9 @@ class _Run:
     # 보유종목 읽기가 처음 실패한 시각과 판정 중단을 알렸는지. 성공하면 지운다.
     failed_since: datetime | None = None
     failure_alerted: bool = False
+    # 종목코드 -> 이 실행에서 낸 자동 매도와 그 결과(상태 조회 모양).
+    # 결과는 매도를 시작한 실행에 남아, 늦게 나와도 다음 실행의 상태를 바꾸지 않는다.
+    auto_sells: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def covers(self, found: tuple[date, dict[str, Any]] | None) -> bool:
         """그 날짜·세션이 이 실행의 것인가. 기준만 바뀌면 같은 실행이다."""
@@ -106,6 +122,7 @@ class TrailingStopWatcher:
         kiwoom: KiwoomClient,
         settings: FeatureSettingsStore,
         positions: PositionLookup,
+        auto_sell: AutoSell,
         hub: RealtimeHub,
         feed: FillFeed,
         notifier: DiscordNotifier,
@@ -115,6 +132,7 @@ class TrailingStopWatcher:
         self.kiwoom = kiwoom
         self.settings = settings
         self.positions = positions
+        self.auto_sell = auto_sell
         self.hub = hub
         # 내 계좌 체결. 체결되면 매입가·보유수량이 바뀌므로 보유종목을 다시 읽는다.
         self.feed = feed
@@ -326,6 +344,7 @@ class _Watch:
             "peak_at": None if memory is None else format_moment(memory.peak_at),
             "triggered_at": None if memory is None else format_moment(memory.triggered_at),
             "triggered_price": None if memory is None else format_decimal(memory.triggered_price),
+            "auto_sell": None if self._run is None else self._run.auto_sells.get(code),
         }
 
     async def _tick(self) -> None:
@@ -893,8 +912,13 @@ class _Watch:
                 self._flush = self._spawn(self._write_later())
         elif price <= memory.peak * (1 - drop / 100):
             memory.triggered_at, memory.triggered_price = at, price
-            self._log_judged("trailing_stop_triggered", code, price, purchase, memory, run, session)
+            # 트리거 로그, 자동 매도, 그 체결 알림을 같은 요청 ID로 잇는다.
+            request_id = uuid.uuid4().hex[:12]
+            self._log_judged(
+                "trailing_stop_triggered", code, price, purchase, memory, run, session, request_id
+            )
             self._write("triggered")
+            self._start_sell(run, code, price, memory, session, request_id)
 
     def _log_judged(
         self,
@@ -905,9 +929,10 @@ class _Watch:
         memory: Memory,
         run: _Run,
         session: dict[str, Any],
+        request_id: str | None = None,
     ) -> None:
         """활성화·트리거 로그. 나중에 판정이 맞았는지 확인하도록 요청 ID와 적용한 기준을 담는다."""
-        token = request_id_var.set(uuid.uuid4().hex[:12])
+        token = request_id_var.set(request_id or uuid.uuid4().hex[:12])
         try:
             log(
                 logger,
@@ -925,6 +950,81 @@ class _Watch:
             )
         finally:
             request_id_var.reset(token)
+
+    def _start_sell(
+        self,
+        run: _Run,
+        code: str,
+        price: Decimal,
+        memory: Memory,
+        session: dict[str, Any],
+        request_id: str,
+    ) -> None:
+        """자동 매도를 따로 돌린다. 시세 처리는 주문 결과를 기다리지 않는다."""
+        holding = self._holdings[code]
+        trigger = SellTrigger(
+            code,
+            holding.name,
+            holding.exchange,
+            price,
+            memory.peak,
+            holding.purchase_price,
+            Decimal(session["activation_profit"]),
+            Decimal(session["drop_from_peak"]),
+            _span(session),
+        )
+        run.auto_sells[code] = _attempt("sending", None, None, None, self._owner.now())
+        token = request_id_var.set(request_id)
+        try:
+            log(
+                logger,
+                logging.INFO,
+                "trailing_stop_auto_sell_started",
+                code=code,
+                run=run.number,
+                attempt="trigger",
+            )
+            # 요청 ID는 만들어질 때의 문맥을 따라 매도 작업으로 넘어간다.
+            self._spawn(self._sell(run, trigger, request_id))
+        finally:
+            request_id_var.reset(token)
+
+    async def _sell(self, run: _Run, trigger: SellTrigger, request_id: str) -> None:
+        """트리거 때 읽은 거래소로 판다. 국내는 거래소가 없어 빈 값으로 보낸다."""
+        code = trigger.code
+        result = await self._owner.auto_sell.sell(
+            self.spec,
+            code,
+            trigger.exchange or "",
+            source=AUTO_SELL_SOURCE,
+            request_id=request_id,
+            ready=lambda: not self._is_stopped(),
+        )
+        run.auto_sells[code] = _result_attempt(result, self._owner.now())
+        log(
+            logger,
+            logging.INFO if result.outcome in ("accepted", "skipped") else logging.WARNING,
+            "trailing_stop_auto_sell_finished",
+            code=code,
+            run=run.number,
+            outcome=result.outcome,
+            quantity=result.quantity,
+            order_no=result.order_no,
+            cause=result.cause,
+        )
+        embed = RESULT_EMBEDS.get(result.outcome)
+        if embed is not None:
+            sent = await self._owner.notifier.send(
+                embed=embed(self.spec, trigger, result), spec=self.spec
+            )
+            log(
+                logger,
+                logging.INFO,
+                "trailing_stop_notified",
+                reason=f"auto_sell_{result.outcome}",
+                code=code,
+                sent=sent,
+            )
 
     def _skip_reason(self, code: str, values: dict[str, Any]) -> str | None:
         if self._is_stopped():
@@ -1020,6 +1120,25 @@ class _Watch:
 
 def _span(session: dict[str, Any]) -> str:
     return f"{session['start']}-{session['end']}"
+
+
+def _attempt(
+    state: str, reason: str | None, quantity: int | None, order_no: str | None, at: datetime
+) -> dict[str, Any]:
+    """상태 조회의 auto_sell 모양."""
+    return {
+        "state": state,
+        "reason": reason,
+        "quantity": quantity,
+        "order_no": order_no,
+        "at": format_moment(at),
+    }
+
+
+def _result_attempt(result: AutoSellResult, at: datetime) -> dict[str, Any]:
+    if result.outcome == "accepted":
+        return _attempt("accepted", None, result.quantity, result.order_no, at)
+    return _attempt("failed", FAILED_REASONS[result.outcome], result.quantity, None, at)
 
 
 def _run_fields(run: _Run) -> dict[str, Any]:
