@@ -28,10 +28,11 @@ export function TrailingStopPage({ environment }: { environment: EnvironmentValu
         const ids = { activation: `trailing-stop-${n}-activation`, drop: `trailing-stop-${n}-drop` };
         return (
           <>
-            <div className="mt-2 grid grid-cols-2 gap-2">
+            {/* 칸 이름이 길어 좁은 화면에서는 값 자리가 모자라므로 한 줄에 하나씩 둔다. */}
+            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
               <div className="min-w-0">
                 <PercentInput
-                  name="활성화"
+                  name="활성화 수익률"
                   sign="+"
                   label={`${n}번째 세션 활성화 수익률(%)`}
                   value={session.activation_profit}
@@ -43,7 +44,7 @@ export function TrailingStopPage({ environment }: { environment: EnvironmentValu
               </div>
               <div className="min-w-0">
                 <PercentInput
-                  name="하락"
+                  name="하락률"
                   sign="−"
                   label={`${n}번째 세션 고점 대비 하락률(%)`}
                   value={session.drop_from_peak}

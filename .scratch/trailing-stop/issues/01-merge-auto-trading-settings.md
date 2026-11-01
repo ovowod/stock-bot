@@ -1,6 +1,6 @@
 # 01: 자동매매 설정 파일 합치기와 예전 SL / TP 파일 이전
 
-**What to build:** SL / TP 설정을 투자 환경마다 하나인 자동매매 설정 파일(버전 2)의 `sl_tp` 칸에 저장하게 바꾼다. 서버가 시작할 때 예전 SL / TP 파일을 새 파일로 옮긴다. 사용자가 보는 SL / TP 화면과 API 동작, SL / TP 감시는 바뀌지 않는다. 아직 `trailing_stop` 칸은 쓰지 않는다. 다만 파일에 그 칸이 없으면 빈 설정으로 보고, 알 수 없는 칸은 무시한다.
+**What to build:** SL / TP 설정을 투자 환경마다 하나인 자동매매 설정 파일(버전 2)의 `sl_tp` 칸에 저장하게 바꾼다. 서버가 시작할 때 예전 SL / TP 파일을 새 파일로 옮긴다. 사용자가 보는 SL / TP 화면과 API 동작, SL / TP 감시는 바뀌지 않는다. 아직 `trailing_stop` 칸은 쓰지 않는다. 다만 파일에 그 칸이 없으면 빈 설정으로 보고, 모르는 최상위 칸은 검사하지 않고 그대로 다시 쓴다.
 
 Spec: `.scratch/trailing-stop/spec.md` (자동매매 설정 저장소, 예전 SL / TP 파일 이전, 로그)
 ADR: `docs/adr/0004-one-auto-trading-settings-file-per-environment.md`
@@ -9,7 +9,7 @@ ADR: `docs/adr/0004-one-auto-trading-settings-file-per-environment.md`
 
 **Status:** ready-for-agent
 
-- [x] SL / TP 저장은 데이터 폴더의 `auto-trading/<환경 값>.json`에 버전 2 형식으로 쓰고, `sl_tp` 칸과 그 칸의 `updated_at`만 바꾼다. 파일의 다른 칸은 읽은 그대로 다시 쓴다.
+- [x] SL / TP 저장은 데이터 폴더의 `auto-trading/<환경 값>.json`에 버전 2 형식으로 쓰고, `sl_tp` 칸과 그 칸의 `updated_at`만 바꾼다. 파일의 다른 최상위 칸(모르는 칸 포함)은 읽은 그대로 다시 쓴다.
 - [x] 파일이 없거나 `sl_tp` 칸이 없으면 빈 설정이다. 깨진 JSON, 버전이 2가 아닌 파일, 규칙에 맞지 않는 `sl_tp` 칸, 실전에서 켜진 세션은 지금처럼 500 `sl_tp_settings_unreadable`이고 파일은 그대로다.
 - [x] SL / TP API의 요청·응답·오류 종류·메시지, 저장 뒤 감시 쪽에 알리는 동작이 그대로다. 단, 깨진 파일 위의 PUT은 이제 500 `sl_tp_settings_unreadable`이고 파일은 그대로다.
 - [x] 감시가 깨진 파일 때문에 멈출 때의 알림 문구를 spec 문구로 바꾼다. 파일을 고치거나 지운 뒤 SL / TP 화면에서 다시 저장하라는 순서와, 지우면 Trailing Stop 설정도 사라진다는 점을 담는다.

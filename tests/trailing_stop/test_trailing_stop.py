@@ -82,6 +82,20 @@ def test_saving_one_feature_keeps_the_other(make_client, data_dir):
     assert sl_tp.json()["updated_at"] <= file["sl_tp"]["updated_at"]
 
 
+def test_saving_keeps_sections_this_server_does_not_know(make_client, data_dir):
+    # 기능을 더한 뒤 이전 서버로 되돌려도 저장이 새 기능의 칸을 지우지 않는다.
+    path = data_dir / "auto-trading" / "domestic_paper.json"
+    path.parent.mkdir(parents=True)
+    future = {"updated_at": None, "anything": [1, 2]}
+    path.write_text(json.dumps({"version": 2, "future_feature": future}))
+    client = make_client()
+
+    client.put(URL.format("domestic_paper"), json={"excluded": [SAMSUNG], "sessions": []})
+    client.put(SL_TP.format("domestic_paper"), json={"excluded": [], "sessions": []})
+
+    assert stored(data_dir)["future_feature"] == future
+
+
 def test_trailing_stop_save_keeps_the_sl_tp_saved_time(make_client, data_dir):
     client = make_client()
     sl_tp = client.put(SL_TP.format("domestic_paper"), json={"excluded": [], "sessions": []})

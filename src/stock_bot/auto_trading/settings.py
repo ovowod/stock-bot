@@ -70,21 +70,25 @@ class AutoTradingSettingsFile:
     def path(self, spec: EnvironmentSpec) -> Path:
         return self._directory / f"{spec.environment.value}.json"
 
-    def load(self, spec: EnvironmentSpec) -> dict[str, dict[str, Any]]:
-        """파일에 있는 기능의 칸만 돌려준다. 읽지 못하면 OSError나 ValueError를 낸다."""
+    def load(self, spec: EnvironmentSpec) -> dict[str, Any]:
+        """파일의 칸들을 돌려준다. 읽지 못하면 OSError나 ValueError를 낸다.
+
+        아는 기능의 칸은 검사한 값으로, 모르는 칸은 검사 없이 그대로 돌려준다. 모르는 칸도
+        저장할 때 다시 써서, 이전 서버로 되돌려 저장해도 나중에 더한 기능의 칸이 지워지지 않는다.
+        """
         path = self.path(spec)
         if not path.exists():
             return {}
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or data.get("version") != FORMAT_VERSION:
             raise ValueError(f"version이 {FORMAT_VERSION}가 아닙니다")
-        return {
-            feature.key: _read_section(data[feature.key], feature, spec)
-            for feature in self._features
-            if feature.key in data
-        }
+        sections = {key: value for key, value in data.items() if key != "version"}
+        for feature in self._features:
+            if feature.key in data:
+                sections[feature.key] = _read_section(data[feature.key], feature, spec)
+        return sections
 
-    def write(self, spec: EnvironmentSpec, sections: dict[str, dict[str, Any]]) -> None:
+    def write(self, spec: EnvironmentSpec, sections: dict[str, Any]) -> None:
         """임시 파일에 다 쓴 뒤 바꿔치기해, 쓰다 끊겨도 반쯤 쓴 파일이 남지 않게 한다."""
         path = self.path(spec)
         content = json.dumps({"version": FORMAT_VERSION, **sections}, ensure_ascii=False, indent=2)
@@ -210,7 +214,7 @@ class FeatureSettingsStore:
                 )
         return response
 
-    def _load(self, spec: EnvironmentSpec) -> dict[str, dict[str, Any]]:
+    def _load(self, spec: EnvironmentSpec) -> dict[str, Any]:
         try:
             return self._file.load(spec)
         except (OSError, ValueError) as exc:

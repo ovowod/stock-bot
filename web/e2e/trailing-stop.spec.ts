@@ -265,6 +265,9 @@ test("세션을 켜고 활성화 수익률과 고점 대비 하락률을 정해 
   await expect(saveButton(page)).toBeDisabled();
   await drop(page, 1).fill("2.5");
   const first = sessionList(page).getByRole("listitem").first();
+  // 보이는 칸 이름도 용어집의 이름을 쓴다("활성화"는 칸이 아니라 종목이 그 수익률에 닿은 일이다).
+  await expect(first.getByText("활성화 수익률", { exact: true })).toBeVisible();
+  await expect(first.getByText("하락률", { exact: true })).toBeVisible();
   await expect(first).toContainText("+5%부터 고점을 따라감");
   await expect(first).toContainText("고점 대비 −2.5%에서 매도");
   // 하락률이 활성화 수익률보다 커도 받는다.
@@ -418,4 +421,16 @@ test("저장하지 않은 변경이 있으면 SL / TP로 가거나 환경을 바
   await selectAutoTradingMenu(page, "SL / TP");
   await expect(page.getByRole("heading", { name: "SL / TP" })).toBeVisible();
   expect(asked).toEqual([LEAVE_MESSAGE]);
+});
+
+test("가장 긴 값도 입력 칸 안에 다 보인다", async ({ page }) => {
+  const longest = { ...off("09:00", "10:00"), activation_profit: "999.99", drop_from_peak: "99.99" };
+  await mockTrailingStop(page, { load: (environment) => ({ body: settings(environment, { sessions: [longest] }) }) });
+  await openTrailingStop(page);
+
+  for (const input of [activation(page, 1), drop(page, 1)]) {
+    const [scroll, client] = await input.evaluate((el: HTMLInputElement) => [el.scrollWidth, el.clientWidth]);
+    expect(scroll).toBeLessThanOrEqual(client);
+  }
+  await expectNoHorizontalScroll(page);
 });
