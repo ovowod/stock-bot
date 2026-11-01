@@ -48,10 +48,13 @@ from stock_bot.order.order import OrderService
 from stock_bot.sl_tp.sl_tp import SL_TP
 from stock_bot.sl_tp.watch import SlTpWatcher
 from stock_bot.trailing_stop.settings import TRAILING_STOP
+from stock_bot.trailing_stop.status import TrailingStopStatus
 
 logger = logging.getLogger("stock_bot.api")
 
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
+# 화면이 3초마다 부르는 조회. 성공한 요청의 api_request 로그는 DEBUG로 낮춰 로그를 채우지 않게 한다.
+POLLED_PATH_SUFFIXES = ("/trailing-stop/status",)
 
 
 async def selected_environment(environment: str) -> EnvironmentSpec:
@@ -131,6 +134,7 @@ def create_app(
     sl_tp = FeatureSettingsStore(auto_trading, SL_TP)
     # Trailing Stop은 아직 설정만 저장한다. 저장해도 SL / TP 감시에는 알리지 않는다.
     trailing_stop = FeatureSettingsStore(auto_trading, TRAILING_STOP)
+    trailing_stop_status = TrailingStopStatus(kiwoom, trailing_stop, now)
     sl_tp_watch = SlTpWatcher(
         kiwoom, sl_tp, holdings.positions, auto_sell, realtime, feed, notifier, now
     )
@@ -165,13 +169,15 @@ def create_app(
         environment_var.set("-")
         started = time.perf_counter()
         response = await call_next(request)
-        if request.url.path.startswith("/api"):
+        path = request.url.path
+        if path.startswith("/api"):
+            polled = path.endswith(POLLED_PATH_SUFFIXES) and response.status_code < 400
             log(
                 logger,
-                logging.INFO,
+                logging.DEBUG if polled else logging.INFO,
                 "api_request",
                 method=request.method,
-                path=request.url.path,
+                path=path,
                 status=response.status_code,
                 elapsed_ms=round((time.perf_counter() - started) * 1000),
             )
@@ -266,6 +272,10 @@ def create_app(
     @app.put("/api/environments/{environment}/trailing-stop")
     async def put_trailing_stop(spec: Spec, request: Request) -> dict[str, Any]:
         return await trailing_stop.save(spec, await json_body(request))
+
+    @app.get("/api/environments/{environment}/trailing-stop/status")
+    async def get_trailing_stop_status(spec: Spec) -> dict[str, Any]:
+        return trailing_stop_status.read(spec)
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

@@ -12,6 +12,8 @@ export interface DomesticHolding {
   profit_loss: number | null;
   return_rate: number | null;
   weight: number | null;
+  /** 신용 보유분 줄. 같은 종목이 현금·신용 두 줄로 올 수 있다. */
+  credit: boolean;
 }
 
 export interface DomesticAccount {
@@ -52,6 +54,8 @@ export interface UsHolding {
   return_rate: number | null;
   evaluation_amount_krw: number | null;
   profit_loss_krw: number | null;
+  /** 미국은 늘 false다. */
+  credit: boolean;
 }
 
 export interface UsAccount {
@@ -468,6 +472,52 @@ export function fetchTrailingStop(environment: EnvironmentValue, signal: AbortSi
 
 export function saveTrailingStop(environment: EnvironmentValue, draft: TrailingStopDraft): Promise<TrailingStopSettings> {
   return putJson<TrailingStopSettings>(`/api/environments/${environment}/trailing-stop`, draft);
+}
+
+/** Trailing Stop 감시 안 함의 이유. */
+export type NotWatchingReason =
+  | "no_session"
+  | "real"
+  | "holdings_pending"
+  | "settings_unreadable"
+  | "state_unreadable"
+  | "no_credentials"
+  | "connection_replaced"
+  | "fills_rejected"
+  | "quotes_rejected";
+
+/** 감시가 판정한 종목 하나. 가격은 문자열 소수, 시각은 UTC ISO 8601이다. */
+export interface TrailingStopStock {
+  code: string;
+  status: "waiting" | "tracking" | "triggered" | "ineligible";
+  ineligible_reason: "no_purchase_price" | "duplicate" | "unknown_exchange" | null;
+  /** 서버가 판정에 쓰는 평균 매입가. 판정 대상이 아니면 null. */
+  purchase_price: string | null;
+  last_price: string | null;
+  last_price_at: string | null;
+  activated_at: string | null;
+  peak: string | null;
+  peak_at: string | null;
+  triggered_at: string | null;
+  triggered_price: string | null;
+}
+
+export interface TrailingStopStatus {
+  environment: EnvironmentValue;
+  market: "domestic" | "us";
+  timezone: string;
+  watching: boolean;
+  not_watching_reason: NotWatchingReason | null;
+  /** 지금 시각을 포함하는 Trailing Stop 세션. 꺼진 세션이어도 담고, 없으면 null. */
+  session: TrailingStopSession | null;
+  /** Trailing Stop 제외종목 코드. */
+  excluded: string[];
+  stocks: TrailingStopStock[];
+}
+
+/** 키움을 부르지 않는 상태 조회. Trailing Stop 보기가 열려 있는 동안 3초마다 부른다. */
+export function fetchTrailingStopStatus(environment: EnvironmentValue, signal: AbortSignal): Promise<TrailingStopStatus> {
+  return getJson<TrailingStopStatus>(`/api/environments/${environment}/trailing-stop/status`, signal);
 }
 
 async function putJson<T>(url: string, body: unknown): Promise<T> {

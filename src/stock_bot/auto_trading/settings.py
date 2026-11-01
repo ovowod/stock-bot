@@ -157,9 +157,10 @@ class FeatureSettingsStore:
         self._logger = logging.getLogger(f"stock_bot.{feature.key}")
         self.on_saved: SettingsListener | None = None
 
-    def read(self, spec: EnvironmentSpec) -> dict[str, Any]:
+    def read(self, spec: EnvironmentSpec, *, quiet: bool = False) -> dict[str, Any]:
+        """quiet면 성공 로그를 DEBUG로 남긴다. 자주 부르는 상태 조회가 로그를 채우지 않게 한다."""
         settings = self._load(spec).get(self._feature.key, _empty())
-        self._log(logging.INFO, "settings_read", **_counts(settings))
+        self._log(logging.DEBUG if quiet else logging.INFO, "settings_read", **_counts(settings))
         return _response(spec, settings)
 
     async def save(self, spec: EnvironmentSpec, payload: Any) -> dict[str, Any]:
