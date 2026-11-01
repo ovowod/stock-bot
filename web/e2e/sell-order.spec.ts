@@ -319,6 +319,11 @@ test("종목 목록에서 거래소를 찾지 못한 미국 보유종목은 거�
   const unknown = page.getByRole("listitem").filter({ hasText: "목록에 없는 종목" }).filter({ visible: true });
   await expect(unknown.getByText("거래소 확인 불가").filter({ visible: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "목록에 없는 종목 매도" })).toHaveCount(0);
+  // 매도 버튼 자리에는 키움 앱에서 팔라는 안내가 있다. 좁은 화면은 줄을 펼쳐야 보인다.
+  if (await unknown.getByRole("button", { name: /목록에 없는 종목/ }).isVisible()) {
+    await unknown.getByRole("button", { name: /목록에 없는 종목/ }).click();
+  }
+  await expect(unknown.getByText("앱에서 매도").filter({ visible: true })).toBeVisible();
   // 거래소를 아는 종목은 지금처럼 매도 패널이 열린다.
   const dialog = await openSell(page, "미국 모의", "애플");
   await expect(dialog).toContainText("NASDAQ");

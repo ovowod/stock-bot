@@ -295,7 +295,7 @@ function UsView({ data, onSold, openOrders }: { data: UsAccount; onSold: () => v
               badge: h.exchange === null ? NO_EXCHANGE : undefined,
               info: [
                 h.code,
-                ...(h.exchange === null ? [] : [h.exchange]),
+                h.exchange ?? NO_EXCHANGE,
                 `평균 ${price(h.purchase_price)}`,
                 ...sellable(h.quantity, h.sellable_quantity),
               ],
@@ -320,6 +320,7 @@ function UsView({ data, onSold, openOrders }: { data: UsAccount; onSold: () => v
                         status: null,
                         sell: { quantity: h.quantity, sellableQuantity: h.sellable_quantity, onAccepted: onSold },
                       }),
+              sellNote: h.exchange === null ? "앱에서 매도" : undefined,
               value: usd(h.evaluation_amount),
               valueSub: formatKrw(h.evaluation_amount_krw),
               change: (
