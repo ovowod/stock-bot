@@ -60,8 +60,18 @@ RECORD_WRITE_SECONDS = 5.0
 NEUTRAL_COLOR = 0x8B8F98
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
-# (감시 중인지, 감시 안 함의 이유, 상태 조회의 stocks)
-WatchState = tuple[bool, str | None, list[dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class WatchState:
+    """상태 조회가 읽는 감시의 지금 모습. 설정도 감시가 쓰고 있는 것을 그대로 준다."""
+
+    watching: bool
+    not_watching_reason: str | None
+    stocks: list[dict[str, Any]]
+    # 감시가 쓰고 있는 Trailing Stop 세션과 제외종목. 설정 파일을 읽지 못해 멈춰 있으면 None이다.
+    sessions: list[dict[str, Any]] | None
+    excluded: list[str]
 
 
 @dataclass
@@ -138,14 +148,11 @@ class TrailingStopWatcher:
             if watch.spec is spec:
                 watch.settings_saved(settings)
 
-    def state(self, spec: EnvironmentSpec, stopped: str | None = None) -> WatchState | None:
-        """상태 조회가 읽는다. 지켜보지 않는 환경(실전, 인증정보 없음, 시작 전)은 None이다.
-
-        stopped를 주면 그 이유로 감시 중이 아닌 것으로 보고 기억이 있는 종목을 담는다.
-        """
+    def state(self, spec: EnvironmentSpec) -> WatchState | None:
+        """상태 조회가 읽는다. 지켜보지 않는 환경(실전, 인증정보 없음, 시작 전)은 None이다."""
         for watch in self._watches:
             if watch.spec is spec:
-                return watch.state(stopped)
+                return watch.state()
         return None
 
 
@@ -263,14 +270,20 @@ class _Watch:
         finally:
             environment_var.reset(token)
 
-    def state(self, stopped: str | None = None) -> WatchState:
+    def state(self) -> WatchState:
         """감시 중이면 읽은 보유종목을, 아니면 기억이 있는 종목을 종목코드마다 하나씩 담는다."""
-        reason = stopped or self._not_watching_reason()
+        reason = self._not_watching_reason()
         if reason is None:
             codes = sorted(self._holdings.keys() | self._ineligible.keys())
         else:
             codes = sorted(self.memory)
-        return reason is None, reason, [self._stock(code, reason is None) for code in codes]
+        return WatchState(
+            reason is None,
+            reason,
+            [self._stock(code, reason is None) for code in codes],
+            None if self._settings_broken else self._sessions,
+            sorted(self._excluded),
+        )
 
     def _not_watching_reason(self) -> str | None:
         if self._channel.stopped:
@@ -733,6 +746,9 @@ class _Watch:
                     reasons=["fill"],
                     kind=exc.kind,
                     cause=exc.message,
+                    # 세션 밖에서는 다시 시도하지 않는다. 세션 안과 같은 칸을 비워 남긴다.
+                    failed_since=None,
+                    wait_seconds=None,
                 )
                 return
             if self._run is not None:
@@ -754,14 +770,18 @@ class _Watch:
                     reason="newer_trigger",
                 )
                 continue
-            self._use_quantities(rows)
+            checked = self._use_quantities(rows)
             log(
                 logger,
                 logging.INFO,
                 "trailing_stop_holdings_refreshed",
                 run=None,
                 reasons=["fill"],
+                count=len(checked.eligible),
+                excluded=len(checked.eligible.keys() & self._excluded),
                 memory_count=len(self.memory),
+                unknown_exchange_codes=checked.unknown_exchange_codes,
+                **checked.counts,
             )
             return
 

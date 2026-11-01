@@ -1,6 +1,7 @@
 """Trailing Stop 상태 조회: 계좌 확인의 Trailing Stop 보기가 3초마다 부른다.
 
-키움을 부르지 않는다. 설정은 자동매매 설정 파일에서, 감시 여부·이유·종목은 감시의 메모리에서 읽는다.
+키움을 부르지 않는다. 감시 여부·이유·종목과 설정은 감시의 메모리에서 읽는다.
+감시하지 않는 환경(실전, 인증정보 없음)만 설정을 자동매매 설정 파일에서 읽는다.
 고점 기록 파일은 읽지 않는다. 감시의 메모리가 그보다 앞서 있다.
 """
 
@@ -35,17 +36,19 @@ class TrailingStopStatus:
         self._now = now
 
     def read(self, spec: EnvironmentSpec) -> dict[str, Any]:
-        """성공한 조회는 DEBUG로만 남긴다. 3초마다 불려 INFO 로그를 채우지 않게 한다."""
-        try:
-            settings: dict[str, Any] | None = self._settings.read(spec, quiet=True)
-        except AppError:
-            # 읽지 못한 원인은 설정 저장소가 ERROR로 남겼다. 조회는 이유를 담아 답한다.
-            settings = None
-        sessions = [] if settings is None else settings["sessions"]
+        """성공한 조회는 DEBUG로만 남긴다. 3초마다 불려 INFO 로그를 채우지 않게 한다.
+
+        감시하는 환경은 감시가 쓰고 있는 설정으로 답한다. 실행 중에 설정 파일이 깨져도 감시는
+        시작·저장 때 읽은 설정으로 계속 판정하므로, 파일을 따로 읽으면 화면이 감시와 어긋난다.
+        """
+        state = self._watcher.state(spec)
+        if state is None:
+            watching, reason, stocks, sessions, excluded = self._unwatched(spec)
+        else:
+            watching, reason, stocks = state.watching, state.not_watching_reason, state.stocks
+            sessions, excluded = state.sessions or [], state.excluded
         found = session_at(sessions, self._now(), spec.market, include_disabled=True)
         session = None if found is None else found[1]
-        watching, reason, stocks = self._watch_state(spec, settings is not None)
-        excluded = [] if settings is None else [item["code"] for item in settings["excluded"]]
         log(
             logger,
             logging.DEBUG,
@@ -67,18 +70,24 @@ class TrailingStopStatus:
             "stocks": stocks,
         }
 
-    def _watch_state(
-        self, spec: EnvironmentSpec, settings_ok: bool
-    ) -> tuple[bool, str | None, list[dict[str, Any]]]:
-        """(감시 중인지, 감시 안 함의 이유, 종목들). 실전투자는 감시하지 않는다."""
-        if spec.is_real:
-            return False, "real", []
+    def _unwatched(
+        self, spec: EnvironmentSpec
+    ) -> tuple[bool, str | None, list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+        """감시하지 않는 환경(실전, 인증정보 없음, 서버 시작 전). 설정은 파일에서 읽는다."""
         try:
-            self._kiwoom.credentials(spec)
+            settings: dict[str, Any] | None = self._settings.read(spec, quiet=True)
         except AppError:
-            return False, "no_credentials", []
-        # 설정 파일을 읽지 못하면 감시 중이 아닌 것으로 보고, 기억이 있는 종목만 담는다.
-        stopped = None if settings_ok else "settings_unreadable"
-        state = self._watcher.state(spec, stopped)
-        # 감시가 아직 시작되지 않았으면(서버 시작 전) 켜진 세션이 없는 것과 같다.
-        return (False, stopped or "no_session", []) if state is None else state
+            # 읽지 못한 원인은 설정 저장소가 ERROR로 남겼다. 조회는 이유를 담아 답한다.
+            settings = None
+        if spec.is_real:
+            reason = "real"
+        else:
+            try:
+                self._kiwoom.credentials(spec)
+                reason = "no_session" if settings is not None else "settings_unreadable"
+            except AppError:
+                reason = "no_credentials"
+        if settings is None:
+            return False, reason, [], [], []
+        excluded = [item["code"] for item in settings["excluded"]]
+        return False, reason, [], settings["sessions"], excluded

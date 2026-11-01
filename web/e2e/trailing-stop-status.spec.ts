@@ -280,7 +280,8 @@ test("실전 환경은 제외종목도 감시 안 함 · 실전투자이고 제�
   await expect(page.getByText("제외종목", { exact: true }).filter({ visible: true })).toHaveCount(isMobile ? 0 : 1);
   await expect(visible(row(page, "삼성전자"), "+20.71%")).toBeVisible();
   await expectFact(row(page, "SK하이닉스"), isMobile, "제외종목", "000660 · 미도달 (기준 5%) · 제외종목", "예");
-  await expectFact(row(page, "삼성전자"), isMobile, "도달 여부", "005930 · 도달 (세션 밖)", "도달 (세션 밖)");
+  // 실전은 세션 밖이 아니라 감시하지 않는 것이다.
+  await expectFact(row(page, "삼성전자"), isMobile, "도달 여부", "005930 · 도달 (감시 안 함)", "도달 (감시 안 함)");
 });
 
 test("같은 종목의 신용 줄은 대상 아님 · 신용이고 현금 줄은 따로 판정한다", async ({ page }) => {

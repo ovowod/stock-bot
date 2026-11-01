@@ -272,7 +272,8 @@ function trailingStopItem(row: HoldingRow, status: TrailingStopStatus | null): H
 /**
  * 아직 활성화되지 않은 종목의 활성화 수익률 도달 여부. 지금 시각을 포함하는 세션의 기준과 비교한다.
  * 세션이 없거나 그 세션에 활성화 수익률이 없으면(꺼진 세션은 비어 있을 수 있다) 비교하지 않는다.
- * 감시 중이 아니면 활성화되지 않으므로 "세션 밖"이다. 감시 중인데 활성화 전이면 서버가 그 가격의
+ * 감시 중이 아니면 활성화되지 않는다. 켜진 세션이 없으면 "세션 밖", 장애·실전투자로 멈췄으면
+ * "감시 안 함"이다(이유는 상태 칸에 있다). 감시 중인데 활성화 전이면 서버가 그 가격의
  * 시세 체결을 아직 판정하지 않은 것이다(계좌 현재가로 계산한 경우).
  */
 function reachText(
@@ -285,7 +286,8 @@ function reachText(
   // 서버 판정(가격 ≥ 평균 매입가 × (1 + 활성화 수익률/100))과 같은 식을 나눗셈 없이 비교해 경계에서 어긋나지 않게 한다.
   const reached = (current - purchase) * 100 >= purchase * Number(activation);
   if (!reached) return `미도달 (기준 ${activation}%)`;
-  return status.watching ? "도달 (판정 전)" : "도달 (세션 밖)";
+  if (status.watching) return "도달 (판정 전)";
+  return status.not_watching_reason === "no_session" ? "도달 (세션 밖)" : "도달 (감시 안 함)";
 }
 
 /** 고점 대비 하락률. 소수 첫째 자리까지, 내려가면 −를 붙인다(예: −1.0%). */

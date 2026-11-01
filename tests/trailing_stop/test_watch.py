@@ -1213,7 +1213,8 @@ async def test_memory_stays_ahead_of_a_stale_record_across_session_change_and_se
     assert len(ts_alerts(discord)) == 1
 
 
-async def test_status_lists_remembered_stocks_while_the_settings_file_is_unreadable(data_dir):
+async def test_settings_file_broken_while_running_does_not_change_the_status(data_dir):
+    """감시는 시작·저장 때 읽은 설정으로 계속 판정한다. 상태 조회도 그 설정으로 답한다."""
     write_ts(data_dir)
     realtime = FakeRealtime()
     async with running(realtime, ts_kiwoom(), data_dir) as app:
@@ -1221,8 +1222,25 @@ async def test_status_lists_remembered_stocks_while_the_settings_file_is_unreada
         connection.push(quote(price="+63000"))
         await until_status(app, lambda b: b["stocks"][0]["status"] == "tracking")
         (data_dir / "auto-trading" / "domestic_paper.json").write_text("{not json")
+        connection.push(quote(price="+64000"))
+        body = await until_status(app, lambda b: b["stocks"][0]["peak"] == "64000")
+
+    assert (body["watching"], body["not_watching_reason"]) == (True, None)
+    assert body["session"] is not None
+
+
+async def test_status_lists_remembered_stocks_while_the_settings_file_is_unreadable(data_dir):
+    write_record(data_dir, {"005930": remembered(AT_10, "63000", AT_10)})
+    path = data_dir / "auto-trading" / "domestic_paper.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    async with running(FakeRealtime(), ts_kiwoom(), data_dir) as app:
         body = await status(app)
 
-    assert body["not_watching_reason"] == "settings_unreadable"
+    assert (body["not_watching_reason"], body["session"], body["excluded"]) == (
+        "settings_unreadable",
+        None,
+        [],
+    )
     [item] = body["stocks"]
     assert (item["status"], item["peak"], item["purchase_price"]) == ("tracking", "63000", None)
