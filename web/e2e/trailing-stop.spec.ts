@@ -146,7 +146,7 @@ test("자동매매 → SL / TP 아래의 Trailing Stop에서 안내 문구와 �
   const menu = page.getByRole("button", { name: "메뉴 열기" });
   if (await menu.isVisible()) await menu.click();
   const items = page.getByRole("group", { name: "자동매매" }).filter({ visible: true }).getByRole("button");
-  await expect(items).toHaveText(["SL / TP", "Trailing Stop"]);
+  await expect(items).toHaveText(["SL / TP", "Trailing Stop", "Dead Cross"]);
   await items.nth(1).click();
 
   await expect(page.getByRole("heading", { name: "Trailing Stop", exact: true })).toBeVisible();

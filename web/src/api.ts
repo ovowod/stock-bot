@@ -430,6 +430,14 @@ export interface TrailingStopSession extends BaseSession {
   drop_from_peak: string | null;
 }
 
+export interface DeadCrossSession extends BaseSession {
+  /** 봉 주기. "5m"처럼 분봉 단위, 일봉은 "1d". 정하지 않으면 null. */
+  bar_period: string | null;
+  /** 이동평균에 넣는 완료된 봉의 개수(정수). 정하지 않으면 null. */
+  short_period: number | null;
+  long_period: number | null;
+}
+
 /** 화면에서 고치고 저장하는 값. */
 export interface SettingsDraft<S> {
   excluded: ExcludedStock[];
@@ -457,6 +465,8 @@ export type SlTpDraft = SettingsDraft<SlTpSession>;
 export type SlTpSettings = FeatureSettings<SlTpSession>;
 export type TrailingStopDraft = SettingsDraft<TrailingStopSession>;
 export type TrailingStopSettings = FeatureSettings<TrailingStopSession>;
+export type DeadCrossDraft = SettingsDraft<DeadCrossSession>;
+export type DeadCrossSettings = FeatureSettings<DeadCrossSession>;
 
 export function fetchSlTp(environment: EnvironmentValue, signal: AbortSignal): Promise<SlTpSettings> {
   return getJson<SlTpSettings>(`/api/environments/${environment}/sl-tp`, signal);
@@ -472,6 +482,14 @@ export function fetchTrailingStop(environment: EnvironmentValue, signal: AbortSi
 
 export function saveTrailingStop(environment: EnvironmentValue, draft: TrailingStopDraft): Promise<TrailingStopSettings> {
   return putJson<TrailingStopSettings>(`/api/environments/${environment}/trailing-stop`, draft);
+}
+
+export function fetchDeadCross(environment: EnvironmentValue, signal: AbortSignal): Promise<DeadCrossSettings> {
+  return getJson<DeadCrossSettings>(`/api/environments/${environment}/dead-cross`, signal);
+}
+
+export function saveDeadCross(environment: EnvironmentValue, draft: DeadCrossDraft): Promise<DeadCrossSettings> {
+  return putJson<DeadCrossSettings>(`/api/environments/${environment}/dead-cross`, draft);
 }
 
 /** Trailing Stop 감시 안 함의 이유. */

@@ -1,4 +1,5 @@
 import {
+  ChartSpline,
   ChevronRight,
   LogOut,
   Menu,
@@ -17,6 +18,7 @@ import type { EnvironmentValue } from "./api";
 import { ENVIRONMENTS, findEnvironment, loadEnvironment, saveEnvironment } from "./environments";
 import { AccountPage } from "./features/account/AccountPage";
 import { useLogout } from "./features/auth/AuthGate";
+import { DeadCrossPage } from "./features/dead-cross/DeadCrossPage";
 import { OrderPanelProvider } from "./features/order/OrderPanel";
 import { RankingPage } from "./features/ranking/RankingPage";
 import { SlTpPage } from "./features/sl-tp/SlTpPage";
@@ -81,6 +83,12 @@ const GROUPS: FeatureGroup[] = [
         label: "Trailing Stop",
         icon: TrendingDown,
         render: (environment) => <TrailingStopPage key={environment} environment={environment} />,
+      },
+      {
+        id: "dead-cross",
+        label: "Dead Cross",
+        icon: ChartSpline,
+        render: (environment) => <DeadCrossPage key={environment} environment={environment} />,
       },
     ],
   },
