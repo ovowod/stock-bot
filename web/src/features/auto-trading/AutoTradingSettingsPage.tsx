@@ -8,11 +8,13 @@ import type {
   RegularHours,
   StockSearchItem,
 } from "../../api";
-import { findEnvironment } from "../../environments";
+import { findEnvironment, type EnvironmentOption } from "../../environments";
 import { ErrorNotice, Panel } from "../account/parts";
 import { useStockSearch } from "../search/useStockSearch";
 import { hasErrors, koreaTime, TIMEZONE_NAMES } from "./rules";
 import { useAutoTradingSettings, type FeatureApi } from "./useAutoTradingSettings";
+
+type Market = EnvironmentOption["market"];
 
 /** 한 세션의 칸별 안내. 시각 안내는 모든 기능에 있고, 나머지는 기능마다 다르다. */
 export type SessionErrorsOf = { time: string | null } & Record<string, string | null>;
@@ -22,6 +24,8 @@ export interface SessionDetailsProps<S, E> {
   /** 1부터 센 세션 번호. 칸 이름과 안내 id에 쓴다. */
   n: number;
   error: E;
+  /** 기준 칸의 선택지가 시장마다 다를 때 쓴다(예: Dead Cross의 봉 주기). */
+  market: Market;
   disabled: boolean;
   update: (change: Partial<S>) => void;
 }
@@ -48,12 +52,12 @@ export function AutoTradingSettingsPage<S extends BaseSession, E extends Session
   sessionName: string;
   idPrefix: string;
   nextSession: (sessions: S[], hours: RegularHours) => S | null;
-  sessionErrors: (sessions: S[], hours: RegularHours) => E[];
+  sessionErrors: (sessions: S[], hours: RegularHours, market: Market) => E[];
   renderDetails: (props: SessionDetailsProps<S, E>) => ReactNode;
 }) {
   const env = findEnvironment(environment);
   const { state, draft, setDraft, dirty, saving, save, retry } = useAutoTradingSettings(environment, feature);
-  const errors = state.status === "ready" ? sessionErrors(draft.sessions, state.saved.regular_hours) : [];
+  const errors = state.status === "ready" ? sessionErrors(draft.sessions, state.saved.regular_hours, state.saved.market) : [];
   const invalid = hasErrors(errors);
   const [first, ...rest] = notice;
 
@@ -321,7 +325,14 @@ function SessionsSection<S extends BaseSession, E extends SessionErrorsOf>({
                   />
                 </div>
                 <FieldError id={timeId} message={error.time} />
-                {renderDetails({ session, n, error, disabled, update: (change) => update(index, change) })}
+                {renderDetails({
+                  session,
+                  n,
+                  error,
+                  market: settings.market,
+                  disabled,
+                  update: (change) => update(index, change),
+                })}
               </li>
             );
           })}

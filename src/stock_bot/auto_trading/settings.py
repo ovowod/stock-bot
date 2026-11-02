@@ -38,8 +38,8 @@ class Invalid(ValueError):
     """설정이 검사 규칙에 맞지 않는다. 메시지는 사용자에게 그대로 보여준다."""
 
 
-# (세션 항목, 켜짐 여부, 위치 문구) → 기준 칸만 남긴 dict. 맞지 않으면 Invalid.
-Criteria = Callable[[dict[str, Any], bool, str], dict[str, Any]]
+# (세션 항목, 켜짐 여부, 위치 문구, 시장) → 기준 칸만 남긴 dict. 맞지 않으면 Invalid.
+Criteria = Callable[[dict[str, Any], bool, str, Market], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -364,7 +364,7 @@ def _validate_sessions(items: list[Any], feature: Feature, market: Market) -> li
                 "start": start,
                 "end": end,
                 "enabled": enabled,
-                **feature.criteria(item, enabled, where),
+                **feature.criteria(item, enabled, where, market),
             }
         )
     return result

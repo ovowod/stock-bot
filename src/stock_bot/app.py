@@ -34,6 +34,7 @@ from stock_bot.core.errors import AppError, error_response
 from stock_bot.core.http import json_body
 from stock_bot.core.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.core.notification import DiscordNotifier, Embed
+from stock_bot.dead_cross.settings import DEAD_CROSS
 from stock_bot.fill.feed import FillFeed
 from stock_bot.fill.watch import FillWatcher
 from stock_bot.kiwoom.kiwoom import KiwoomClient
@@ -129,11 +130,15 @@ def create_app(
     feed = FillFeed(realtime)
     fills = FillWatcher(kiwoom, open_orders, notifier, feed, auto_sell)
     data_dir = data_dir or DATA_DIR
-    auto_trading = AutoTradingSettingsFile(data_dir / "auto-trading", [SL_TP, TRAILING_STOP])
+    auto_trading = AutoTradingSettingsFile(
+        data_dir / "auto-trading", [SL_TP, TRAILING_STOP, DEAD_CROSS]
+    )
     # 예전 SL / TP 파일은 서버가 시작할 때 한 번 옮긴다. 옮기지 못하면 서버를 시작하지 않는다.
     auto_trading.migrate(data_dir / "sl-tp", SL_TP)
     sl_tp = FeatureSettingsStore(auto_trading, SL_TP)
     trailing_stop = FeatureSettingsStore(auto_trading, TRAILING_STOP)
+    # Dead Cross는 아직 매도 동작이 없어 저장을 알릴 곳이 없다.
+    dead_cross = FeatureSettingsStore(auto_trading, DEAD_CROSS)
     sl_tp_watch = SlTpWatcher(
         kiwoom, sl_tp, holdings.positions, auto_sell, realtime, feed, notifier, now
     )
@@ -291,6 +296,14 @@ def create_app(
     @app.get("/api/environments/{environment}/trailing-stop/status")
     async def get_trailing_stop_status(spec: Spec) -> dict[str, Any]:
         return trailing_stop_status.read(spec)
+
+    @app.get("/api/environments/{environment}/dead-cross")
+    async def get_dead_cross(spec: Spec) -> dict[str, Any]:
+        return dead_cross.read(spec)
+
+    @app.put("/api/environments/{environment}/dead-cross")
+    async def put_dead_cross(spec: Spec, request: Request) -> dict[str, Any]:
+        return await dead_cross.save(spec, await json_body(request))
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")
