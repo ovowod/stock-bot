@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import {
   ApiError,
+  fetchDeadCrossStatus,
   fetchTrailingStopStatus,
+  type DeadCrossReason,
+  type DeadCrossStatus,
+  type DeadCrossStock,
   type EnvironmentValue,
   type NotWatchingReason,
   type TrailingStopStatus,
@@ -9,6 +13,7 @@ import {
   type TrailingStopStock,
 } from "../../api";
 import { EMPTY, formatRate } from "../../format";
+import { basisText } from "../dead-cross/rules";
 import { Change, HoldingsList, Panel, type HoldingView } from "./parts";
 
 type Detail = { label: string; value: string };
@@ -29,11 +34,12 @@ export interface HoldingRow {
   sellable: Detail[];
 }
 
-type ViewMode = "basic" | "trailing_stop";
+type ViewMode = "basic" | "trailing_stop" | "dead_cross";
 
 const VIEWS: { value: ViewMode; label: string }[] = [
   { value: "basic", label: "기본" },
   { value: "trailing_stop", label: "Trailing Stop" },
+  { value: "dead_cross", label: "Dead Cross" },
 ];
 const VIEW_KEY = "stock-bot:holdings-view";
 // 화면이 열려 있고 탭이 보이는 동안 상태를 다시 받는 간격.
@@ -42,7 +48,8 @@ const POLL_MS = 3000;
 /** 저장값이 없거나 저장소를 쓸 수 없으면 기본 보기로 연다. */
 function loadView(): ViewMode {
   try {
-    return localStorage.getItem(VIEW_KEY) === "trailing_stop" ? "trailing_stop" : "basic";
+    const saved = localStorage.getItem(VIEW_KEY);
+    return VIEWS.find((option) => option.value === saved)?.value ?? "basic";
   } catch {
     return "basic";
   }
@@ -56,11 +63,13 @@ function saveView(view: ViewMode): void {
   }
 }
 
-/** 보유종목 패널. 목록 위에서 [기본 | Trailing Stop] 보기를 바꾼다. */
+/** 보유종목 패널. 목록 위에서 [기본 | Trailing Stop | Dead Cross] 보기를 바꾼다. */
 export function HoldingsPanel({ environment, rows }: { environment: EnvironmentValue; rows: HoldingRow[] }) {
   const [view, setView] = useState<ViewMode>(loadView);
   const trailing = view === "trailing_stop";
-  const { status, error } = useTrailingStopStatus(environment, trailing);
+  const deadCross = view === "dead_cross";
+  const { status, error } = usePolledStatus(fetchTrailingStopStatus, environment, trailing);
+  const crossStatus = usePolledStatus(fetchDeadCrossStatus, environment, deadCross);
   const choose = (next: ViewMode) => {
     setView(next);
     saveView(next);
@@ -84,9 +93,12 @@ export function HoldingsPanel({ environment, rows }: { environment: EnvironmentV
           {status?.session && <p className="text-xs break-keep text-sub">지금 세션 {criteriaText(status)}</p>}
         </div>
       )}
+      {deadCross && <DeadCrossNotice status={crossStatus.status} error={crossStatus.error} />}
       <HoldingsList
-        items={rows.map((row) => (trailing ? trailingStopItem(row, status) : row.item))}
-        expandable={trailing}
+        items={rows.map((row) =>
+          trailing ? trailingStopItem(row, status) : deadCross ? deadCrossItem(row, crossStatus.status) : row.item,
+        )}
+        expandable={trailing || deadCross}
       />
     </Panel>
   );
@@ -117,11 +129,15 @@ function ViewToggle({ value, onChange }: { value: ViewMode; onChange: (value: Vi
 }
 
 /**
- * active인 동안 Trailing Stop 상태를 받는다. 처음과 탭이 다시 보일 때는 바로, 그 뒤로는 3초마다 받는다.
+ * active인 동안 상태(Trailing Stop·Dead Cross)를 받는다. 처음과 탭이 다시 보일 때는 바로, 그 뒤로는 3초마다 받는다.
  * 탭이 숨으면 멈춘다. 실패하면 마지막으로 받은 상태를 두고 error에 담는다.
  */
-function useTrailingStopStatus(environment: EnvironmentValue, active: boolean) {
-  const [status, setStatus] = useState<TrailingStopStatus | null>(null);
+function usePolledStatus<T>(
+  fetcher: (environment: EnvironmentValue, signal: AbortSignal) => Promise<T>,
+  environment: EnvironmentValue,
+  active: boolean,
+) {
+  const [status, setStatus] = useState<T | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
 
   useEffect(() => {
@@ -137,7 +153,7 @@ function useTrailingStopStatus(environment: EnvironmentValue, active: boolean) {
       const current = new AbortController();
       controller = current;
       try {
-        const data = await fetchTrailingStopStatus(environment, current.signal);
+        const data = await fetcher(environment, current.signal);
         if (current.signal.aborted) return;
         setStatus(data);
         setError(null);
@@ -155,7 +171,7 @@ function useTrailingStopStatus(environment: EnvironmentValue, active: boolean) {
       document.removeEventListener("visibilitychange", onVisibility);
       stop();
     };
-  }, [environment, active]);
+  }, [fetcher, environment, active]);
 
   return { status, error };
 }
@@ -186,13 +202,14 @@ const FAILED: Record<NonNullable<TrailingStopAutoSell["reason"]>, string> = {
   cancelled: "보내기 전 취소",
 };
 
-type Tone = "muted" | "waiting" | "tracking" | "triggered";
+type Tone = "muted" | "waiting" | "tracking" | "triggered" | "crossed";
 
 const TONE: Record<Tone, string> = {
   muted: "bg-canvas text-muted",
   waiting: "bg-canvas text-sub",
   tracking: "bg-brand-50 text-brand-700",
   triggered: "bg-loss-soft text-loss",
+  crossed: "bg-loss-soft text-loss",
 };
 
 /** Trailing Stop 상태. 이름과 이유를 가운뎃점으로 잇는다(예: 감시 안 함 · 켜진 세션 없음). */
@@ -379,4 +396,126 @@ function StatusBadge({ label }: { label: StatusLabel | null }) {
       {label.parts.length > 1 && <span className="hidden md:inline"> · {label.parts.slice(1).join(" · ")}</span>}
     </span>
   );
+}
+
+const CROSS_REASON: Record<DeadCrossReason, string> = {
+  no_session: "켜진 세션 없음",
+  real: "실전투자",
+  excluded: "제외종목",
+  not_enough_bars: "봉 부족",
+  chart_failed: "차트 조회 실패",
+  holdings_pending: "보유종목 확인 중",
+  fills_rejected: "체결 등록 거부",
+  connection_replaced: "실시간 연결이 밀려남",
+  settings_unreadable: "설정 파일을 읽지 못함",
+  state_unreadable: "판정 기록을 읽지 못함",
+  no_credentials: "인증정보 없음",
+};
+
+const CROSS_INELIGIBLE: Record<NonNullable<DeadCrossStock["ineligible_reason"]>, string> = {
+  duplicate: "같은 종목 여러 줄",
+  unknown_exchange: "거래소 확인 불가",
+};
+
+/** Dead Cross 보기 목록 위의 안내와 조회 실패. */
+function DeadCrossNotice({ status, error }: { status: DeadCrossStatus | null; error: ApiError | null }) {
+  const session = status?.session ?? null;
+  const basis = status && session ? basisText(status.market, session) : null;
+  return (
+    <div className="mb-2 space-y-2">
+      {error && (
+        <p role="alert" className="rounded-xl bg-real-soft px-3 py-2 text-sm break-keep text-real">
+          Dead Cross 상태를 불러오지 못했습니다.{status && " 마지막으로 받은 상태를 보여줍니다."} {error.message}
+        </p>
+      )}
+      <p className="text-xs break-keep text-sub">상태만 계산하고 팔지 않습니다.</p>
+      <p className="text-xs break-keep text-muted">
+        이동평균은 완료된 봉의 종가로 계산하며 진행 중인 봉은 넣지 않습니다. 키움 차트처럼 정규장 밖 봉도 포함합니다.
+      </p>
+      {session && (
+        <p className="text-xs break-keep text-sub">
+          지금 세션 {session.start}–{session.end}
+          {session.enabled ? "" : " (꺼짐)"}
+          {basis && ` · ${basis}`}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** 서버의 상태와 계좌 줄을 합쳐 Dead Cross 상태를 정한다. 순서가 우선순위다. 신용 줄은 stocks와 합치지 않는다. */
+function crossLabel(row: HoldingRow, status: DeadCrossStatus, stock: DeadCrossStock | undefined): StatusLabel {
+  const reason = status.not_watching_reason;
+  if (reason === "real") return { parts: ["계산 대기", CROSS_REASON.real], tone: "muted" };
+  if (status.excluded.includes(row.code)) return { parts: ["계산 대기", CROSS_REASON.excluded], tone: "muted" };
+  if (row.credit) return { parts: ["계산 대기", "대상 아님", "신용"], tone: "muted" };
+  if (stock?.status === "ineligible") {
+    const why = stock.ineligible_reason ? [CROSS_INELIGIBLE[stock.ineligible_reason]] : [];
+    return { parts: ["계산 대기", "대상 아님", ...why], tone: "muted" };
+  }
+  if (stock?.status === "tracking" || stock?.status === "crossed") {
+    const name = stock.status === "tracking" ? "추적 중" : "데드크로스 발생";
+    // 기억은 남아 있지만 갱신이 멈췄다. 세션 밖이면 "세션 밖, 갱신 멈춤"이다.
+    const why = stock.reason === null ? [] : stock.reason === "no_session" ? ["세션 밖, 갱신 멈춤"] : [CROSS_REASON[stock.reason]];
+    return { parts: [name, ...why], tone: stock.status };
+  }
+  if (!status.watching) return { parts: ["계산 대기", ...(reason ? [CROSS_REASON[reason]] : [])], tone: "muted" };
+  if (stock) return { parts: ["계산 대기", ...(stock.reason ? [CROSS_REASON[stock.reason]] : [])], tone: "waiting" };
+  return { parts: ["계산 대기", CROSS_REASON.holdings_pending], tone: "muted" };
+}
+
+const MA_FORMAT = {
+  domestic: new Intl.NumberFormat("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  us: new Intl.NumberFormat("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 }),
+};
+
+/** 이동평균. 서버가 준 자리수(국내 소수 둘째, 미국 넷째)를 그대로 보인다. 미국은 달러 표기다. */
+function maText(value: string | null, market: DeadCrossStatus["market"]): string {
+  if (value === null) return EMPTY;
+  const formatted = MA_FORMAT[market].format(Number(value));
+  return market === "us" ? `$${formatted}` : formatted;
+}
+
+/** Dead Cross 보기의 줄. 오른쪽 값, 정보 줄, 상세 칸만 바꾸고 매도 버튼과 안내는 그대로 둔다. */
+function deadCrossItem(row: HoldingRow, status: DeadCrossStatus | null): HoldingView {
+  const stock = row.credit ? undefined : status?.stocks.find((s) => s.code === row.code);
+  const label = status ? crossLabel(row, status, stock) : null;
+  const stamp = (iso: string | null | undefined) => (status && iso ? stampText(iso, status.timezone) : EMPTY);
+  const market = status?.market ?? "domestic";
+  const values =
+    stock?.short_ma && stock.long_ma
+      ? `단기 ${maText(stock.short_ma, market)} · 장기 ${maText(stock.long_ma, market)}`
+      : null;
+  const session = status?.session ?? null;
+  const current = status && session ? basisText(status.market, session) : null;
+  const shown = status && stock?.basis ? basisText(status.market, stock.basis) : null;
+  // 보이는 값이 지금 세션과 다른 기준(이전 세션, 바꾸기 전 설정)으로 계산된 것이면 알린다.
+  const basis = shown === null ? EMPTY : shown === current ? shown : `이전 기준 값 · ${shown}`;
+  const crossed = stock?.crossed_at ? `${stamp(stock.crossed_at)} · ${stamp(stock.crossed_bar)} 봉` : EMPTY;
+  const excluded = status ? status.excluded.includes(row.code) : null;
+  const active = status === null ? EMPTY : session?.enabled ? "예" : "아니요";
+  return {
+    ...row.item,
+    value: <StatusBadge label={label} />,
+    valueSub: undefined,
+    info: [
+      ...row.keepInfo,
+      // 정보 줄에는 이동평균만 둔다. 값이 없으면 상태 이유를 둔다(상세에도 있다).
+      ...(values ? [values] : label && label.parts.length > 1 ? [label.parts.slice(1).join(" · ")] : []),
+      ...row.sellable.map((d) => `${d.label} ${d.value}`),
+    ],
+    details: [
+      { label: "상태", value: label ? label.parts.join(" · ") : EMPTY },
+      ...row.keepDetails,
+      { label: "지금 세션 기준", value: current ?? EMPTY },
+      { label: "단기 이동평균", value: maText(stock?.short_ma ?? null, market) },
+      { label: "장기 이동평균", value: maText(stock?.long_ma ?? null, market) },
+      { label: "계산 기준", value: basis },
+      { label: "마지막 판정 봉", value: stamp(stock?.judged_bar) },
+      { label: "데드크로스 발생", value: crossed },
+      { label: "활성 세션", value: active },
+      { label: "제외종목", value: excluded === null ? EMPTY : excluded ? "예" : "아니요" },
+      ...row.sellable,
+    ],
+  };
 }

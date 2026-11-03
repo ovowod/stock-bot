@@ -550,6 +550,60 @@ export function fetchTrailingStopStatus(environment: EnvironmentValue, signal: A
   return getJson<TrailingStopStatus>(`/api/environments/${environment}/trailing-stop/status`, signal);
 }
 
+/** Dead Cross 계산 대기의 이유. 추적 중·데드크로스 발생이어도 갱신이 멈췄으면 그 이유가 온다. */
+export type DeadCrossReason =
+  | "no_session"
+  | "real"
+  | "excluded"
+  | "not_enough_bars"
+  | "chart_failed"
+  | "holdings_pending"
+  | "fills_rejected"
+  | "connection_replaced"
+  | "settings_unreadable"
+  | "state_unreadable"
+  | "no_credentials";
+
+/** 이동평균을 계산한 봉 주기와 기간. */
+export interface DeadCrossBasis {
+  bar_period: string;
+  short_period: number;
+  long_period: number;
+}
+
+/** 감시가 판정한 종목 하나. 이동평균은 문자열 소수, 시각은 UTC ISO 8601이다. 봉 시각은 봉의 시작 시각이다. */
+export interface DeadCrossStock {
+  code: string;
+  status: "waiting" | "tracking" | "crossed" | "ineligible";
+  reason: DeadCrossReason | null;
+  ineligible_reason: "duplicate" | "unknown_exchange" | null;
+  short_ma: string | null;
+  long_ma: string | null;
+  /** short_ma·long_ma를 계산한 기준. 지금 세션의 기준과 다를 수 있다. */
+  basis: DeadCrossBasis | null;
+  judged_bar: string | null;
+  crossed_at: string | null;
+  crossed_bar: string | null;
+}
+
+export interface DeadCrossStatus {
+  environment: EnvironmentValue;
+  market: "domestic" | "us";
+  timezone: string;
+  watching: boolean;
+  not_watching_reason: DeadCrossReason | null;
+  /** 지금 시각을 포함하는 Dead Cross 세션. 꺼진 세션이어도 담고, 없으면 null. */
+  session: DeadCrossSession | null;
+  /** Dead Cross 제외종목 코드. */
+  excluded: string[];
+  stocks: DeadCrossStock[];
+}
+
+/** 키움을 부르지 않는 상태 조회. Dead Cross 보기가 열려 있는 동안 3초마다 부른다. */
+export function fetchDeadCrossStatus(environment: EnvironmentValue, signal: AbortSignal): Promise<DeadCrossStatus> {
+  return getJson<DeadCrossStatus>(`/api/environments/${environment}/dead-cross/status`, signal);
+}
+
 async function putJson<T>(url: string, body: unknown): Promise<T> {
   let response: Response;
   try {
