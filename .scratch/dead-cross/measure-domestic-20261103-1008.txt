@@ -1,0 +1,81 @@
+환경: domestic_paper
+실행 시각: 2026-11-03 10:07:08 KST
+뉴욕 시각: 2026-11-02 20:07:08 ET
+
+## 국내 1분봉 (ka10080) 요청: {'stk_cd': '005930', 'upd_stkpc_tp': '1', 'base_dt': '20261103', 'tic_scope': '1'}
+행 필드: ['acc_trde_qty', 'cntr_tm', 'cur_prc', 'high_pric', 'low_pric', 'open_pric', 'pred_pre', 'pred_pre_sig', 'trde_qty', 'upd_rt', 'upd_stkpc_tp']
+맨 앞 3행: [{'cur_prc': '-221000', 'trde_qty': '4092', 'cntr_tm': '20261103100700', 'open_pric': '-221000', 'high_pric': '-221500', 'low_pric': '-221000', 'acc_trde_qty': '3672113', 'pred_pre': '-8000', 'pred_pre_sig': '5', 'upd_stkpc_tp': '', 'upd_rt': ''}, {'cur_prc': '-221000', 'trde_qty': '19310', 'cntr_tm': '20261103100600', 'open_pric': '-221500', 'high_pric': '-221500', 'low_pric': '-221000', 'acc_trde_qty': '3668021', 'pred_pre': '-8000', 'pred_pre_sig': '5', 'upd_stkpc_tp': '', 'upd_rt': ''}, {'cur_prc': '-221500', 'trde_qty': '50024', 'cntr_tm': '20261103100500', 'open_pric': '-221000', 'high_pric': '-221500', 'low_pric': '-220500', 'acc_trde_qty': '3648711', 'pred_pre': '-7500', 'pred_pre_sig': '5', 'upd_stkpc_tp': '', 'upd_rt': ''}]
+1페이지: 900개, cntr_tm 20261103100700 ~ 20261030163000, cont-yn=Y
+2페이지: 900개, cntr_tm 20261030162900 ~ 20261029111400, cont-yn=Y
+3페이지: 900개, cntr_tm 20261029111300 ~ 20261027173600, cont-yn=Y
+4페이지: 900개, cntr_tm 20261027173500 ~ 20261026122000, cont-yn=Y
+5페이지: 900개, cntr_tm 20261026121900 ~ 20261022184200, cont-yn=Y
+6페이지: 900개, cntr_tm 20261022184100 ~ 20261021132600, cont-yn=Y
+7페이지: 900개, cntr_tm 20261021132500 ~ 20261019194800, cont-yn=Y
+8페이지: 900개, cntr_tm 20261019194700 ~ 20261016143200, cont-yn=Y
+9페이지: 900개, cntr_tm 20261016143100 ~ 20261015092500, cont-yn=Y
+10페이지: 900개, cntr_tm 20261015092400 ~ 20261013150900, cont-yn=Y
+11페이지: 900개, cntr_tm 20261013150800 ~ 20261012103100, cont-yn=Y
+12페이지: 900개, cntr_tm 20261012103000 ~ 20261007165300, cont-yn=Y
+13페이지: 900개, cntr_tm 20261007165200 ~ 20261006113700, cont-yn=Y
+14페이지: 900개, cntr_tm 20261006113600 ~ 20261001175800, cont-yn=Y
+15페이지: 900개, cntr_tm 20261001175700 ~ 20260930124200, cont-yn=Y
+16페이지: 900개, cntr_tm 20260930124100 ~ 20260928190400, cont-yn=Y
+17페이지: 900개, cntr_tm 20260928190300 ~ 20260923134800, cont-yn=Y
+18페이지: 900개, cntr_tm 20260923134700 ~ 20260922091000, cont-yn=Y
+19페이지: 900개, cntr_tm 20260922090900 ~ 20260918145400, cont-yn=Y
+20페이지: 900개, cntr_tm 20260918145300 ~ 20260917101600, cont-yn=Y
+21페이지: 900개, cntr_tm 20260917101500 ~ 20260915163800, cont-yn=Y
+22페이지: 900개, cntr_tm 20260915163700 ~ 20260914112200, cont-yn=Y
+23페이지: 900개, cntr_tm 20260914112100 ~ 20260910090600, cont-yn=Y
+24페이지: 900개, cntr_tm 20260910090500 ~ 20260907131200, cont-yn=Y
+25페이지: 900개, cntr_tm 20260907131100 ~ 20260903105600, cont-yn=Y
+26페이지: 900개, cntr_tm 20260903105500 ~ 20260831150200, cont-yn=Y
+27페이지: 900개, cntr_tm 20260831150100 ~ 20260827124600, cont-yn=Y
+28페이지: 900개, cntr_tm 20260827124500 ~ 20260825103000, cont-yn=Y
+29페이지: 900개, cntr_tm 20260825102900 ~ 20260820143600, cont-yn=Y
+30페이지: 900개, cntr_tm 20260820143500 ~ 20260818122000, cont-yn=Y
+31페이지: 900개, cntr_tm 20260818121900 ~ 20260813100400, cont-yn=Y
+32페이지: 900개, cntr_tm 20260813100300 ~ 20260810141000, cont-yn=Y
+33페이지: 900개, cntr_tm 20260810140900 ~ 20260806115400, cont-yn=Y
+34페이지: 900개, cntr_tm 20260806115300 ~ 20260804093800, cont-yn=Y
+35페이지: 900개, cntr_tm 20260804093700 ~ 20260730134200, cont-yn=Y
+36페이지: 900개, cntr_tm 20260730134100 ~ 20260728105600, cont-yn=Y
+37페이지: 900개, cntr_tm 20260728105500 ~ 20260723143200, cont-yn=Y
+38페이지: 900개, cntr_tm 20260723143100 ~ 20260721121600, cont-yn=Y
+39페이지: 900개, cntr_tm 20260721121500 ~ 20260716100000, cont-yn=Y
+40페이지: 900개, cntr_tm 20260716095900 ~ 20260713140600, cont-yn=Y
+40페이지에서 멈춤(더 있음)
+합계: 36000개
+
+## 국내 60분봉 (ka10080) 요청: {'stk_cd': '005930', 'upd_stkpc_tp': '1', 'base_dt': '20261103', 'tic_scope': '60'}
+행 필드: ['acc_trde_qty', 'cntr_tm', 'cur_prc', 'high_pric', 'low_pric', 'open_pric', 'pred_pre', 'pred_pre_sig', 'trde_qty', 'upd_rt', 'upd_stkpc_tp']
+맨 앞 3행: [{'cur_prc': '-221500', 'trde_qty': '372838', 'cntr_tm': '20261103100000', 'open_pric': '-219750', 'high_pric': '-222250', 'low_pric': '-219000', 'acc_trde_qty': '3762326', 'pred_pre': '-7500', 'pred_pre_sig': '5', 'upd_stkpc_tp': '', 'upd_rt': ''}, {'cur_prc': '-220000', 'trde_qty': '3389488', 'cntr_tm': '20261103090000', 'open_pric': '-220500', 'high_pric': '-220500', 'low_pric': '-217000', 'acc_trde_qty': '3389488', 'pred_pre': '-9000', 'pred_pre_sig': '5', 'upd_stkpc_tp': '', 'upd_rt': ''}, {'cur_prc': '+230000', 'trde_qty': '194725', 'cntr_tm': '20261102190000', 'open_pric': '+230000', 'high_pric': '+230000', 'low_pric': '+228000', 'acc_trde_qty': '14414470', 'pred_pre': '+5000', 'pred_pre_sig': '2', 'upd_stkpc_tp': '', 'upd_rt': ''}]
+1페이지: 900개, cntr_tm 20261103100000 ~ 20260521090000, cont-yn=Y
+2페이지: 900개, cntr_tm 20260520150000 ~ 20251110110000, cont-yn=Y
+3페이지: 37개, cntr_tm 20251110100000 ~ 20251103090000, cont-yn=N
+합계: 1837개
+
+## 국내 일봉 (ka10081) 요청: {'stk_cd': '005930', 'base_dt': '20261103', 'upd_stkpc_tp': '1'}
+행 필드: ['cur_prc', 'dt', 'high_pric', 'low_pric', 'open_pric', 'pred_pre', 'pred_pre_sig', 'trde_prica', 'trde_qty', 'trde_tern_rt', 'upd_rt', 'upd_stkpc_tp']
+맨 앞 3행: [{'cur_prc': '221750', 'trde_qty': '3762374', 'trde_prica': '824787', 'dt': '20261103', 'open_pric': '220500', 'high_pric': '222250', 'low_pric': '217000', 'pred_pre': '-7250', 'pred_pre_sig': '5', 'trde_tern_rt': '+0.06', 'upd_stkpc_tp': '', 'upd_rt': ''}, {'cur_prc': '230000', 'trde_qty': '14537981', 'trde_prica': '3287396', 'dt': '20261102', 'open_pric': '219000', 'high_pric': '232000', 'low_pric': '217000', 'pred_pre': '+5000', 'pred_pre_sig': '2', 'trde_tern_rt': '+0.25', 'upd_stkpc_tp': '', 'upd_rt': ''}, {'cur_prc': '220500', 'trde_qty': '19668075', 'trde_prica': '4377894', 'dt': '20261030', 'open_pric': '223500', 'high_pric': '229500', 'low_pric': '216500', 'pred_pre': '-11500', 'pred_pre_sig': '5', 'trde_tern_rt': '+0.34', 'upd_stkpc_tp': '', 'upd_rt': ''}]
+1페이지: 600개, dt 20261103 ~ 20240516, cont-yn=Y
+2페이지: 600개, dt 20240514 ~ 20211206, cont-yn=Y
+3페이지: 600개, dt 20211203 ~ 20190703, cont-yn=Y
+4페이지: 600개, dt 20190702 ~ 20170116, cont-yn=Y
+5페이지: 600개, dt 20170113 ~ 20140808, cont-yn=Y
+6페이지: 600개, dt 20140807 ~ 20120307, cont-yn=Y
+7페이지: 600개, dt 20120306 ~ 20091012, cont-yn=Y
+8페이지: 600개, dt 20091009 ~ 20070511, cont-yn=Y
+9페이지: 600개, dt 20070510 ~ 20041213, cont-yn=Y
+10페이지: 600개, dt 20041210 ~ 20020710, cont-yn=Y
+11페이지: 600개, dt 20020709 ~ 20000121, cont-yn=Y
+12페이지: 600개, dt 20000120 ~ 19971103, cont-yn=Y
+13페이지: 600개, dt 19971101 ~ 19951017, cont-yn=Y
+14페이지: 600개, dt 19951016 ~ 19931005, cont-yn=Y
+15페이지: 600개, dt 19931004 ~ 19910918, cont-yn=Y
+16페이지: 600개, dt 19910917 ~ 19890825, cont-yn=Y
+17페이지: 600개, dt 19890824 ~ 19870803, cont-yn=Y
+18페이지: 600개, dt 19870801 ~ 19850719, cont-yn=Y
+19페이지: 161개, dt 19850718 ~ 19850104, cont-yn=N
+합계: 10961개
