@@ -18,7 +18,18 @@ export const barPeriods = (market: Market) => [
   { value: "1d", label: "일봉" },
 ];
 
-// 봉 개수. 키움 명세에 조회 한도가 없어 앱이 정한 값이다. 매도 단계에서 모의투자로 재서 조정한다.
+/** "5분봉 · 단기 5봉 · 장기 20봉". 봉 주기나 기간이 비어 있으면 null이다. */
+export function basisText(
+  market: Market,
+  basis: { bar_period: string | null; short_period: number | null; long_period: number | null },
+): string | null {
+  const period = barPeriods(market).find((option) => option.value === basis.bar_period);
+  if (!period || basis.short_period === null || basis.long_period === null) return null;
+  return `${period.label} · 단기 ${basis.short_period}봉 · 장기 ${basis.long_period}봉`;
+}
+
+// 봉 개수. 키움 명세에 조회 한도가 없어 앱이 정한 값이다. 모의투자 실측에서 과거 범위가 가장 짧은
+// 미국 120분봉도 약 6개월(1,500봉 남짓)이라 그대로 둔다.
 export const SHORT_PERIOD_RANGE = [2, 119] as const;
 export const LONG_PERIOD_RANGE = [3, 120] as const;
 

@@ -334,6 +334,39 @@ class KiwoomClient:
         page = await self._call_page(spec, api_id, path, body, "N", "", 1)
         return page.data
 
+    async def call_until(
+        self,
+        spec: EnvironmentSpec,
+        api_id: str,
+        path: str,
+        body: dict[str, Any],
+        list_key: str,
+        enough: Callable[[list[Any]], bool],
+    ) -> tuple[list[Any], bool, int]:
+        """목록 필드를 연속조회로 이어 받다가 enough가 True가 되면 멈춘다. 페이지 수 상한은 없다.
+
+        (받은 목록, 다 받기 전에 데이터가 끝났는지, 받은 페이지 수)를 돌려준다.
+        화면을 붙잡지 않는 서버 작업이라 호출 한도 대기에 제한을 두지 않는다(patient).
+        """
+        rows: list[Any] = []
+        cont_yn, next_key, page_no = "N", "", 0
+        while True:
+            page_no += 1
+            page = await self._call_page(
+                spec, api_id, path, body, cont_yn, next_key, page_no, patient=True
+            )
+            value = page.data.get(list_key)
+            if not isinstance(value, list):
+                raise response_format_error(
+                    api_id, f"{page_no}페이지의 {list_key} 필드가 목록이 아닙니다."
+                )
+            rows.extend(value)
+            if enough(rows):
+                return rows, False, page_no
+            if page.cont_yn != "Y":
+                return rows, True, page_no
+            cont_yn, next_key = "Y", page.next_key
+
     async def call_once(
         self,
         spec: EnvironmentSpec,

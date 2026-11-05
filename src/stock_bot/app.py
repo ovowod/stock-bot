@@ -35,6 +35,8 @@ from stock_bot.core.http import json_body
 from stock_bot.core.logging_setup import environment_var, log, request_id_var, setup_logging
 from stock_bot.core.notification import DiscordNotifier, Embed
 from stock_bot.dead_cross.settings import DEAD_CROSS
+from stock_bot.dead_cross.status import DeadCrossStatus
+from stock_bot.dead_cross.watch import DeadCrossWatcher
 from stock_bot.fill.feed import FillFeed
 from stock_bot.fill.watch import FillWatcher
 from stock_bot.kiwoom.kiwoom import KiwoomClient
@@ -56,7 +58,7 @@ logger = logging.getLogger("stock_bot.api")
 
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
 # 화면이 3초마다 부르는 조회. 성공한 요청의 api_request 로그는 DEBUG로 낮춰 로그를 채우지 않게 한다.
-POLLED_PATH_SUFFIXES = ("/trailing-stop/status",)
+POLLED_PATH_SUFFIXES = ("/trailing-stop/status", "/dead-cross/status")
 
 
 async def selected_environment(environment: str) -> EnvironmentSpec:
@@ -137,7 +139,6 @@ def create_app(
     auto_trading.migrate(data_dir / "sl-tp", SL_TP)
     sl_tp = FeatureSettingsStore(auto_trading, SL_TP)
     trailing_stop = FeatureSettingsStore(auto_trading, TRAILING_STOP)
-    # Dead Cross는 아직 매도 동작이 없어 저장을 알릴 곳이 없다.
     dead_cross = FeatureSettingsStore(auto_trading, DEAD_CROSS)
     sl_tp_watch = SlTpWatcher(
         kiwoom, sl_tp, holdings.positions, auto_sell, realtime, feed, notifier, now
@@ -157,15 +158,23 @@ def create_app(
     )
     trailing_stop.on_saved = trailing_stop_watch.settings_saved
     trailing_stop_status = TrailingStopStatus(kiwoom, trailing_stop, trailing_stop_watch, now)
+    # Dead Cross는 아직 팔지 않고 상태만 계산한다. 판정 기록은 자동매매 설정 파일과 따로 둔다.
+    dead_cross_watch = DeadCrossWatcher(
+        kiwoom, dead_cross, holdings.positions, realtime, feed, now, data_dir / "dead-cross"
+    )
+    dead_cross.on_saved = dead_cross_watch.settings_saved
+    dead_cross_status = DeadCrossStatus(kiwoom, dead_cross, dead_cross_watch, now)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         fills.start()
         sl_tp_watch.start()
         trailing_stop_watch.start()
+        dead_cross_watch.start()
         try:
             yield
         finally:
+            await dead_cross_watch.stop()
             await trailing_stop_watch.stop()
             await sl_tp_watch.stop()
             await fills.stop()
@@ -304,6 +313,10 @@ def create_app(
     @app.put("/api/environments/{environment}/dead-cross")
     async def put_dead_cross(spec: Spec, request: Request) -> dict[str, Any]:
         return await dead_cross.save(spec, await json_body(request))
+
+    @app.get("/api/environments/{environment}/dead-cross/status")
+    async def get_dead_cross_status(spec: Spec) -> dict[str, Any]:
+        return dead_cross_status.read(spec)
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")
