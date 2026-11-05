@@ -110,7 +110,7 @@ async def test_crossing_below_on_the_latest_bar_is_a_dead_cross(data_dir):
     assert item["crossed_bar"] == utc(BAR_0955)
     assert item["crossed_at"] == utc(AT_10)
     assert read_record(data_dir)["stocks"]["005930"] == remembered(
-        BAR_0955, crossed_at=AT_10, crossed_bar=BAR_0955, purchase_price=None
+        BAR_0955, crossed_at=AT_10, crossed_bar=BAR_0955
     )
 
 
@@ -460,7 +460,9 @@ async def test_us_night_bars_after_midnight_read_as_the_next_day(data_dir):
     """
     write_dc(data_dir, dc_session("09:30", "16:00", bar_period="60m"), environment="us_paper")
     night = datetime(2026, 10, 27, 2, 0, tzinfo=NY)
-    write_record(data_dir, {"AAPL": remembered(night, bar_period="60m")}, "us_paper")
+    write_record(
+        data_dir, {"AAPL": remembered(night, bar_period="60m", purchase_price="200")}, "us_paper"
+    )
     chart = Chart(list_key="result_list", page_size=100)
     chart.rows["AAPL"] = [
         {"cntr_tm": "20261027100000", "cur_prc": "1"},

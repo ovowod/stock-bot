@@ -191,7 +191,7 @@ Dead Cross 설정 화면 위쪽에 감시 상태와 최근 자동 매도 목록�
 
 **로그**
 
-- 이벤트: `dead_cross_auto_sell_started`(code, run, attempt=`trigger`|`retry`, crossed_bar), `dead_cross_auto_sell_finished`(outcome, quantity, order_no, cause), `dead_cross_send_refused`(reason), `dead_cross_notified`, `dead_cross_released`(reason=`purchase_price_changed`), `dead_cross_record_migrated`(cleared_codes).
+- 이벤트: `dead_cross_auto_sell_started`(code, run, attempt=`trigger`|`retry`, crossed_bar), `dead_cross_auto_sell_finished`(outcome, quantity, order_no, cause), `dead_cross_send_refused`(reason), `dead_cross_notified`, `dead_cross_released`(reason=`purchase_price_changed`), `dead_cross_judging_restarted`(code, judged_bar, 이전·새 평균 매입가), `dead_cross_record_migrated`(cleared_codes).
 
 **실전투자 차단**
 

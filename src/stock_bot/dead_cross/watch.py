@@ -83,6 +83,8 @@ class _Held:
     name: str
     # 미국 종목의 거래소. 국내는 None이다.
     exchange: str | None
+    # 평균 매입가. 없으면 None이다. 매입가가 없어도 판정하고 판다.
+    purchase_price: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -524,13 +526,25 @@ class _Watch:
         return True
 
     def _use_holdings(self, rows: list[dict[str, Any]]) -> None:
-        """보유종목을 바꾸고, 현금잔고가 없는 종목의 기억은 버린다."""
+        """보유종목을 바꾸고, 현금잔고가 없는 종목의 기억은 버린다.
+
+        평균 매입가가 바뀐 종목은 발생을 푼다. 기억의 값을 두어 _fetch가 판정을 다시 시작한다.
+        """
         eligible, ineligible = _check_holdings(self.spec.market, rows)
         cash = {row["code"] for row in rows if not row["credit"]}
         for code in sorted(self.memory.keys() - cash):
             self._forget(code, "not_held")
         for code in sorted(self._values.keys() - cash):
             self._values.pop(code)
+        for code, held in eligible.items():
+            memory = self.memory.get(code)
+            if memory is None:
+                continue
+            if memory.purchase_price is None and held.purchase_price is not None:
+                memory.purchase_price = held.purchase_price
+                self._write("purchase_price")
+            elif memory.crossed_at is not None and _purchase_changed(memory, held.purchase_price):
+                self._release_changed(code, memory, held.purchase_price)
         self._holdings = eligible
         self._ineligible = {c: r for c, r in ineligible.items() if r != "credit"}
 
@@ -555,6 +569,11 @@ class _Watch:
         version, epoch = self._settings_version, self._epochs.get(code, 0)
         memory = self.memory.get(code)
         judged = memory.judged_bar if memory is not None and memory.basis == basis else None
+        rebought = memory is not None and _purchase_changed(
+            memory, self._holdings[code].purchase_price
+        )
+        if rebought:
+            judged = None
         now = self._owner.now()
         request = chart_request(
             self.spec.market, code, exchange, basis.bar_period, now.astimezone(self._zone).date()
@@ -613,6 +632,9 @@ class _Watch:
                     self._pending.append("stale")
                 return True
             self._failed.discard(code)
+            if rebought:
+                self._restart_judging(run, code, basis, bars)
+                return True
             crossed = self._judge(run, code, basis, bars, judged, now)
             self._sell_if_crossed(run, code, session, basis, retry=not crossed)
             return True
@@ -634,10 +656,7 @@ class _Watch:
         이번 판정에서 하향 돌파가 일어나 풀리지 않았으면 True다.
         """
         short, long = basis.short_period, basis.long_period
-        if len(bars) >= long:
-            self._values[code] = _Values(
-                moving_average(bars, 0, short), moving_average(bars, 0, long), basis
-            )
+        self._update_values(code, basis, bars)
         if judged is not None and not any(bar.start <= judged for bar in bars):
             # 키움이 주는 과거 범위가 끝나 마지막 판정 봉까지 받지 못했다.
             log(
@@ -681,7 +700,8 @@ class _Watch:
                 moving_average(bars, k + 1, long),
             )
             if memory is None:
-                memory = self.memory[code] = Memory(basis, bar.start)
+                purchase = self._holdings[code].purchase_price
+                memory = self.memory[code] = Memory(basis, bar.start, purchase_price=purchase)
             event = _cross(memory, *values)
             if event == "crossed":
                 memory.crossed_at, memory.crossed_bar = now, bar.start
@@ -708,6 +728,39 @@ class _Watch:
         self._write("judged")
         self._sync_fills()
         return crossed
+
+    def _update_values(self, code: str, basis: Basis, bars: list[Bar]) -> None:
+        short, long = basis.short_period, basis.long_period
+        if len(bars) >= long:
+            self._values[code] = _Values(
+                moving_average(bars, 0, short), moving_average(bars, 0, long), basis
+            )
+
+    def _restart_judging(self, run: _Run, code: str, basis: Basis, bars: list[Bar]) -> None:
+        """평균 매입가가 바뀐 종목의 판정을 가장 최근 완료 봉부터 다시 시작한다.
+
+        팔고 다시 샀을 수 있어, 그때까지의 봉은 판정하지 않고 이 조회에서는 팔지 않는다.
+        재매수 이전의 하향 돌파가 차례 판정으로 되살아나지 않게 한다. 받은 봉이 없으면
+        기억의 값을 그대로 두어 다음 조회에서 다시 한다.
+        """
+        self._update_values(code, basis, bars)
+        if not bars:
+            return
+        memory = self.memory[code]
+        previous = memory.purchase_price
+        memory.basis, memory.judged_bar = basis, bars[0].start
+        memory.purchase_price = self._holdings[code].purchase_price
+        log(
+            logger,
+            logging.INFO,
+            "dead_cross_judging_restarted",
+            run=run.number,
+            code=code,
+            judged_bar=format_moment(bars[0].start),
+            previous_purchase_price=str(previous),
+            purchase_price=str(memory.purchase_price),
+        )
+        self._write("judging_restarted")
 
     def _sell_if_crossed(
         self, run: _Run, code: str, session: dict[str, Any], basis: Basis, retry: bool
@@ -763,6 +816,7 @@ class _Watch:
             source=AUTO_SELL_SOURCE,
             request_id=request_id,
             ready=lambda: self._may_send(run, trigger),
+            confirm=lambda holding: self._confirm_holding(run, code, holding),
         )
         run.auto_sells[code] = _result_attempt(result, self._owner.now())
         log(
@@ -789,6 +843,26 @@ class _Watch:
                 code=code,
                 sent=sent,
             )
+
+    def _confirm_holding(self, run: _Run, code: str, holding: dict[str, Any]) -> bool:
+        """주문 직전에 다시 읽은 평균 매입가가 바뀌었으면 발생을 풀고 보내지 않는다.
+
+        기억이 없으면 판단하지 않는다(보내기 직전 확인이 막는다).
+        """
+        memory = self.memory.get(code)
+        purchase = _known_price(holding.get("purchase_price"))
+        if memory is None or not _purchase_changed(memory, purchase):
+            return True
+        self._release_changed(code, memory, purchase)
+        log(
+            logger,
+            logging.INFO,
+            "dead_cross_send_refused",
+            code=code,
+            run=run.number,
+            reason="purchase_price_changed",
+        )
+        return False
 
     def _may_send(self, run: _Run, trigger: SellTrigger) -> bool:
         """키움에 보내기 직전 확인. 거절하면 보내지 않고, 발생이 남아 있으면 다음 실행에서 낸다."""
@@ -818,6 +892,20 @@ class _Watch:
                 reason=reason,
             )
         return reason is None
+
+    def _release_changed(self, code: str, memory: Memory, purchase: Decimal | None) -> None:
+        """평균 매입가가 바뀐 종목의 발생을 푼다. 팔고 다시 샀을 수 있어 팔지 않는 쪽으로 간다."""
+        log(
+            logger,
+            logging.INFO,
+            "dead_cross_released",
+            code=code,
+            reason="purchase_price_changed",
+            previous_purchase_price=str(memory.purchase_price),
+            purchase_price=str(purchase),
+        )
+        memory.crossed_at = memory.crossed_bar = None
+        self._write("released")
 
     def _forget_excluded(self) -> None:
         """제외종목에 든 종목의 기억과 화면 값을 버린다. 기준만 바꾼 저장으로는 버리지 않는다."""
@@ -1019,7 +1107,11 @@ def _check_holdings(
             eligible.pop(code, None)
             reason = "duplicate"
         else:
-            eligible[code] = _Held(row["name"], exchange if market is Market.US else None)
+            eligible[code] = _Held(
+                row["name"],
+                exchange if market is Market.US else None,
+                _known_price(row["purchase_price"]),
+            )
             continue
         if reason == "duplicate" or ineligible.get(code, "credit") == "credit":
             ineligible[code] = reason
@@ -1047,6 +1139,19 @@ def _cross(
     if memory.crossed_at is None:
         return "crossed" if prev_short >= prev_long and short < long else None
     return "released" if short >= long else None
+
+
+def _known_price(value: Decimal | None) -> Decimal | None:
+    return value if value is not None and value > 0 else None
+
+
+def _purchase_changed(memory: Memory, purchase: Decimal | None) -> bool:
+    """기억과 평균 매입가가 다른가. 어느 쪽이든 매입가가 없으면 비교하지 않는다."""
+    return (
+        memory.purchase_price is not None
+        and purchase is not None
+        and purchase != memory.purchase_price
+    )
 
 
 def _format_ma(value: Decimal, places: Decimal) -> str:

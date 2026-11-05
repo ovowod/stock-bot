@@ -18,8 +18,10 @@ from tests.dead_cross.helpers import (
     dc_session,
     dc_us_kiwoom,
     first,
+    judged,
     minute_rows,
     put_dc,
+    read_record,
     remembered,
     status,
     until_status,
@@ -554,3 +556,120 @@ async def test_auto_sell_fill_is_marked_and_logs_share_the_request_id(
     assert lines["dead_cross_auto_sell_finished"]["request_id"] == request_id
     assert lines["dead_cross_auto_sell_finished"]["outcome"] == "accepted"
     assert lines["dead_cross_notified"]["sent"] is True
+
+
+async def test_tracking_stock_remembers_its_purchase_price(data_dir):
+    write_dc(data_dir)
+    kiwoom = dc_kiwoom(chart_at(["1", "80", "90", "100", "100"]))
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        await until_status(app, judged)
+
+    assert read_record(data_dir)["stocks"]["005930"]["purchase_price"] == "60000"
+
+
+async def test_missing_purchase_price_is_filled_without_comparing(data_dir):
+    write_dc(data_dir)
+    write_record(data_dir, {"005930": remembered(BAR_0955, AT_10, BAR_0955, purchase_price=None)})
+    kiwoom = dc_kiwoom(chart_at(CROSSING))
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        await until_status(app, lambda b: sell_state(b) == "accepted")
+
+    assert read_record(data_dir)["stocks"]["005930"]["purchase_price"] == "60000"
+
+
+async def test_holding_without_a_purchase_price_is_not_compared(data_dir):
+    write_dc(data_dir)
+    write_record(data_dir, {"005930": remembered(BAR_0955, AT_10, BAR_0955)})
+    kiwoom = dc_kiwoom(chart_at(CROSSING), balance(position(pur_pric="000000000000000")))
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        await until_status(app, lambda b: sell_state(b) == "accepted")
+
+    assert read_record(data_dir)["stocks"]["005930"]["purchase_price"] == "60000"
+
+
+@pytest.mark.parametrize(
+    "memory",
+    [remembered(BAR_0945), remembered(BAR_0945, AT_10, BAR_0945)],
+    ids=["tracking", "crossed"],
+)
+async def test_rebought_while_the_server_was_off_is_not_sold_by_earlier_bars(
+    data_dir, memory, json_logs: JsonLines
+):
+    """재시작 전 09:50 봉에서 하향 돌파했고, 그 뒤 다른 평균 매입가로 다시 샀다."""
+    write_dc(data_dir)
+    write_record(data_dir, {"005930": memory})
+    rebought = balance(position(pur_pric="000000000061000"))
+    kiwoom = dc_kiwoom(chart_at(["1", "90", "90", "100", "100", "100"]), rebought)
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        body = await until_status(app, judged)
+        await until_status(app, lambda b: first(b)["judged_bar"] == utc(BAR_0955))
+        await settle()
+
+    assert first(body)["status"] == "tracking"
+    assert first(body)["crossed_bar"] is None
+    assert first(body)["short_ma"] == "90.00"
+    assert kiwoom.calls("kt10001") == []
+    assert read_record(data_dir)["stocks"]["005930"] == remembered(BAR_0955, purchase_price="61000")
+    restarted = [
+        line for line in json_logs.lines if line["event"] == "dead_cross_judging_restarted"
+    ]
+    assert [line["purchase_price"] for line in restarted] == ["61000"]
+
+
+async def test_changed_purchase_price_waits_for_a_successful_chart(data_dir):
+    write_dc(data_dir)
+    write_record(data_dir, {"005930": remembered(BAR_0945, AT_10, BAR_0945)})
+    chart = chart_at(["1", "90", "90", "100", "100", "100"])
+    chart.failing.add("005930")
+    rebought = balance(position(pur_pric="000000000061000"))
+    kiwoom = dc_kiwoom(chart, rebought)
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        await until_status(app, lambda b: first(b)["reason"] == "chart_failed")
+        assert read_record(data_dir)["stocks"]["005930"]["purchase_price"] == "60000"
+        chart.failing.clear()
+        await until_status(app, lambda b: first(b)["judged_bar"] == utc(BAR_0955))
+        await settle()
+
+    assert kiwoom.calls("kt10001") == []
+    assert read_record(data_dir)["stocks"]["005930"]["purchase_price"] == "61000"
+
+
+async def test_buying_more_restarts_judging_and_the_next_crossing_sells(data_dir):
+    write_dc(data_dir)
+    clock = Clock(AFTER_FIRST_CHECK)
+    holdings = {"reply": balance()}
+    chart = chart_at(["1", "80", "90", "100", "100"])
+    kiwoom = dc_kiwoom(chart).respond("kt00018", lambda _: holdings["reply"])
+    async with running(FakeRealtime(), kiwoom, data_dir, clock) as app:
+        await until_status(app, judged)
+        holdings["reply"] = balance(position(pur_pric="000000000061000"))
+        chart.rows["005930"] = minute_rows(
+            AT_10 + timedelta(minutes=5), ["1", "200", "80", "90", "100", "100"]
+        )
+        clock.at = AT_10 + timedelta(minutes=5, seconds=6)
+        await until_status(app, lambda b: first(b)["judged_bar"] == utc(AT_10))
+        chart.rows["005930"] = minute_rows(
+            AT_10 + timedelta(minutes=15), ["1", "10", "10", "200", "80", "90", "100", "100"]
+        )
+        clock.at = AT_10 + timedelta(minutes=15, seconds=6)
+        await wait_until(lambda: len(kiwoom.calls("kt10001")) == 1)
+
+
+async def test_purchase_price_rechecked_right_before_sending(data_dir, caplog):
+    write_dc(data_dir)
+    rebought = balance(position(pur_pric="000000000061000"))
+    kiwoom = dc_kiwoom(chart_at(CROSSING), balance(), rebought)
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        body = await until_status(app, lambda b: sell_state(b) == "failed")
+        await settle()
+
+    assert first(body)["status"] == "tracking"
+    assert first(body)["auto_sell"]["reason"] == "cancelled"
+    assert kiwoom.calls("kt10001") == []
+    reasons = [
+        r.fields["reason"] for r in caplog.records if r.getMessage() == "dead_cross_send_refused"
+    ]
+    assert reasons == ["purchase_price_changed"]
+    released = next(r for r in caplog.records if r.getMessage() == "dead_cross_released")
+    assert released.fields["previous_purchase_price"] == "60000"
+    assert released.fields["purchase_price"] == "61000"
