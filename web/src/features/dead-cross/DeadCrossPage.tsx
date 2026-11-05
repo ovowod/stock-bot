@@ -19,7 +19,7 @@ export function DeadCrossPage({ environment }: { environment: EnvironmentValue }
       feature={DEAD_CROSS}
       notice={[
         "봉 주기마다 완료된 봉의 종가로 단기·장기 이동평균(단순 이동평균)을 계산해, 단기 이동평균이 장기 이동평균을 하향 돌파하면 그 종목의 매도 가능 수량 전량을 시장가로 매도합니다. 제외종목은 매도하지 않습니다.",
-        "지금은 상태만 계산하고 팔지 않습니다. 계좌 확인 화면의 Dead Cross 보기에서 확인하세요.",
+        "지금은 상태만 계산하고 팔지 않습니다. 토·일에는 동작하지 않습니다. 계좌 확인 화면의 Dead Cross 보기에서 확인하세요.",
       ]}
       sessionName="Dead Cross 세션"
       idPrefix="dead-cross"

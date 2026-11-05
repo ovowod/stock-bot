@@ -7,7 +7,7 @@
 조회 시점: 세션 시작, 설정 저장, 내 계좌 체결, 분봉이 끝난 5초 뒤. 투자 환경마다 조회 차례는
 하나만 돌고, 도는 동안 들어온 요청은 끝난 뒤 한 차례로 합친다. 차례마다 먼저 보유종목을 다시 읽는다.
 시세는 구독하지 않는다. 공유 실시간 연결은 내 계좌 체결을 받고, 연결이 밀려났는지 알려고 쓴다.
-실전투자 환경은 만들지 않는다.
+실전투자 환경은 만들지 않는다. 시세 대신 시계로 움직이므로 토·일에는 세션이 없다.
 """
 
 import asyncio
@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from stock_bot.auto_trading.judging import session_at
 from stock_bot.auto_trading.settings import TIMEZONES, FeatureSettingsStore
 from stock_bot.core.config import ENVIRONMENTS, EnvironmentSpec, Market
 from stock_bot.core.errors import AppError
@@ -37,6 +36,7 @@ from stock_bot.dead_cross.bars import (
     read_bars,
 )
 from stock_bot.dead_cross.record import Basis, Memory, format_moment
+from stock_bot.dead_cross.settings import dead_cross_session_at
 from stock_bot.fill.feed import FeedState, FeedStatus, Fill, FillFeed
 from stock_bot.kiwoom.kiwoom import KiwoomClient
 from stock_bot.kiwoom.realtime import EventKind, RealtimeEvent, RealtimeHub
@@ -179,6 +179,8 @@ class _Watch:
         self._holdings_ready = False
         # 종목코드 -> 기억. 판정 기록 파일보다 이것이 기준이다.
         self.memory: dict[str, Memory] = {}
+        # 최근 자동 매도. 최신이 앞이다. 기억과 함께 판정 기록 파일에 쓴다.
+        self._recent_sells: list[dict[str, Any]] = []
         # 종목코드 -> 화면에 보일 이동평균. 기억과 함께 버린다.
         self._values: dict[str, _Values] = {}
         # 종목코드 -> 기억을 버린 횟수. 조회하는 동안 버렸으면 그 응답을 버린다.
@@ -349,7 +351,7 @@ class _Watch:
         self._sessions = settings["sessions"]
 
     def _session_at(self, moment: datetime) -> tuple[date, dict[str, Any]] | None:
-        return session_at(self._sessions, moment, self.spec.market)
+        return dead_cross_session_at(self._sessions, moment, self.spec.market)
 
     def _is_stopped(self) -> bool:
         return self._stopped or self._settings_broken or self._state_broken or self._channel.stopped
@@ -702,7 +704,7 @@ class _Watch:
     def _read_record(self, reason: str) -> bool:
         """판정 기록 파일을 읽어 기억으로 쓴다. 읽지 못하면 기억은 그대로 두고 False다."""
         try:
-            memory = record.load(self._record)
+            loaded = record.load(self._record)
         except (OSError, ValueError) as exc:
             log(
                 logger,
@@ -714,7 +716,8 @@ class _Watch:
                 cause=str(exc),
             )
             return False
-        self.memory = memory
+        self.memory = loaded.memory
+        self._recent_sells = loaded.recent_sells
         self._values.clear()
         log(
             logger,
@@ -722,8 +725,17 @@ class _Watch:
             "dead_cross_record_read",
             path=str(self._record),
             reason=reason,
-            memory_count=len(memory),
+            memory_count=len(loaded.memory),
         )
+        if loaded.cleared_codes is not None:
+            log(
+                logger,
+                logging.WARNING,
+                "dead_cross_record_migrated",
+                path=str(self._record),
+                cleared_codes=loaded.cleared_codes,
+            )
+            self._write("migrated")
         return True
 
     def _write(self, reason: str) -> None:
@@ -732,7 +744,7 @@ class _Watch:
         if self._state_broken:
             return
         try:
-            record.write(self._record, self.memory)
+            record.write(self._record, self.memory, self._recent_sells)
         except OSError as exc:
             log(
                 logger,

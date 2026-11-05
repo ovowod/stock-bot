@@ -26,6 +26,7 @@ from tests.dead_cross.helpers import (
     until_status,
     utc,
     write_dc,
+    write_legacy_record,
     write_record,
 )
 from tests.fake_kiwoom import REAL_ENV, US_PAPER_ENV, body_of
@@ -108,7 +109,7 @@ async def test_crossing_below_on_the_latest_bar_is_a_dead_cross(data_dir):
     assert item["crossed_bar"] == utc(BAR_0955)
     assert item["crossed_at"] == utc(AT_10)
     assert read_record(data_dir)["stocks"]["005930"] == remembered(
-        BAR_0955, crossed_at=AT_10, crossed_bar=BAR_0955
+        BAR_0955, crossed_at=AT_10, crossed_bar=BAR_0955, purchase_price=None
     )
 
 
@@ -591,3 +592,60 @@ async def test_logs_carry_request_ids_and_moving_averages(data_dir, json_logs: J
         "short_period": 2,
         "long_period": 3,
     }
+
+
+async def test_legacy_record_is_cleared_once_and_its_dead_cross_does_not_carry_over(
+    data_dir, json_logs: JsonLines
+):
+    write_dc(data_dir)
+    write_legacy_record(
+        data_dir, {"005930": remembered(BAR_0955, crossed_at=AT_10, crossed_bar=BAR_0955)}
+    )
+    kiwoom = dc_kiwoom(chart_at(ALREADY_BELOW))
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        body = await until_status(app, judged)
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        await until_status(app, judged)
+
+    assert first(body)["status"] == "tracking"
+    assert read_record(data_dir)["version"] == 2
+    migrated = [line for line in json_logs.lines if line["event"] == "dead_cross_record_migrated"]
+    assert [line["cleared_codes"] for line in migrated] == ['["005930"]']
+
+
+async def test_memory_survives_a_restart_on_the_current_record_version(data_dir):
+    write_dc(data_dir)
+    write_record(
+        data_dir,
+        {"005930": remembered(BAR_0955, crossed_at=AT_10, crossed_bar=BAR_0955)},
+    )
+    kiwoom = dc_kiwoom(chart_at(ALREADY_BELOW))
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        body = await until_status(app, judged)
+
+    assert first(body)["status"] == "crossed"
+
+
+async def test_no_session_on_weekends_then_monday_judges_the_bars_before_it(data_dir):
+    write_dc(data_dir)
+    saturday = datetime(2026, 10, 31, 10, 0, tzinfo=KST)
+    monday = datetime(2026, 11, 2, 9, 0, 6, tzinfo=KST)
+    friday_bar = datetime(2026, 10, 30, 15, 25, tzinfo=KST)
+    write_record(data_dir, {"005930": remembered(friday_bar - timedelta(minutes=5))})
+    chart = chart_at(["90", "100", "100", "100"], friday_bar)
+    clock = Clock(saturday)
+    kiwoom = dc_kiwoom(chart)
+    async with running(FakeRealtime(), kiwoom, data_dir, clock) as app:
+        await settle()
+        weekend = await status(app)
+        clock.at = saturday + timedelta(days=1)
+        await settle()
+        assert await status(app) == weekend
+        assert kiwoom.calls("ka10080") == []
+        clock.at = monday
+        body = await until_status(app, lambda b: first(b)["status"] == "crossed")
+
+    assert weekend["watching"] is False
+    assert weekend["not_watching_reason"] == "no_session"
+    assert weekend["session"] is None
+    assert first(body)["crossed_bar"] == utc(friday_bar)

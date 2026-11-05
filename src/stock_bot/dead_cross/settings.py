@@ -4,8 +4,11 @@ Dead Cross 세션의 기준 칸(봉 주기, 단기·장기 이동평균 기간)�
 매도 동작은 아직 없다. 설정만 저장한다.
 """
 
+from collections.abc import Sequence
+from datetime import date, datetime
 from typing import Any
 
+from stock_bot.auto_trading.judging import session_at
 from stock_bot.auto_trading.settings import Feature, Invalid
 from stock_bot.core.config import Market
 
@@ -17,6 +20,23 @@ BAR_PERIODS = {
 # 봉 개수. 키움 명세에 조회 한도가 없어 앱이 정한 값이다. 매도 단계에서 모의투자로 재서 조정한다.
 SHORT_PERIOD_RANGE = (2, 119)
 LONG_PERIOD_RANGE = (3, 120)
+# date.weekday()의 토요일. 그 뒤는 일요일이다.
+SATURDAY = 5
+
+
+def dead_cross_session_at(
+    sessions: Sequence[dict[str, Any]],
+    moment: datetime,
+    market: Market,
+    *,
+    include_disabled: bool = False,
+) -> tuple[date, dict[str, Any]] | None:
+    """그 시각의 Dead Cross 세션. 시세가 아니라 시계로 움직이므로 토·일에는 세션이 없다.
+
+    금요일 일봉을 토요일에 판정해 주문이 거부되지 않게 한다.
+    """
+    found = session_at(sessions, moment, market, include_disabled=include_disabled)
+    return None if found is None or found[0].weekday() >= SATURDAY else found
 
 
 def _criteria(item: dict[str, Any], enabled: bool, where: str, market: Market) -> dict[str, Any]:

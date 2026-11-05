@@ -178,8 +178,9 @@ def remembered(
     bar_period: str = "5m",
     short_period: int = 2,
     long_period: int = 3,
+    purchase_price: str | None = "60000",
 ) -> dict[str, Any]:
-    """판정 기록 파일의 종목 하나(버전 1)."""
+    """판정 기록 파일의 종목 하나."""
     return {
         "judged_bar": {
             "bar_period": bar_period,
@@ -189,12 +190,24 @@ def remembered(
         },
         "crossed_at": None if crossed_at is None else utc(crossed_at),
         "crossed_bar": None if crossed_bar is None else utc(crossed_bar),
+        "purchase_price": purchase_price,
     }
 
 
 def write_record(
-    data_dir: Path, stocks: dict[str, Any], environment: str = "domestic_paper"
+    data_dir: Path,
+    stocks: dict[str, Any],
+    environment: str = "domestic_paper",
+    recent_sells: list[dict[str, Any]] | None = None,
 ) -> None:
     path = record_path(data_dir, environment)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = {"version": 2, "stocks": stocks, "recent_sells": recent_sells or []}
+    path.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+
+
+def write_legacy_record(data_dir: Path, stocks: dict[str, Any]) -> None:
+    """상태만 계산하던 때의 버전 1 기록."""
+    path = record_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"version": 1, "stocks": stocks}), encoding="utf-8")

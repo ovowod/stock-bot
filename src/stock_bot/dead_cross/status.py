@@ -9,11 +9,11 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from stock_bot.auto_trading.judging import session_at
 from stock_bot.auto_trading.settings import TIMEZONES, FeatureSettingsStore
 from stock_bot.core.config import EnvironmentSpec
 from stock_bot.core.errors import AppError
 from stock_bot.core.logging_setup import log
+from stock_bot.dead_cross.settings import dead_cross_session_at
 from stock_bot.dead_cross.watch import DeadCrossWatcher
 from stock_bot.kiwoom.kiwoom import KiwoomClient
 
@@ -46,7 +46,7 @@ class DeadCrossStatus:
         else:
             watching, reason, stocks = state.watching, state.not_watching_reason, state.stocks
             sessions, excluded = state.sessions or [], state.excluded
-        found = session_at(sessions, self._now(), spec.market, include_disabled=True)
+        found = dead_cross_session_at(sessions, self._now(), spec.market, include_disabled=True)
         session = None if found is None else found[1]
         log(
             logger,
