@@ -41,11 +41,13 @@ class DeadCrossStatus:
         시작·저장 때 읽은 설정으로 계속 판정하므로, 파일을 따로 읽으면 화면이 감시와 어긋난다.
         """
         state = self._watcher.state(spec)
+        recent_sells: list[dict[str, Any]] = []
         if state is None:
             watching, reason, stocks, sessions, excluded = self._unwatched(spec)
         else:
             watching, reason, stocks = state.watching, state.not_watching_reason, state.stocks
             sessions, excluded = state.sessions or [], state.excluded
+            recent_sells = state.recent_sells
         found = dead_cross_session_at(sessions, self._now(), spec.market, include_disabled=True)
         session = None if found is None else found[1]
         log(
@@ -67,6 +69,7 @@ class DeadCrossStatus:
             "session": session,
             "excluded": excluded,
             "stocks": stocks,
+            "recent_sells": recent_sells,
         }
 
     def _unwatched(

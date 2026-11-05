@@ -3,6 +3,7 @@ import { fetchDeadCross, saveDeadCross, type DeadCrossSession, type EnvironmentV
 import type { EnvironmentOption } from "../../environments";
 import { AutoTradingSettingsPage, FieldError } from "../auto-trading/AutoTradingSettingsPage";
 import type { FeatureApi } from "../auto-trading/useAutoTradingSettings";
+import { DeadCrossWatchPanel } from "./DeadCrossWatchPanel";
 import { barPeriods, LONG_PERIOD_RANGE, nextSession, SHORT_PERIOD_RANGE, sessionErrors, validBarCount } from "./rules";
 
 const DEAD_CROSS: FeatureApi<DeadCrossSession> = {
@@ -21,6 +22,7 @@ export function DeadCrossPage({ environment }: { environment: EnvironmentValue }
         "봉 주기마다 완료된 봉의 종가로 단기·장기 이동평균(단순 이동평균)을 계산해, 단기 이동평균이 장기 이동평균을 하향 돌파하면 그 종목의 매도 가능 수량 전량을 시장가로 매도합니다. 제외종목은 매도하지 않습니다.",
         "하향 돌파가 일어나면 매도 가능 수량 전량을 시장가로 팝니다(모의투자만). 토·일에는 동작하지 않습니다. 종목별 상태는 계좌 확인 화면의 Dead Cross 보기에서 확인하세요.",
       ]}
+      beforeSettings={<DeadCrossWatchPanel environment={environment} />}
       sessionName="Dead Cross 세션"
       idPrefix="dead-cross"
       nextSession={nextSession}

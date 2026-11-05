@@ -43,6 +43,7 @@ export function AutoTradingSettingsPage<S extends BaseSession, E extends Session
   nextSession,
   sessionErrors,
   renderDetails,
+  beforeSettings,
 }: {
   environment: EnvironmentValue;
   feature: FeatureApi<S>;
@@ -54,6 +55,8 @@ export function AutoTradingSettingsPage<S extends BaseSession, E extends Session
   nextSession: (sessions: S[], hours: RegularHours) => S | null;
   sessionErrors: (sessions: S[], hours: RegularHours, market: Market) => E[];
   renderDetails: (props: SessionDetailsProps<S, E>) => ReactNode;
+  /** 안내와 설정 사이에 둘 내용. 설정을 불러오는 것과 상관없이 보인다. */
+  beforeSettings?: ReactNode;
 }) {
   const env = findEnvironment(environment);
   const { state, draft, setDraft, dirty, saving, save, retry } = useAutoTradingSettings(environment, feature);
@@ -79,6 +82,8 @@ export function AutoTradingSettingsPage<S extends BaseSession, E extends Session
           </p>
         ))}
       </div>
+
+      {beforeSettings}
 
       {state.status === "loading" && (
         <div role="status" className="flex items-center gap-2 rounded-3xl bg-surface p-6 text-sub">

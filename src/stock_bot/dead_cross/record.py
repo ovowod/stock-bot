@@ -70,7 +70,10 @@ def load(path: Path) -> Loaded:
     recent_sells = data.get("recent_sells")
     if not isinstance(recent_sells, list) or not all(isinstance(s, dict) for s in recent_sells):
         raise ValueError("recent_sells가 객체 목록이 아닙니다")
-    return Loaded({code: _read(code, item) for code, item in stocks.items()}, recent_sells)
+    return Loaded(
+        {code: _read(code, item) for code, item in stocks.items()},
+        [_settled(sell) for sell in recent_sells],
+    )
 
 
 def write(path: Path, memory: dict[str, Memory], recent_sells: list[dict[str, Any]]) -> None:
@@ -100,6 +103,13 @@ def write(path: Path, memory: dict[str, Memory], recent_sells: list[dict[str, An
 def format_moment(value: datetime | None) -> str | None:
     """UTC ISO 8601, 초까지."""
     return None if value is None else value.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def _settled(sell: dict[str, Any]) -> dict[str, Any]:
+    """주문 도중 서버가 꺼져 결과를 받지 못한 항목은 결과 확인 불가로 읽는다."""
+    if sell.get("state") == "sending":
+        return {**sell, "state": "failed", "reason": "unknown"}
+    return sell
 
 
 def _read(code: str, item: Any) -> Memory:

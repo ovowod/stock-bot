@@ -588,6 +588,15 @@ export interface DeadCrossStock {
   auto_sell: TrailingStopAutoSell | null;
 }
 
+/** 최근 자동 매도 하나. 칸은 auto_sell과 같고, 전량 체결로 종목이 사라져도 남는다. */
+export interface DeadCrossRecentSell extends TrailingStopAutoSell {
+  code: string;
+  name: string;
+  crossed_bar: string;
+  /** 앞 세션 실행에서 일어난 하향 돌파를 다시 판 것인가. */
+  retry: boolean;
+}
+
 export interface DeadCrossStatus {
   environment: EnvironmentValue;
   market: "domestic" | "us";
@@ -599,9 +608,11 @@ export interface DeadCrossStatus {
   /** Dead Cross 제외종목 코드. */
   excluded: string[];
   stocks: DeadCrossStock[];
+  /** 최근 자동 매도 10건까지. 최신이 앞이다. */
+  recent_sells: DeadCrossRecentSell[];
 }
 
-/** 키움을 부르지 않는 상태 조회. Dead Cross 보기가 열려 있는 동안 3초마다 부른다. */
+/** 키움을 부르지 않는 상태 조회. Dead Cross 보기와 설정 화면이 열려 있는 동안 3초마다 부른다. */
 export function fetchDeadCrossStatus(environment: EnvironmentValue, signal: AbortSignal): Promise<DeadCrossStatus> {
   return getJson<DeadCrossStatus>(`/api/environments/${environment}/dead-cross/status`, signal);
 }

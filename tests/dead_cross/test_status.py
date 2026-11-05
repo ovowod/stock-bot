@@ -62,6 +62,7 @@ def test_paper_environment_answers_with_the_session_covering_now(status_client, 
         "session": dc_session("10:00", "11:00"),
         "excluded": ["000660"],
         "stocks": [],
+        "recent_sells": [],
     }
     assert kiwoom.requests == []
 

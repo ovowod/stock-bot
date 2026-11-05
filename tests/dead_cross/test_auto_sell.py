@@ -54,6 +54,8 @@ pytestmark = pytest.mark.anyio
 
 # 10:00에 받는 5분봉. 09:55 봉에서 단기(95)가 장기(96.67) 아래로 내려갔다.
 CROSSING = ["1", "90", "100", "100", "100"]
+# 09:50 봉에서 이미 단기가 장기 아래였다.
+ALREADY_BELOW = ["1", "80", "90", "100", "100"]
 BAR_0955 = datetime(2026, 10, 26, 9, 55, tzinfo=KST)
 BAR_0950 = datetime(2026, 10, 26, 9, 50, tzinfo=KST)
 BAR_0945 = datetime(2026, 10, 26, 9, 45, tzinfo=KST)
@@ -673,3 +675,83 @@ async def test_purchase_price_rechecked_right_before_sending(data_dir, caplog):
     released = next(r for r in caplog.records if r.getMessage() == "dead_cross_released")
     assert released.fields["previous_purchase_price"] == "60000"
     assert released.fields["purchase_price"] == "61000"
+
+
+async def test_recent_sells_lists_each_result_and_survives_a_restart(data_dir):
+    write_dc(data_dir)
+    clock = Clock()
+    kiwoom = dc_kiwoom(chart_at(CROSSING)).reply("kt10001", kiwoom_error(1, "거부"), SELL_REPLY)
+    async with running(FakeRealtime(), kiwoom, data_dir, clock) as app:
+        await until_status(app, lambda b: sell_state(b) == "failed")
+        clock.at = AT_10 + timedelta(days=1)
+        body = await until_status(app, lambda b: sell_state(b) == "accepted")
+    async with running(FakeRealtime(), kiwoom, data_dir, clock) as app:
+        restarted = await status(app)
+
+    assert body["recent_sells"] == [
+        {
+            "code": "005930",
+            "name": "삼성전자",
+            "crossed_bar": utc(BAR_0955),
+            "retry": True,
+            "state": "accepted",
+            "reason": None,
+            "quantity": 3,
+            "order_no": "0000138",
+            "at": utc(clock.at),
+        },
+        {
+            "code": "005930",
+            "name": "삼성전자",
+            "crossed_bar": utc(BAR_0955),
+            "retry": False,
+            "state": "failed",
+            "reason": "rejected",
+            "quantity": 3,
+            "order_no": None,
+            "at": utc(AT_10),
+        },
+    ]
+    # 재시작 뒤에는 아직 데드크로스 발생이라 다시 시도가 앞에 더해질 수 있다.
+    assert restarted["recent_sells"][-2:] == body["recent_sells"]
+    assert read_record(data_dir)["recent_sells"][-2:] == body["recent_sells"]
+
+
+async def test_recent_sells_keeps_the_latest_ten(data_dir):
+    write_dc(data_dir)
+    older = [{"code": str(n), "state": "accepted"} for n in range(10)]
+    write_record(data_dir, {}, recent_sells=older)
+    kiwoom = dc_kiwoom(chart_at(CROSSING))
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        body = await until_status(app, lambda b: sell_state(b) == "accepted")
+
+    assert [s["code"] for s in body["recent_sells"]] == ["005930", *map(str, range(9))]
+
+
+async def test_sell_interrupted_by_a_restart_stays_as_unknown(data_dir):
+    write_dc(data_dir)
+    kiwoom = dc_kiwoom(chart_at(ALREADY_BELOW))
+    sending = dc_kiwoom(chart_at(CROSSING))
+    gate = nth_call_gate(sending, "kt10001", 1)
+    async with running(FakeRealtime(), gate, data_dir) as app:
+        body = await until_status(app, lambda b: sell_state(b) == "sending")
+        await gate.hit.wait()
+        saved = read_record(data_dir)["recent_sells"]
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        restarted = await until_status(app, judged)
+
+    assert [s["state"] for s in body["recent_sells"]] == ["sending"]
+    assert [s["state"] for s in saved] == ["sending"]
+    # 재시작 뒤 다시 시도가 앞에 더해질 수 있어, 끊긴 시도는 맨 뒤에서 본다.
+    entry = restarted["recent_sells"][-1]
+    assert (entry["state"], entry["reason"]) == ("failed", "unknown")
+
+
+async def test_environment_without_a_watch_has_no_recent_sells(data_dir):
+    write_dc(data_dir, environment="domestic_real")
+    async with running(
+        FakeRealtime(), dc_kiwoom(chart_at(CROSSING)), data_dir, environ=REAL_ENV
+    ) as app:
+        body = await status(app, "domestic_real")
+
+    assert body["recent_sells"] == []

@@ -43,6 +43,32 @@ const searchItem = (code: string, name: string) => ({
 
 type Reply = { status?: number; body: unknown; delayMs?: number };
 
+const watchStatus = (environment: string, extra: Record<string, unknown> = {}) => ({
+  environment,
+  market: environment.startsWith("us") ? "us" : "domestic",
+  timezone: environment.startsWith("us") ? "America/New_York" : "Asia/Seoul",
+  watching: false,
+  not_watching_reason: environment.endsWith("real") ? "real" : "no_session",
+  session: null,
+  excluded: [],
+  stocks: [],
+  recent_sells: [],
+  ...extra,
+});
+
+const recentSell = (code: string, name: string, overrides: Record<string, unknown> = {}) => ({
+  code,
+  name,
+  crossed_bar: "2026-11-02T00:55:00+00:00",
+  retry: false,
+  state: "accepted",
+  reason: null,
+  quantity: 10,
+  order_no: "0000138",
+  at: "2026-11-02T01:00:06+00:00",
+  ...overrides,
+});
+
 /** Dead Cross·Trailing Stop 조회·저장과 종목 검색을 가짜로 응답한다. Dead Cross 저장 본문을 모아 돌려준다. */
 async function mockDeadCross(
   page: Page,
@@ -51,9 +77,11 @@ async function mockDeadCross(
     save = (environment: string, body: Partial<Settings>): Reply => ({
       body: { ...settings(environment), ...body, updated_at: "2026-11-02T01:00:00+00:00" },
     }),
+    watch = (environment: string): Reply => ({ body: watchStatus(environment) }),
   }: {
     load?: (environment: string) => Reply;
     save?: (environment: string, body: Partial<Settings>) => Reply;
+    watch?: (environment: string) => Reply;
   } = {},
 ) {
   const saved: { environment: string; body: Partial<Settings> }[] = [];
@@ -71,6 +99,10 @@ async function mockDeadCross(
     }
     if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
     await route.fulfill({ status: reply.status ?? 200, json: reply.body }).catch(() => {});
+  });
+  await page.route("**/api/environments/*/dead-cross/status", (route) => {
+    const reply = watch(new URL(route.request().url()).pathname.split("/")[3]);
+    return route.fulfill({ status: reply.status ?? 200, json: reply.body });
   });
   await page.route("**/api/environments/*/trailing-stop", (route) => {
     const environment = new URL(route.request().url()).pathname.split("/")[3];
@@ -135,6 +167,82 @@ async function expectNoHorizontalScroll(page: Page) {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
 }
+
+test("감시 상태와 지금 세션, 최근 자동 매도를 보여준다", async ({ page }) => {
+  await page.clock.install({ time: new Date("2026-11-02T01:30:00Z") });
+  await mockDeadCross(page, {
+    watch: (environment) => ({
+      body: watchStatus(environment, {
+        watching: true,
+        not_watching_reason: null,
+        session: { start: "09:00", end: "15:30", enabled: true, bar_period: "5m", short_period: 5, long_period: 20 },
+        recent_sells: [
+          recentSell("005930", "삼성전자", { retry: true }),
+          recentSell("000660", "SK하이닉스", {
+            state: "failed",
+            reason: "no_sellable",
+            quantity: 0,
+            order_no: null,
+            at: "2026-10-30T01:00:06+00:00",
+          }),
+          recentSell("035420", "NAVER", { state: "sending", quantity: null, order_no: null }),
+        ],
+      }),
+    }),
+  });
+  await openDeadCross(page);
+
+  const panel = page.getByRole("region", { name: "Dead Cross 감시 상태" });
+  await expect(panel.getByText("감시 중", { exact: true })).toBeVisible();
+  await expect(panel.getByText("지금 세션 09:00–15:30 · 5분봉 · 단기 5봉 · 장기 20봉")).toBeVisible();
+  const items = panel.getByRole("list", { name: "최근 자동 매도" }).getByRole("listitem");
+  await expect(items).toHaveCount(3);
+  await expect(items.nth(0)).toContainText("삼성전자 (005930)");
+  await expect(items.nth(0)).toContainText("접수");
+  await expect(items.nth(0)).toContainText("10:00 · 10주 · 주문번호 0000138 · 다시 시도");
+  await expect(items.nth(1)).toContainText("실패 · 매도 가능 수량 없음");
+  await expect(items.nth(1)).toContainText("10/30 10:00 · 0주");
+  await expect(items.nth(2)).toContainText("보내는 중");
+  await expectNoHorizontalScroll(page);
+});
+
+test("감시가 멈췄으면 이유를 보이고, 목록이 비었으면 안내한다", async ({ page }) => {
+  await mockDeadCross(page, {
+    watch: (environment) => ({
+      body: watchStatus(environment, { not_watching_reason: "connection_replaced" }),
+    }),
+  });
+  await openDeadCross(page);
+
+  const panel = page.getByRole("region", { name: "Dead Cross 감시 상태" });
+  await expect(panel.getByText("감시 안 함 · 실시간 연결이 밀려남")).toBeVisible();
+  await expect(panel.getByText("최근 자동 매도가 없습니다")).toBeVisible();
+});
+
+test("상태를 받지 못하면 마지막 값과 실패 안내를 보인다", async ({ page }) => {
+  await page.clock.install({ time: new Date("2026-11-02T01:30:00Z") });
+  let failing = false;
+  await mockDeadCross(page, {
+    watch: (environment) =>
+      failing
+        ? { status: 503, body: { error: { kind: "config_error", message: "상태 오류" } } }
+        : {
+            body: watchStatus(environment, {
+              watching: true,
+              not_watching_reason: null,
+              recent_sells: [recentSell("005930", "삼성전자")],
+            }),
+          },
+  });
+  await openDeadCross(page);
+
+  const panel = page.getByRole("region", { name: "Dead Cross 감시 상태" });
+  await expect(panel.getByText("삼성전자 (005930)")).toBeVisible();
+  failing = true;
+  await page.clock.runFor(3000);
+  await expect(panel.getByRole("alert")).toContainText("Dead Cross 상태를 불러오지 못했습니다. 마지막으로 받은 상태를 보여줍니다.");
+  await expect(panel.getByText("삼성전자 (005930)")).toBeVisible();
+});
 
 test("자동매매 → Trailing Stop 아래의 Dead Cross에서 안내 문구와 빈 설정을 보여준다", async ({ page }, info) => {
   const { loads } = await mockDeadCross(page);

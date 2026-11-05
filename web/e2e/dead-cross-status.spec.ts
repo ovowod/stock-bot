@@ -91,6 +91,7 @@ const status = (environment: string, extra: Record<string, unknown> = {}) => {
     session: ON,
     excluded: [] as string[],
     stocks: [],
+    recent_sells: [],
     ...extra,
   };
 };

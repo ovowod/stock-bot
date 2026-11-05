@@ -60,6 +60,8 @@ RETRY_MAX_SECONDS = 60.0
 MA_PLACES = {Market.DOMESTIC: Decimal("0.01"), Market.US: Decimal("0.0001")}
 # 공용 자동 매도에 알리는 이 기능의 이름. 체결 알림에 그대로 붙는다.
 AUTO_SELL_SOURCE = "Dead Cross"
+# 상태 조회와 판정 기록 파일에 남기는 최근 자동 매도 수.
+RECENT_SELLS_LIMIT = 10
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 
@@ -74,6 +76,8 @@ class WatchState:
     # 감시가 쓰고 있는 Dead Cross 세션과 제외종목. 설정 파일을 읽지 못해 멈춰 있으면 None이다.
     sessions: list[dict[str, Any]] | None
     excluded: list[str]
+    # 최근 자동 매도. 최신이 앞이다.
+    recent_sells: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -296,6 +300,7 @@ class _Watch:
             [self._stock(code, reason) for code in codes],
             None if self._settings_broken else self._sessions,
             sorted(self._excluded),
+            self._recent_sells,
         )
 
     def _not_watching_reason(self) -> str | None:
@@ -793,7 +798,18 @@ class _Watch:
             _span(session),
             retry,
         )
-        run.auto_sells[code] = _attempt("sending", None, None, None, self._owner.now())
+        attempt = run.auto_sells[code] = _attempt("sending", None, None, None, self._owner.now())
+        # 주문을 보내기 전에 저장한다. 응답 전에 서버가 꺼져도 시도가 목록에 남는다.
+        recent = {
+            "code": code,
+            "name": holding.name,
+            "crossed_bar": format_moment(memory.crossed_bar),
+            "retry": retry,
+            **attempt,
+        }
+        self._recent_sells.insert(0, recent)
+        del self._recent_sells[RECENT_SELLS_LIMIT:]
+        self._write("auto_sell_started")
         log(
             logger,
             logging.INFO,
@@ -804,9 +820,11 @@ class _Watch:
             crossed_bar=format_moment(memory.crossed_bar),
         )
         # 차트 조회의 요청 ID가 만들어질 때의 문맥을 따라 매도 작업으로 넘어간다.
-        self._spawn(self._sell(run, trigger, request_id_var.get()))
+        self._spawn(self._sell(run, trigger, recent, request_id_var.get()))
 
-    async def _sell(self, run: _Run, trigger: SellTrigger, request_id: str) -> None:
+    async def _sell(
+        self, run: _Run, trigger: SellTrigger, recent: dict[str, Any], request_id: str
+    ) -> None:
         """국내는 거래소가 없어 빈 값으로 보낸다."""
         code = trigger.code
         result = await self._owner.auto_sell.sell(
@@ -818,7 +836,9 @@ class _Watch:
             ready=lambda: self._may_send(run, trigger),
             confirm=lambda holding: self._confirm_holding(run, code, holding),
         )
-        run.auto_sells[code] = _result_attempt(result, self._owner.now())
+        attempt = run.auto_sells[code] = _result_attempt(result, self._owner.now())
+        recent.update(attempt)
+        self._write("auto_sell_finished")
         log(
             logger,
             logging.INFO if result.outcome in ("accepted", "skipped") else logging.WARNING,

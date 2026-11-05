@@ -132,7 +132,7 @@ function ViewToggle({ value, onChange }: { value: ViewMode; onChange: (value: Vi
  * active인 동안 상태(Trailing Stop·Dead Cross)를 받는다. 처음과 탭이 다시 보일 때는 바로, 그 뒤로는 3초마다 받는다.
  * 탭이 숨으면 멈춘다. 실패하면 마지막으로 받은 상태를 두고 error에 담는다.
  */
-function usePolledStatus<T>(
+export function usePolledStatus<T>(
   fetcher: (environment: EnvironmentValue, signal: AbortSignal) => Promise<T>,
   environment: EnvironmentValue,
   active: boolean,
@@ -194,7 +194,7 @@ const INELIGIBLE: Record<NonNullable<TrailingStopStock["ineligible_reason"]>, st
   unknown_exchange: "거래소 확인 불가",
 };
 
-const FAILED: Record<NonNullable<TrailingStopAutoSell["reason"]>, string> = {
+export const FAILED: Record<NonNullable<TrailingStopAutoSell["reason"]>, string> = {
   rejected: "거부",
   unknown: "결과 확인 불가",
   in_progress: "다른 자동 매도 진행 중",
@@ -364,7 +364,7 @@ function criteriaText(status: TrailingStopStatus): string {
 }
 
 /** 투자 환경 시간대의 시각. 그 시간대에서 오늘이 아니면 날짜를 붙인다(예: 11/01 10:03). */
-function stampText(iso: string, timeZone: string): string {
+export function stampText(iso: string, timeZone: string): string {
   const parts = (date: Date) =>
     Object.fromEntries(
       new Intl.DateTimeFormat("en-CA", {
@@ -400,7 +400,7 @@ function StatusBadge({ label }: { label: StatusLabel | null }) {
   );
 }
 
-const CROSS_REASON: Record<DeadCrossReason, string> = {
+export const CROSS_REASON: Record<DeadCrossReason, string> = {
   no_session: "켜진 세션 없음",
   real: "실전투자",
   excluded: "제외종목",
