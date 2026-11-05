@@ -1,8 +1,9 @@
 """Dead Cross 감시: 모의투자 보유종목의 차트로 이동평균을 내고 하향 돌파를 판정한다.
 
-켜진 Dead Cross 세션 동안 보유종목을 읽고 종목마다 차트(REST)를 조회한다. 매도 주문은 내지 않고
-상태만 바꾼다. 기억(마지막 판정 봉·데드크로스 발생)은 투자 환경마다 메모리에 두고 판정 기록
-파일(record.py)에 써서, 세션과 날짜를 넘기고 서버를 다시 시작해도 이어 간다.
+켜진 Dead Cross 세션 동안 보유종목을 읽고 종목마다 차트(REST)를 조회한다. 판정 뒤 데드크로스
+발생이 남아 있으면 공용 자동 매도(AutoSell)로 매도 가능 수량 전량을 시장가로 판다. 기억(마지막
+판정 봉·데드크로스 발생)은 투자 환경마다 메모리에 두고 판정 기록 파일(record.py)에 써서,
+세션과 날짜를 넘기고 서버를 다시 시작해도 이어 간다.
 
 조회 시점: 세션 시작, 설정 저장, 내 계좌 체결, 분봉이 끝난 5초 뒤. 투자 환경마다 조회 차례는
 하나만 돌고, 도는 동안 들어온 요청은 끝난 뒤 한 차례로 합친다. 차례마다 먼저 보유종목을 다시 읽는다.
@@ -15,7 +16,7 @@ import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -26,7 +27,9 @@ from stock_bot.auto_trading.settings import TIMEZONES, FeatureSettingsStore
 from stock_bot.core.config import ENVIRONMENTS, EnvironmentSpec, Market
 from stock_bot.core.errors import AppError
 from stock_bot.core.logging_setup import environment_var, log, request_id_var
+from stock_bot.core.notification import DiscordNotifier
 from stock_bot.dead_cross import record
+from stock_bot.dead_cross.alerts import RESULT_EMBEDS, SellTrigger
 from stock_bot.dead_cross.bars import (
     Bar,
     chart_request,
@@ -41,6 +44,8 @@ from stock_bot.fill.feed import FeedState, FeedStatus, Fill, FillFeed
 from stock_bot.kiwoom.kiwoom import KiwoomClient
 from stock_bot.kiwoom.realtime import EventKind, RealtimeEvent, RealtimeHub
 from stock_bot.kiwoom.us_exchange import US_EXCHANGE_CODES
+from stock_bot.order.auto_sell import AutoSell
+from stock_bot.order.order import AutoSellResult
 
 logger = logging.getLogger("stock_bot.dead_cross_watch")
 
@@ -53,6 +58,8 @@ RETRY_INITIAL_SECONDS = 1.0
 RETRY_MAX_SECONDS = 60.0
 # 화면에 보이는 이동평균 자리수. 국내는 원 단위 가격의 소수 둘째, 미국은 달러 가격의 소수 넷째다.
 MA_PLACES = {Market.DOMESTIC: Decimal("0.01"), Market.US: Decimal("0.0001")}
+# 공용 자동 매도에 알리는 이 기능의 이름. 체결 알림에 그대로 붙는다.
+AUTO_SELL_SOURCE = "Dead Cross"
 
 PositionLookup = Callable[[EnvironmentSpec], Awaitable[list[dict[str, Any]]]]
 
@@ -70,12 +77,25 @@ class WatchState:
 
 
 @dataclass(frozen=True)
+class _Held:
+    """판정할 수 있는 보유종목 한 줄."""
+
+    name: str
+    # 미국 종목의 거래소. 국내는 None이다.
+    exchange: str | None
+
+
+@dataclass(frozen=True)
 class _Run:
     """켜진 Dead Cross 세션이 새로 시작될 때마다 하나. 기억은 실행에 묶이지 않는다."""
 
     number: int
     day: date
     span: str
+    # 종목코드 -> 이 실행에서 낸 가장 최근 자동 매도. 상태 조회의 auto_sell 모양이다.
+    auto_sells: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 이 실행에서 자동 매도를 시도한 (종목코드, 발생 봉). 같은 발생 봉으로 다시 내지 않는다.
+    attempted: set[tuple[str, datetime]] = field(default_factory=set)
 
     def covers(self, found: tuple[date, dict[str, Any]] | None) -> bool:
         """그 날짜·세션이 이 실행의 것인가. 기준만 바뀌면 같은 실행이다."""
@@ -100,17 +120,21 @@ class DeadCrossWatcher:
         kiwoom: KiwoomClient,
         settings: FeatureSettingsStore,
         positions: PositionLookup,
+        auto_sell: AutoSell,
         hub: RealtimeHub,
         feed: FillFeed,
+        notifier: DiscordNotifier,
         now: Callable[[], datetime],
         record_dir: Path,
     ) -> None:
         self.kiwoom = kiwoom
         self.settings = settings
         self.positions = positions
+        self.auto_sell = auto_sell
         self.hub = hub
         # 내 계좌 체결. 체결되면 보유종목이 바뀌므로 다시 읽는다.
         self.feed = feed
+        self.notifier = notifier
         self.now = now
         # 투자 환경마다 판정 기록 파일 하나를 둔다.
         self.record_dir = record_dir
@@ -171,9 +195,8 @@ class _Watch:
         self._runs = 0
         # 다음에 봉이 끝났다고 보고 조회할 시각. 일봉 세션과 세션 밖은 None이다.
         self._due: datetime | None = None
-        # 종목코드 -> 미국 거래소(국내는 None). 현금잔고이고 판정할 수 있는 종목만 담는다.
-        # 제외종목도 담는다.
-        self._holdings: dict[str, str | None] = {}
+        # 현금잔고이고 판정할 수 있는 종목만 담는다. 제외종목도 담는다.
+        self._holdings: dict[str, _Held] = {}
         # 현금잔고가 있지만 판정할 수 없는 종목코드 -> 이유. 신용 보유분만 있는 종목은 담지 않는다.
         self._ineligible: dict[str, str] = {}
         self._holdings_ready = False
@@ -324,6 +347,7 @@ class _Watch:
             "judged_bar": None if memory is None else format_moment(memory.judged_bar),
             "crossed_at": None if memory is None else format_moment(memory.crossed_at),
             "crossed_bar": None if memory is None else format_moment(memory.crossed_bar),
+            "auto_sell": None if self._run is None else self._run.auto_sells.get(code),
         }
 
     async def _tick(self) -> None:
@@ -518,7 +542,7 @@ class _Watch:
                 return ok
             if code in self._excluded or code not in self._holdings:
                 continue
-            if not await self._fetch(run, code, self._holdings[code]):
+            if not await self._fetch(run, code, self._holdings[code].exchange):
                 ok = False
         return ok
 
@@ -527,7 +551,7 @@ class _Watch:
         if found is None:
             return True
         session = found[1]
-        basis = Basis(session["bar_period"], session["short_period"], session["long_period"])
+        basis = _session_basis(session)
         version, epoch = self._settings_version, self._epochs.get(code, 0)
         memory = self.memory.get(code)
         judged = memory.judged_bar if memory is not None and memory.basis == basis else None
@@ -589,7 +613,8 @@ class _Watch:
                     self._pending.append("stale")
                 return True
             self._failed.discard(code)
-            self._judge(run, code, basis, bars, judged, now)
+            crossed = self._judge(run, code, basis, bars, judged, now)
+            self._sell_if_crossed(run, code, session, basis, retry=not crossed)
             return True
         finally:
             request_id_var.reset(token)
@@ -602,10 +627,11 @@ class _Watch:
         bars: list[Bar],
         judged: datetime | None,
         now: datetime,
-    ) -> None:
+    ) -> bool:
         """마지막 판정 봉 뒤의 완료 봉을 오래된 것부터 차례로 판정한다.
 
         기억이 없거나 기준이 바뀌었으면 가장 최근 완료 봉 하나만 판정한다.
+        이번 판정에서 하향 돌파가 일어나 풀리지 않았으면 True다.
         """
         short, long = basis.short_period, basis.long_period
         if len(bars) >= long:
@@ -642,9 +668,10 @@ class _Watch:
                     completed=len(bars),
                     needed=long + 1,
                 )
-            return
+            return False
         self._short_of_bars.discard(code)
         memory = self.memory.get(code)
+        crossed = False
         for k in indexes:
             bar = bars[k]
             values = (
@@ -658,8 +685,10 @@ class _Watch:
             event = _cross(memory, *values)
             if event == "crossed":
                 memory.crossed_at, memory.crossed_bar = now, bar.start
+                crossed = True
             elif event == "released":
                 memory.crossed_at = memory.crossed_bar = None
+                crossed = False
             memory.basis, memory.judged_bar = basis, bar.start
             log(
                 logger,
@@ -678,6 +707,117 @@ class _Watch:
             )
         self._write("judged")
         self._sync_fills()
+        return crossed
+
+    def _sell_if_crossed(
+        self, run: _Run, code: str, session: dict[str, Any], basis: Basis, retry: bool
+    ) -> None:
+        """판정을 끝낸 종목이 데드크로스 발생이면 자동 매도를 따로 돌린다.
+
+        조회 차례는 주문 결과를 기다리지 않는다. 같은 발생 봉으로는 이 실행에서 한 번만 내므로,
+        첫 매도와 다음 실행의 다시 시도를 이 한 곳이 다룬다. 기준이 바뀐 뒤 봉이 모자라
+        풀림을 판정하지 못했으면 내지 않는다.
+        """
+        memory = self.memory.get(code)
+        values = self._values.get(code)
+        if memory is None or memory.crossed_bar is None or memory.basis != basis:
+            return
+        if values is None or values.basis != basis:
+            return
+        if (code, memory.crossed_bar) in run.attempted:
+            return
+        run.attempted.add((code, memory.crossed_bar))
+        holding = self._holdings[code]
+        places = MA_PLACES[self.spec.market]
+        trigger = SellTrigger(
+            code,
+            holding.name,
+            holding.exchange,
+            memory.crossed_bar,
+            basis,
+            values.short.quantize(places, rounding=ROUND_HALF_UP),
+            values.long.quantize(places, rounding=ROUND_HALF_UP),
+            _span(session),
+            retry,
+        )
+        run.auto_sells[code] = _attempt("sending", None, None, None, self._owner.now())
+        log(
+            logger,
+            logging.INFO,
+            "dead_cross_auto_sell_started",
+            code=code,
+            run=run.number,
+            attempt="retry" if retry else "trigger",
+            crossed_bar=format_moment(memory.crossed_bar),
+        )
+        # 차트 조회의 요청 ID가 만들어질 때의 문맥을 따라 매도 작업으로 넘어간다.
+        self._spawn(self._sell(run, trigger, request_id_var.get()))
+
+    async def _sell(self, run: _Run, trigger: SellTrigger, request_id: str) -> None:
+        """국내는 거래소가 없어 빈 값으로 보낸다."""
+        code = trigger.code
+        result = await self._owner.auto_sell.sell(
+            self.spec,
+            code,
+            trigger.exchange or "",
+            source=AUTO_SELL_SOURCE,
+            request_id=request_id,
+            ready=lambda: self._may_send(run, trigger),
+        )
+        run.auto_sells[code] = _result_attempt(result, self._owner.now())
+        log(
+            logger,
+            logging.INFO if result.outcome in ("accepted", "skipped") else logging.WARNING,
+            "dead_cross_auto_sell_finished",
+            code=code,
+            run=run.number,
+            outcome=result.outcome,
+            quantity=result.quantity,
+            order_no=result.order_no,
+            cause=result.cause,
+        )
+        embed = RESULT_EMBEDS.get(result.outcome)
+        if embed is not None:
+            sent = await self._owner.notifier.send(
+                embed=embed(self.spec, trigger, result), spec=self.spec
+            )
+            log(
+                logger,
+                logging.INFO,
+                "dead_cross_notified",
+                reason=f"auto_sell_{result.outcome}",
+                code=code,
+                sent=sent,
+            )
+
+    def _may_send(self, run: _Run, trigger: SellTrigger) -> bool:
+        """키움에 보내기 직전 확인. 거절하면 보내지 않고, 발생이 남아 있으면 다음 실행에서 낸다."""
+        code = trigger.code
+        memory = self.memory.get(code)
+        found = self._session_at(self._owner.now())
+        reason = None
+        if self._is_stopped():
+            reason = "stopped"
+        elif found is None or run is not self._run or not run.covers(found):
+            reason = "session_changed"
+        elif _session_basis(found[1]) != trigger.basis:
+            reason = "basis_changed"
+        elif code in self._excluded:
+            reason = "excluded"
+        elif memory is None:
+            reason = "forgotten"
+        elif memory.crossed_bar != trigger.crossed_bar:
+            reason = "released"
+        if reason is not None:
+            log(
+                logger,
+                logging.INFO,
+                "dead_cross_send_refused",
+                code=code,
+                run=run.number,
+                reason=reason,
+            )
+        return reason is None
 
     def _forget_excluded(self) -> None:
         """제외종목에 든 종목의 기억과 화면 값을 버린다. 기준만 바꾼 저장으로는 버리지 않는다."""
@@ -859,13 +999,13 @@ class _Watch:
 
 def _check_holdings(
     market: Market, rows: Sequence[dict[str, Any]]
-) -> tuple[dict[str, str | None], dict[str, str]]:
-    """보유종목 줄을 판정할 종목(코드 -> 미국 거래소)과 대상 아님(코드 -> 이유)으로 나눈다.
+) -> tuple[dict[str, _Held], dict[str, str]]:
+    """보유종목 줄을 판정할 종목과 대상 아님(코드 -> 이유)으로 나눈다.
 
     SL / TP·Trailing Stop과 같은 규칙이되, 매입가는 쓰지 않아 매입가 없음은 대상 아님이 아니다.
     현금잔고의 이유가 신용보다 앞서고, 같은 종목 여러 줄이 다른 이유보다 앞선다.
     """
-    eligible: dict[str, str | None] = {}
+    eligible: dict[str, _Held] = {}
     ineligible: dict[str, str] = {}
     duplicated: set[str] = set()
     for row in rows:
@@ -879,7 +1019,7 @@ def _check_holdings(
             eligible.pop(code, None)
             reason = "duplicate"
         else:
-            eligible[code] = exchange if market is Market.US else None
+            eligible[code] = _Held(row["name"], exchange if market is Market.US else None)
             continue
         if reason == "duplicate" or ineligible.get(code, "credit") == "credit":
             ineligible[code] = reason
@@ -921,8 +1061,33 @@ def _basis(basis: Basis) -> dict[str, Any]:
     }
 
 
+def _session_basis(session: dict[str, Any]) -> Basis:
+    return Basis(session["bar_period"], session["short_period"], session["long_period"])
+
+
 def _span(session: dict[str, Any]) -> str:
     return f"{session['start']}-{session['end']}"
+
+
+def _attempt(
+    state: str, reason: str | None, quantity: int | None, order_no: str | None, at: datetime
+) -> dict[str, Any]:
+    """상태 조회의 auto_sell 모양."""
+    return {
+        "state": state,
+        "reason": reason,
+        "quantity": quantity,
+        "order_no": order_no,
+        "at": format_moment(at),
+    }
+
+
+def _result_attempt(result: AutoSellResult, at: datetime) -> dict[str, Any]:
+    if result.outcome == "accepted":
+        return _attempt("accepted", None, result.quantity, result.order_no, at)
+    # 실패 이유는 결과 이름 그대로다. 매도 가능 수량 0(skipped)만 이름을 바꾼다.
+    reason = "no_sellable" if result.outcome == "skipped" else result.outcome
+    return _attempt("failed", reason, result.quantity, None, at)
 
 
 def _run_fields(run: _Run) -> dict[str, Any]:

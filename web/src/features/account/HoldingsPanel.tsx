@@ -269,7 +269,8 @@ function trailingStopItem(row: HoldingRow, status: TrailingStopStatus | null): H
   const triggered = stock?.triggered_at
     ? `${stamp(stock.triggered_at)} · ${row.formatPrice(price(stock.triggered_price))}`
     : EMPTY;
-  const autoSell = status && stock?.status === "triggered" ? autoSellText(stock.auto_sell, status, stamp) : null;
+  const autoSell =
+    status && stock?.status === "triggered" ? autoSellText(stock.auto_sell, status, stamp, "다음 시세에서 매도") : null;
   return {
     ...row.item,
     value: <StatusBadge label={label} />,
@@ -300,16 +301,17 @@ function trailingStopItem(row: HoldingRow, status: TrailingStopStatus | null): H
 }
 
 /**
- * 매도 조건 충족 종목의 자동 매도가 어디까지 왔는지. 장애로 멈췄으면 null이다(상태 칸에 멈춘 이유가 있다).
- * 서버는 이번 세션 실행의 시도만 주므로, 시도가 없으면 그 세션의 다음 시세 체결에서 판다.
+ * 매도 조건 충족·데드크로스 발생 종목의 자동 매도가 어디까지 왔는지. 장애로 멈췄으면 null이다(상태 칸에 멈춘
+ * 이유가 있다). 서버는 이번 세션 실행의 시도만 주므로, 시도가 없으면 곧 판다(pending이 언제인지 말한다).
  */
 function autoSellText(
   autoSell: TrailingStopAutoSell | null,
-  status: TrailingStopStatus,
+  status: { watching: boolean; not_watching_reason: string | null },
   stamp: (iso: string) => string,
+  pending: string,
 ): string | null {
   if (!status.watching) return status.not_watching_reason === "no_session" ? "세션 밖 · 다음 세션에 매도" : null;
-  if (autoSell === null) return "다음 시세에서 매도";
+  if (autoSell === null) return pending;
   if (autoSell.state === "sending") return "보내는 중";
   if (autoSell.state === "accepted") {
     const quantity = autoSell.quantity === null ? EMPTY : `${autoSell.quantity.toLocaleString("ko-KR")}주`;
@@ -428,7 +430,7 @@ function DeadCrossNotice({ status, error }: { status: DeadCrossStatus | null; er
           Dead Cross 상태를 불러오지 못했습니다.{status && " 마지막으로 받은 상태를 보여줍니다."} {error.message}
         </p>
       )}
-      <p className="text-xs break-keep text-sub">상태만 계산하고 팔지 않습니다.</p>
+      <p className="text-xs break-keep text-sub">하향 돌파가 일어나면 매도 가능 수량 전량을 시장가로 팝니다(모의투자만).</p>
       <p className="text-xs break-keep text-muted">
         이동평균은 완료된 봉의 종가로 계산하며 진행 중인 봉은 넣지 않습니다. 키움 차트처럼 정규장 밖 봉도 포함합니다.
       </p>
@@ -492,6 +494,7 @@ function deadCrossItem(row: HoldingRow, status: DeadCrossStatus | null): Holding
   // 보이는 값이 지금 세션과 다른 기준(이전 세션, 바꾸기 전 설정)으로 계산된 것이면 알린다.
   const basis = shown === null ? EMPTY : shown === current ? shown : `이전 기준 값 · ${shown}`;
   const crossed = stock?.crossed_at ? `${stamp(stock.crossed_at)} · ${stamp(stock.crossed_bar)} 봉` : EMPTY;
+  const autoSell = status && stock?.status === "crossed" ? autoSellText(stock.auto_sell, status, stamp, "다음 조회에서 매도") : null;
   const excluded = status ? status.excluded.includes(row.code) : null;
   const active = status === null ? EMPTY : session?.enabled ? "예" : "아니요";
   return {
@@ -513,6 +516,7 @@ function deadCrossItem(row: HoldingRow, status: DeadCrossStatus | null): Holding
       { label: "계산 기준", value: basis },
       { label: "마지막 판정 봉", value: stamp(stock?.judged_bar) },
       { label: "데드크로스 발생", value: crossed },
+      ...(autoSell === null ? [] : [{ label: "자동 매도", value: autoSell }]),
       { label: "활성 세션", value: active },
       { label: "제외종목", value: excluded === null ? EMPTY : excluded ? "예" : "아니요" },
       ...row.sellable,

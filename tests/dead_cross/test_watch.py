@@ -94,6 +94,7 @@ async def test_session_fetches_completed_bars_and_shows_moving_averages(data_dir
             "judged_bar": utc(BAR_0955),
             "crossed_at": None,
             "crossed_bar": None,
+            "auto_sell": None,
         }
     ]
     assert kiwoom.calls("kt10001") == []
@@ -188,6 +189,7 @@ async def test_chart_failure_waits_and_retries_within_the_session(data_dir):
     kiwoom = dc_kiwoom(chart)
     async with running(FakeRealtime(), kiwoom, data_dir) as app:
         failed = await until_status(app, lambda b: first(b) and first(b)["reason"])
+        assert kiwoom.calls("kt10001") == []
         chart.failing.clear()
         body = await until_status(app, judged)
 
@@ -195,7 +197,6 @@ async def test_chart_failure_waits_and_retries_within_the_session(data_dir):
     assert failed["stocks"][0]["reason"] == "chart_failed"
     assert first(body)["status"] == "crossed"
     assert first(body)["reason"] is None
-    assert kiwoom.calls("kt10001") == []
 
 
 async def test_chart_failure_keeps_a_dead_cross_and_adds_the_reason(data_dir):

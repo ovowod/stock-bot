@@ -584,6 +584,8 @@ export interface DeadCrossStock {
   judged_bar: string | null;
   crossed_at: string | null;
   crossed_bar: string | null;
+  /** 이번 세션 실행에서 낸 자동 매도. 아직 내지 않았으면 null. */
+  auto_sell: TrailingStopAutoSell | null;
 }
 
 export interface DeadCrossStatus {

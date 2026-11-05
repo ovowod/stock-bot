@@ -10,7 +10,7 @@ import httpx
 from fastapi import FastAPI
 
 from tests.fake_kiwoom import FAKE_ENV, FakeKiwoom, body_of, kiwoom_error, page_response
-from tests.sl_tp.helpers import LISTING, balance, settle, us_balance
+from tests.sl_tp.helpers import LISTING, SELL_REPLY, US_SELL_REPLY, balance, settle, us_balance
 
 KST = ZoneInfo("Asia/Seoul")
 NY = ZoneInfo("America/New_York")
@@ -39,12 +39,13 @@ def write_dc(
     *sessions: dict[str, Any],
     excluded: tuple[str, ...] = (),
     environment: str = "domestic_paper",
+    sl_tp: dict[str, Any] | None = None,
 ) -> None:
-    """Dead Cross 칸만 둔 자동매매 설정 파일."""
+    """Dead Cross 칸만 둔 자동매매 설정 파일. SL / TP는 sl_tp를 줄 때만 켠다."""
     exchange = "NASDAQ" if environment.startswith("us") else None
     path = data_dir / "auto-trading" / f"{environment}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    content = {
+    content: dict[str, Any] = {
         "version": 2,
         "dead_cross": {
             "updated_at": None,
@@ -52,6 +53,8 @@ def write_dc(
             "sessions": list(sessions or (dc_session(),)),
         },
     }
+    if sl_tp is not None:
+        content["sl_tp"] = sl_tp
     path.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
 
 
@@ -99,7 +102,12 @@ class Chart:
 
 
 def dc_kiwoom(chart: Chart, *balances: Any, api_id: str = "ka10080") -> FakeKiwoom:
-    return FakeKiwoom().reply("kt00018", *(balances or (balance(),))).respond(api_id, chart)
+    return (
+        FakeKiwoom()
+        .reply("kt00018", *(balances or (balance(),)))
+        .reply("kt10001", SELL_REPLY)
+        .respond(api_id, chart)
+    )
 
 
 def dc_us_kiwoom(chart: Chart, *balances: Any, api_id: str = "usa06011") -> FakeKiwoom:
@@ -107,6 +115,7 @@ def dc_us_kiwoom(chart: Chart, *balances: Any, api_id: str = "usa06011") -> Fake
         FakeKiwoom()
         .reply("ust21070", *(balances or (us_balance(),)))
         .reply("usa10099", {"list": LISTING})
+        .reply("ust20001", US_SELL_REPLY)
         .respond(api_id, chart)
     )
 
