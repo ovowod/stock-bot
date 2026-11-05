@@ -1,7 +1,6 @@
 """Dead Cross 설정: 자동매매 설정 파일의 dead_cross 칸.
 
 Dead Cross 세션의 기준 칸(봉 주기, 단기·장기 이동평균 기간)을 검사한다.
-매도 동작은 아직 없다. 설정만 저장한다.
 """
 
 from collections.abc import Sequence

@@ -1,6 +1,6 @@
 import { fetchDeadCrossStatus, type DeadCrossRecentSell, type DeadCrossStatus, type EnvironmentValue } from "../../api";
 import { EMPTY } from "../../format";
-import { CROSS_REASON, FAILED, stampText, usePolledStatus } from "../account/HoldingsPanel";
+import { AUTO_SELL_FAILED, CROSS_REASON, stampText, usePolledStatus } from "../account/HoldingsPanel";
 import { Panel } from "../account/parts";
 import { basisText } from "./rules";
 
@@ -14,7 +14,7 @@ function watchText(status: DeadCrossStatus | null): string {
 function resultText(sell: DeadCrossRecentSell): string {
   if (sell.state === "sending") return "보내는 중";
   if (sell.state === "accepted") return "접수";
-  return ["실패", ...(sell.reason ? [FAILED[sell.reason]] : [])].join(" · ");
+  return ["실패", ...(sell.reason ? [AUTO_SELL_FAILED[sell.reason]] : [])].join(" · ");
 }
 
 function detailText(sell: DeadCrossRecentSell, timeZone: string): string {
@@ -55,7 +55,7 @@ export function DeadCrossWatchPanel({ environment }: { environment: EnvironmentV
             최근 자동 매도
           </h4>
           {status && sells.length === 0 && <p className="mt-1 text-sm text-muted">최근 자동 매도가 없습니다</p>}
-          {sells.length > 0 && (
+          {status && sells.length > 0 && (
             <ul aria-labelledby={`dead-cross-recent-${environment}`} className="mt-2 space-y-2">
               {sells.map((sell) => (
                 <li key={`${sell.code}-${sell.at}-${sell.crossed_bar}`} className="rounded-xl bg-canvas px-3 py-2">
@@ -65,7 +65,7 @@ export function DeadCrossWatchPanel({ environment }: { environment: EnvironmentV
                     </span>
                     <span className="text-sm break-keep text-sub">{resultText(sell)}</span>
                   </div>
-                  <p className="mt-0.5 text-xs break-keep text-muted">{detailText(sell, status?.timezone ?? "Asia/Seoul")}</p>
+                  <p className="mt-0.5 text-xs break-keep text-muted">{detailText(sell, status.timezone)}</p>
                 </li>
               ))}
             </ul>

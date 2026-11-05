@@ -755,3 +755,58 @@ async def test_environment_without_a_watch_has_no_recent_sells(data_dir):
         body = await status(app, "domestic_real")
 
     assert body["recent_sells"] == []
+
+
+async def test_failed_holdings_read_still_fetches_every_chart_on_the_retry(data_dir):
+    write_dc(data_dir)
+    kiwoom = dc_kiwoom(chart_at(CROSSING), kiwoom_error(1, "잔고 조회 실패"), balance())
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        await until_status(app, lambda b: sell_state(b) == "accepted")
+
+    assert len(kiwoom.calls("ka10080")) == 1
+
+
+async def test_session_change_during_a_round_still_runs_the_new_first_round(data_dir):
+    write_dc(data_dir, *TWO_SESSIONS)
+    clock = Clock()
+    kiwoom = dc_kiwoom(chart_at(CROSSING))
+    gate = nth_call_gate(kiwoom, "ka10080", 1)
+    async with running(FakeRealtime(), gate, data_dir, clock) as app:
+        await gate.hit.wait()
+        clock.at = AT_10 + timedelta(minutes=1)
+        await until_status(app, lambda b: sell_state(b) == "accepted")
+
+    assert len(kiwoom.calls("kt10001")) == 1
+
+
+async def test_retry_does_not_sell_on_an_empty_chart(data_dir):
+    write_dc(data_dir)
+    clock = Clock()
+    chart = chart_at(CROSSING)
+    rows = chart.rows["005930"]
+    kiwoom = dc_kiwoom(chart).reply("kt10001", kiwoom_error(1, "거부"), SELL_REPLY)
+    async with running(FakeRealtime(), kiwoom, data_dir, clock) as app:
+        await until_status(app, lambda b: sell_state(b) == "failed")
+        chart.rows["005930"] = []
+        fetched = len(kiwoom.calls("ka10080"))
+        clock.at = AT_10 + timedelta(days=1)
+        await wait_until(lambda: len(kiwoom.calls("ka10080")) > fetched)
+        await settle()
+        assert len(kiwoom.calls("kt10001")) == 1
+        chart.rows["005930"] = rows
+        clock.at = AT_10 + timedelta(days=1, minutes=6)
+        await wait_until(lambda: len(kiwoom.calls("kt10001")) == 2)
+
+
+async def test_purchase_price_changed_outside_the_session_releases_the_dead_cross(data_dir):
+    write_dc(data_dir, dc_session("09:00", "09:30"))
+    write_record(data_dir, {"005930": remembered(BAR_0945, AT_10, BAR_0945)})
+    realtime = FakeRealtime()
+    kiwoom = dc_kiwoom(chart_at(CROSSING), balance(position(pur_pric="000000000061000")))
+    async with running(realtime, kiwoom, data_dir) as app:
+        [connection] = await realtime.wait_registered()
+        connection.push(fill_event())
+        body = await until_status(app, lambda b: first(b)["crossed_bar"] is None)
+
+    assert first(body)["status"] == "tracking"
+    assert kiwoom.calls("kt10001") == []

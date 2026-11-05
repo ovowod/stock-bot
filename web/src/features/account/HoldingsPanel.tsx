@@ -194,7 +194,7 @@ const INELIGIBLE: Record<NonNullable<TrailingStopStock["ineligible_reason"]>, st
   unknown_exchange: "거래소 확인 불가",
 };
 
-export const FAILED: Record<NonNullable<TrailingStopAutoSell["reason"]>, string> = {
+export const AUTO_SELL_FAILED: Record<NonNullable<TrailingStopAutoSell["reason"]>, string> = {
   rejected: "거부",
   unknown: "결과 확인 불가",
   in_progress: "다른 자동 매도 진행 중",
@@ -317,7 +317,7 @@ function autoSellText(
     const quantity = autoSell.quantity === null ? EMPTY : `${autoSell.quantity.toLocaleString("ko-KR")}주`;
     return ["접수", autoSell.order_no ?? EMPTY, quantity, stamp(autoSell.at)].join(" · ");
   }
-  const reason = autoSell.reason ? [FAILED[autoSell.reason]] : [];
+  const reason = autoSell.reason ? [AUTO_SELL_FAILED[autoSell.reason]] : [];
   return ["실패", "다음 세션에 다시 시도", ...reason].join(" · ");
 }
 

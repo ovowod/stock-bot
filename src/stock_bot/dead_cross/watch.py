@@ -454,6 +454,8 @@ class _Watch:
         if self._round is not None and not self._round.done():
             self._round.cancel()
             log(logger, logging.INFO, "dead_cross_round_cancelled", run=run.number)
+        # 취소한 차례는 아직 끝나지 않았다. 새 실행의 요청이 그것을 기다리지 않게 놓는다.
+        self._round = None
 
     def _request_round(self, reason: str) -> None:
         """조회 차례를 요청한다. 돌고 있으면 끝난 뒤 한 차례로 합쳐 다시 돈다."""
@@ -467,6 +469,8 @@ class _Watch:
 
     async def _rounds(self, run: _Run) -> None:
         delay = RETRY_INITIAL_SECONDS
+        # 보유종목을 읽지 못해 차트를 받지 못한 차례가 있다. 다시 시도는 모든 종목을 받아야 한다.
+        missed_round = False
         while self._pending:
             # 연결이 없으면 읽지 않고 기다린다. 읽은 뒤 연결되면 그사이 체결을 놓친다.
             while self._channel.connection is None:
@@ -482,9 +486,12 @@ class _Watch:
             request_id_var.set(uuid.uuid4().hex[:12])
             log(logger, logging.INFO, "dead_cross_round_started", run=run.number, reasons=reasons)
             ok = await self._read_holdings(run, reasons)
-            if ok and run is self._run:
+            if not ok:
+                missed_round = True
+            elif run is self._run:
                 # 실패 뒤 다시 시도만 남았으면 실패한 종목만 다시 받는다.
-                retry_only = reasons == ["retry"]
+                retry_only = reasons == ["retry"] and not missed_round
+                missed_round = False
                 ok = await self._fetch_all(run, set(self._failed) if retry_only else None)
             if run is not self._run:
                 return
@@ -541,15 +548,7 @@ class _Watch:
             self._forget(code, "not_held")
         for code in sorted(self._values.keys() - cash):
             self._values.pop(code)
-        for code, held in eligible.items():
-            memory = self.memory.get(code)
-            if memory is None:
-                continue
-            if memory.purchase_price is None and held.purchase_price is not None:
-                memory.purchase_price = held.purchase_price
-                self._write("purchase_price")
-            elif memory.crossed_at is not None and _purchase_changed(memory, held.purchase_price):
-                self._release_changed(code, memory, held.purchase_price)
+        self._check_purchase_prices(eligible)
         self._holdings = eligible
         self._ineligible = {c: r for c, r in ineligible.items() if r != "credit"}
 
@@ -574,10 +573,10 @@ class _Watch:
         version, epoch = self._settings_version, self._epochs.get(code, 0)
         memory = self.memory.get(code)
         judged = memory.judged_bar if memory is not None and memory.basis == basis else None
-        rebought = memory is not None and _purchase_changed(
+        purchase_changed = memory is not None and _purchase_changed(
             memory, self._holdings[code].purchase_price
         )
-        if rebought:
+        if purchase_changed:
             judged = None
         now = self._owner.now()
         request = chart_request(
@@ -637,11 +636,11 @@ class _Watch:
                     self._pending.append("stale")
                 return True
             self._failed.discard(code)
-            if rebought:
+            if purchase_changed:
                 self._restart_judging(run, code, basis, bars)
                 return True
             crossed = self._judge(run, code, basis, bars, judged, now)
-            self._sell_if_crossed(run, code, session, basis, retry=not crossed)
+            self._sell_if_crossed(run, code, session, basis, bars, retry=not crossed)
             return True
         finally:
             request_id_var.reset(token)
@@ -768,35 +767,41 @@ class _Watch:
         self._write("judging_restarted")
 
     def _sell_if_crossed(
-        self, run: _Run, code: str, session: dict[str, Any], basis: Basis, retry: bool
+        self,
+        run: _Run,
+        code: str,
+        session: dict[str, Any],
+        basis: Basis,
+        bars: list[Bar],
+        retry: bool,
     ) -> None:
         """판정을 끝낸 종목이 데드크로스 발생이면 자동 매도를 따로 돌린다.
 
         조회 차례는 주문 결과를 기다리지 않는다. 같은 발생 봉으로는 이 실행에서 한 번만 내므로,
-        첫 매도와 다음 실행의 다시 시도를 이 한 곳이 다룬다. 기준이 바뀐 뒤 봉이 모자라
-        풀림을 판정하지 못했으면 내지 않는다.
+        첫 매도와 다음 실행의 다시 시도를 이 한 곳이 다룬다. 이 응답의 가장 최근 완료 봉까지
+        지금 기준으로 판정하지 못했으면(기준 변경 뒤 봉 부족, 빈 응답) 내지 않는다.
         """
         memory = self.memory.get(code)
-        values = self._values.get(code)
         if memory is None or memory.crossed_bar is None or memory.basis != basis:
             return
-        if values is None or values.basis != basis:
+        if len(bars) < basis.long_period or bars[0].start != memory.judged_bar:
             return
         if (code, memory.crossed_bar) in run.attempted:
             return
         run.attempted.add((code, memory.crossed_bar))
         holding = self._holdings[code]
+        values = self._values[code]
         places = MA_PLACES[self.spec.market]
         trigger = SellTrigger(
-            code,
-            holding.name,
-            holding.exchange,
-            memory.crossed_bar,
-            basis,
-            values.short.quantize(places, rounding=ROUND_HALF_UP),
-            values.long.quantize(places, rounding=ROUND_HALF_UP),
-            _span(session),
-            retry,
+            code=code,
+            name=holding.name,
+            exchange=holding.exchange,
+            crossed_bar=memory.crossed_bar,
+            basis=basis,
+            short_ma=values.short.quantize(places, rounding=ROUND_HALF_UP),
+            long_ma=values.long.quantize(places, rounding=ROUND_HALF_UP),
+            session=_span(session),
+            retry=retry,
         )
         attempt = run.auto_sells[code] = _attempt("sending", None, None, None, self._owner.now())
         # 주문을 보내기 전에 저장한다. 응답 전에 서버가 꺼져도 시도가 목록에 남는다.
@@ -912,6 +917,27 @@ class _Watch:
                 reason=reason,
             )
         return reason is None
+
+    def _check_purchase_prices(self, held: dict[str, _Held]) -> None:
+        """다시 읽은 평균 매입가를 기억과 맞춘다. 기억에 값이 없으면 채우고, 다르면 발생을 푼다."""
+        for code, holding in held.items():
+            memory = self.memory.get(code)
+            if memory is None:
+                continue
+            if memory.purchase_price is None and holding.purchase_price is not None:
+                memory.purchase_price = holding.purchase_price
+                log(
+                    logger,
+                    logging.INFO,
+                    "dead_cross_purchase_price_filled",
+                    code=code,
+                    purchase_price=str(holding.purchase_price),
+                )
+                self._write("purchase_price")
+            elif memory.crossed_at is not None and _purchase_changed(
+                memory, holding.purchase_price
+            ):
+                self._release_changed(code, memory, holding.purchase_price)
 
     def _release_changed(self, code: str, memory: Memory, purchase: Decimal | None) -> None:
         """평균 매입가가 바뀐 종목의 발생을 푼다. 팔고 다시 샀을 수 있어 팔지 않는 쪽으로 간다."""
@@ -1060,7 +1086,7 @@ class _Watch:
             self._outside = self._spawn(self._refresh_outside())
 
     async def _refresh_outside(self) -> None:
-        """없는 종목의 기억만 버린다. 차트를 조회하거나 판정하지 않는다.
+        """없는 종목의 기억을 버리고 평균 매입가를 맞춘다. 차트를 조회하거나 판정하지 않는다.
 
         읽지 못하면 다시 시도하지 않는다. 다음 체결이나 다음 세션 시작 때 다시 읽는다.
         """
@@ -1088,6 +1114,7 @@ class _Watch:
             cash = {row["code"] for row in rows if not row["credit"]}
             for code in sorted(self.memory.keys() - cash):
                 self._forget(code, "not_held")
+            self._check_purchase_prices(_check_holdings(self.spec.market, rows)[0])
             log(
                 logger,
                 logging.INFO,
