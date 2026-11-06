@@ -1,4 +1,4 @@
-"""Dead Cross 상태 조회: 계좌 확인의 Dead Cross 보기가 3초마다 부른다.
+"""Dead Cross 상태 조회: 계좌 확인의 Dead Cross 보기와 설정 화면이 3초마다 부른다.
 
 키움을 부르지 않는다. 감시 여부·이유·종목과 설정은 감시의 메모리에서 읽는다.
 감시하지 않는 환경(실전, 인증정보 없음)만 설정을 자동매매 설정 파일에서 읽는다.
@@ -9,11 +9,11 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from stock_bot.auto_trading.judging import session_at
 from stock_bot.auto_trading.settings import TIMEZONES, FeatureSettingsStore
 from stock_bot.core.config import EnvironmentSpec
 from stock_bot.core.errors import AppError
 from stock_bot.core.logging_setup import log
+from stock_bot.dead_cross.settings import dead_cross_session_at
 from stock_bot.dead_cross.watch import DeadCrossWatcher
 from stock_bot.kiwoom.kiwoom import KiwoomClient
 
@@ -41,12 +41,14 @@ class DeadCrossStatus:
         시작·저장 때 읽은 설정으로 계속 판정하므로, 파일을 따로 읽으면 화면이 감시와 어긋난다.
         """
         state = self._watcher.state(spec)
+        recent_sells: list[dict[str, Any]] = []
         if state is None:
             watching, reason, stocks, sessions, excluded = self._unwatched(spec)
         else:
             watching, reason, stocks = state.watching, state.not_watching_reason, state.stocks
             sessions, excluded = state.sessions or [], state.excluded
-        found = session_at(sessions, self._now(), spec.market, include_disabled=True)
+            recent_sells = state.recent_sells
+        found = dead_cross_session_at(sessions, self._now(), spec.market, include_disabled=True)
         session = None if found is None else found[1]
         log(
             logger,
@@ -67,6 +69,7 @@ class DeadCrossStatus:
             "session": session,
             "excluded": excluded,
             "stocks": stocks,
+            "recent_sells": recent_sells,
         }
 
     def _unwatched(

@@ -91,6 +91,7 @@ const status = (environment: string, extra: Record<string, unknown> = {}) => {
     session: ON,
     excluded: [] as string[],
     stocks: [],
+    recent_sells: [],
     ...extra,
   };
 };
@@ -106,6 +107,28 @@ const stock = (code: string, overrides: Record<string, unknown> = {}) => ({
   judged_bar: null,
   crossed_at: null,
   crossed_bar: null,
+  auto_sell: null,
+  ...overrides,
+});
+
+const crossed = (code: string, auto_sell: Record<string, unknown> | null) =>
+  stock(code, {
+    status: "crossed",
+    short_ma: "100.00",
+    long_ma: "101.00",
+    basis: BASIS,
+    judged_bar: "2026-11-02T00:55:00+00:00",
+    crossed_at: "2026-11-02T01:00:05+00:00",
+    crossed_bar: "2026-11-02T00:55:00+00:00",
+    auto_sell,
+  });
+
+const attempt = (state: string, overrides: Record<string, unknown> = {}) => ({
+  state,
+  reason: null,
+  quantity: null,
+  order_no: null,
+  at: "2026-11-02T01:00:06+00:00",
   ...overrides,
 });
 
@@ -199,7 +222,7 @@ test("세 보기를 바꾸고 새로고침해도 Dead Cross 보기로 다시 열
   await expect(
     page.getByText("이동평균은 완료된 봉의 종가로 계산하며 진행 중인 봉은 넣지 않습니다. 키움 차트처럼 정규장 밖 봉도 포함합니다."),
   ).toBeVisible();
-  await expect(page.getByText("상태만 계산하고 팔지 않습니다.")).toBeVisible();
+  await expect(page.getByText("하향 돌파가 일어나면 매도 가능 수량 전량을 시장가로 팝니다(모의투자만).")).toBeVisible();
   await expect(page.getByText("지금 세션 09:00–15:30 · 5분봉 · 단기 5봉 · 장기 20봉")).toBeVisible();
   expect(requests).toEqual(["dead-cross"]);
 
@@ -279,6 +302,49 @@ test("감시 중이면 이동평균과 세 상태, 계산 대기 이유를 보�
 
   await expectNoHorizontalScroll(page);
   await page.screenshot({ path: `screenshots/${info.project.name}-dead-cross-view.png`, fullPage: true });
+});
+
+test("데드크로스 발생 종목에는 자동 매도가 어디까지 왔는지 보인다", async ({ page, isMobile }) => {
+  await page.clock.install({ time: NOW });
+  let reason: string | null = null;
+  await mockScreen(
+    page,
+    { domestic_paper: domestic("domestic_paper", [SAMSUNG, NAVER, HYNIX, KAKAO]) },
+    (environment) => ({
+      body: status(environment, {
+        watching: reason === null,
+        not_watching_reason: reason,
+        stocks: [
+          crossed("005930", attempt("sending")),
+          crossed("035420", attempt("accepted", { quantity: 10, order_no: "0000138" })),
+          crossed("000660", attempt("failed", { reason: "rejected" })),
+          // 서버는 감시가 멈추면 기억이 있는 종목의 reason에 그 이유를 담는다.
+          { ...crossed("035720", null), reason },
+        ],
+      }),
+    }),
+  );
+  await openDashboard(page);
+  await view(page, "Dead Cross").click();
+
+  const kakao = row(page, "카카오");
+  await expectStatus(row(page, "삼성전자"), isMobile, "데드크로스 발생");
+  await expectFact(row(page, "삼성전자"), "자동 매도", "보내는 중");
+  await expectFact(row(page, "NAVER"), "자동 매도", "접수 · 0000138 · 10주 · 10:00");
+  await expectFact(row(page, "SK하이닉스"), "자동 매도", "실패 · 다음 세션에 다시 시도 · 거부");
+  await expectFact(kakao, "자동 매도", "다음 조회에서 매도");
+
+  // 세션 밖이면 다음 세션에 판다.
+  reason = "no_session";
+  await page.clock.runFor(3000);
+  await expectFact(kakao, "자동 매도", "세션 밖 · 다음 세션에 매도");
+
+  // 장애로 멈추면 자동 매도 칸 없이 멈춘 이유만 보인다.
+  reason = "connection_replaced";
+  await page.clock.runFor(3000);
+  await expectStatus(kakao, isMobile, "데드크로스 발생 · 실시간 연결이 밀려남");
+  await expect(kakao.locator('dd[data-term="자동 매도"]')).toHaveCount(0);
+  await expectNoHorizontalScroll(page);
 });
 
 test("갱신이 멈춘 발생 종목은 이유를 붙이고, 이전 기준 값은 따로 표시한다", async ({ page, isMobile }) => {

@@ -127,7 +127,7 @@ def create_app(
     )
     now = now or (lambda: datetime.now(UTC))
     realtime = RealtimeHub(kiwoom, notifier, realtime_connect or connect_websocket, now)
-    # 자동 매도는 SL / TP와 Trailing Stop이 내고, 체결 알림이 그 체결을 알아본다.
+    # 자동 매도는 SL / TP, Trailing Stop, Dead Cross가 내고, 체결 알림이 그 체결을 알아본다.
     auto_sell = AutoSell(orders)
     feed = FillFeed(realtime)
     fills = FillWatcher(kiwoom, open_orders, notifier, feed, auto_sell)
@@ -158,9 +158,17 @@ def create_app(
     )
     trailing_stop.on_saved = trailing_stop_watch.settings_saved
     trailing_stop_status = TrailingStopStatus(kiwoom, trailing_stop, trailing_stop_watch, now)
-    # Dead Cross는 아직 팔지 않고 상태만 계산한다. 판정 기록은 자동매매 설정 파일과 따로 둔다.
     dead_cross_watch = DeadCrossWatcher(
-        kiwoom, dead_cross, holdings.positions, realtime, feed, now, data_dir / "dead-cross"
+        kiwoom,
+        dead_cross,
+        holdings.positions,
+        auto_sell,
+        realtime,
+        feed,
+        notifier,
+        now,
+        # 판정 기록은 봉이 끝날 때마다 바뀌므로 자동매매 설정 파일과 따로 둔다.
+        data_dir / "dead-cross",
     )
     dead_cross.on_saved = dead_cross_watch.settings_saved
     dead_cross_status = DeadCrossStatus(kiwoom, dead_cross, dead_cross_watch, now)

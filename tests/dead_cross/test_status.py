@@ -62,8 +62,18 @@ def test_paper_environment_answers_with_the_session_covering_now(status_client, 
         "session": dc_session("10:00", "11:00"),
         "excluded": ["000660"],
         "stocks": [],
+        "recent_sells": [],
     }
     assert kiwoom.requests == []
+
+
+def test_a_session_on_a_weekend_is_not_shown(status_client, data_dir):
+    write_dc(data_dir, dc_session("09:00", "11:00"))
+    saturday = datetime(2026, 10, 31, 10, 0, tzinfo=AT_10.tzinfo)
+
+    response = status_client(at=saturday).get(URL.format("domestic_paper"))
+
+    assert response.json()["session"] is None
 
 
 def test_a_disabled_session_covering_now_is_still_shown(status_client, data_dir):
