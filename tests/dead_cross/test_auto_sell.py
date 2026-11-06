@@ -71,6 +71,12 @@ SELL_TITLES = (
 )
 
 
+@pytest.fixture(autouse=True)
+def known_stock(data_dir):
+    """처음 보는 종목은 기준점만 잡으므로, 09:50 봉까지 판정한 기억으로 시작한다."""
+    write_record(data_dir, {"005930": remembered(BAR_0950)})
+
+
 def chart_at(closes: list[str], newest: datetime = AT_10) -> Chart:
     chart = Chart()
     chart.rows["005930"] = minute_rows(newest, closes)
@@ -133,6 +139,8 @@ async def test_us_sell_goes_to_the_exchange_of_the_holding(data_dir):
     write_dc(data_dir, dc_session("09:30", "16:00"), environment="us_paper")
     chart = Chart(list_key="result_list", page_size=100)
     newest = datetime(2026, 10, 26, 10, 0, tzinfo=NY)
+    last = remembered(newest - timedelta(minutes=10), purchase_price="200")
+    write_record(data_dir, {"AAPL": last}, "us_paper")
     chart.rows["AAPL"] = minute_rows(newest, CROSSING, sign="")
     discord = FakeDiscord()
     kiwoom = dc_us_kiwoom(chart)
@@ -215,13 +223,37 @@ async def test_stock_without_a_purchase_price_is_sold(data_dir):
     assert len(kiwoom.calls("kt10001")) == 1
 
 
-async def test_a_new_stock_sells_when_its_latest_bar_is_a_crossing(data_dir):
+async def test_a_new_stock_only_takes_a_baseline_from_its_first_bar(data_dir):
+    """가장 최근 완료 봉은 사기 전에 끝났을 수 있어, 하향 돌파여도 팔지 않는다."""
+    write_record(data_dir, {})
     write_dc(data_dir)
     kiwoom = dc_kiwoom(chart_at(CROSSING))
     async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        body = await until_status(app, judged)
+        await settle()
+
+    assert first(body)["status"] == "tracking"
+    assert first(body)["judged_bar"] == utc(BAR_0955)
+    assert first(body)["crossed_bar"] is None
+    assert kiwoom.calls("kt10001") == []
+
+
+async def test_a_new_stock_sells_on_a_crossing_after_its_baseline(data_dir):
+    write_record(data_dir, {})
+    write_dc(data_dir)
+    clock = Clock(AFTER_FIRST_CHECK)
+    chart = chart_at(["1", "100", "100", "100", "100"])
+    kiwoom = dc_kiwoom(chart)
+    async with running(FakeRealtime(), kiwoom, data_dir, clock) as app:
+        await until_status(app, judged)
+        chart.rows["005930"] = minute_rows(
+            AT_10 + timedelta(minutes=5), ["1", "90", "100", "100", "100", "100"]
+        )
+        clock.at = AT_10 + timedelta(minutes=5, seconds=6)
         body = await until_status(app, lambda b: sell_state(b) == "accepted")
 
-    assert first(body)["crossed_bar"] == utc(BAR_0955)
+    assert first(body)["crossed_bar"] == utc(AT_10)
+    assert len(kiwoom.calls("kt10001")) == 1
 
 
 async def test_same_crossed_bar_is_not_sold_twice_in_a_session(data_dir):
@@ -720,7 +752,7 @@ async def test_recent_sells_lists_each_result_and_survives_a_restart(data_dir):
 async def test_recent_sells_keeps_the_latest_ten(data_dir):
     write_dc(data_dir)
     older = [{"code": str(n), "state": "accepted"} for n in range(10)]
-    write_record(data_dir, {}, recent_sells=older)
+    write_record(data_dir, {"005930": remembered(BAR_0950)}, recent_sells=older)
     kiwoom = dc_kiwoom(chart_at(CROSSING))
     async with running(FakeRealtime(), kiwoom, data_dir) as app:
         body = await until_status(app, lambda b: sell_state(b) == "accepted")
@@ -810,3 +842,13 @@ async def test_purchase_price_changed_outside_the_session_releases_the_dead_cros
 
     assert first(body)["status"] == "tracking"
     assert kiwoom.calls("kt10001") == []
+
+
+async def test_a_held_stock_still_sells_when_new_criteria_cross_on_the_latest_bar(data_dir):
+    write_dc(data_dir)
+    write_record(data_dir, {"005930": remembered(BAR_0950, long_period=4)})
+    kiwoom = dc_kiwoom(chart_at(CROSSING))
+    async with running(FakeRealtime(), kiwoom, data_dir) as app:
+        body = await until_status(app, lambda b: sell_state(b) == "accepted")
+
+    assert first(body)["crossed_bar"] == utc(BAR_0955)

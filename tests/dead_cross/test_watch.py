@@ -54,8 +54,14 @@ CROSSING = [IN_PROGRESS, "90", "100", "100", "100"]
 # 09:50 봉에서 이미 단기가 장기 아래였다.
 ALREADY_BELOW = [IN_PROGRESS, "80", "90", "100", "100"]
 BAR_0955 = datetime(2026, 10, 26, 9, 55, tzinfo=KST)
+BAR_0950 = datetime(2026, 10, 26, 9, 50, tzinfo=KST)
 # 세션 시작 조회 뒤, 09:55 봉이 끝난 뒤의 확인(10:00:05)도 지난 시각. 다음 확인은 10:05:05다.
 AFTER_FIRST_CHECK = AT_10 + timedelta(seconds=6)
+
+
+def known(data_dir) -> None:
+    """09:50 봉까지 판정한 기억. 처음 보는 종목은 첫 봉을 기준점으로만 쓴다."""
+    write_record(data_dir, {"005930": remembered(BAR_0950)})
 
 
 def chart_at(closes: list[str], newest: datetime = AT_10) -> Chart:
@@ -102,6 +108,7 @@ async def test_session_fetches_completed_bars_and_shows_moving_averages(data_dir
 
 async def test_crossing_below_on_the_latest_bar_is_a_dead_cross(data_dir):
     write_dc(data_dir)
+    known(data_dir)
     async with running(FakeRealtime(), dc_kiwoom(chart_at(CROSSING)), data_dir) as app:
         body = await until_status(app, judged)
 
@@ -156,6 +163,7 @@ async def test_bars_closed_after_the_last_judgment_are_judged_in_order(data_dir)
 
 async def test_dead_cross_is_released_when_short_rises_to_long(data_dir):
     write_dc(data_dir)
+    known(data_dir)
     clock = Clock(AFTER_FIRST_CHECK)
     chart = chart_at(CROSSING)
     async with running(FakeRealtime(), dc_kiwoom(chart), data_dir, clock) as app:
@@ -195,12 +203,13 @@ async def test_chart_failure_waits_and_retries_within_the_session(data_dir):
 
     assert failed["stocks"][0]["status"] == "waiting"
     assert failed["stocks"][0]["reason"] == "chart_failed"
-    assert first(body)["status"] == "crossed"
+    assert first(body)["status"] == "tracking"
     assert first(body)["reason"] is None
 
 
 async def test_chart_failure_keeps_a_dead_cross_and_adds_the_reason(data_dir):
     write_dc(data_dir)
+    known(data_dir)
     clock = Clock(AFTER_FIRST_CHECK)
     chart = chart_at(CROSSING)
     async with running(FakeRealtime(), dc_kiwoom(chart), data_dir, clock) as app:
@@ -240,8 +249,8 @@ async def test_excluded_and_ineligible_holdings_are_not_fetched(data_dir):
     assert by_code["000660"]["reason"] == "excluded"
     assert by_code["035420"]["status"] == "ineligible"
     assert by_code["035420"]["ineligible_reason"] == "duplicate"
-    assert by_code["005930"]["status"] == "crossed"
-    assert by_code["068270"]["status"] == "crossed"
+    assert by_code["005930"]["status"] == "tracking"
+    assert by_code["068270"]["status"] == "tracking"
     fetched = sorted(body_of(r)["stk_cd"] for r in kiwoom.calls("ka10080"))
     assert fetched == ["005930", "068270"]
 
@@ -287,6 +296,7 @@ async def test_selling_out_during_the_session_forgets_the_stock(data_dir):
 
 async def test_selling_out_after_the_session_forgets_the_dead_cross(data_dir):
     write_dc(data_dir, dc_session("09:00", "10:01"))
+    known(data_dir)
     realtime = FakeRealtime()
     clock = Clock(AT_10)
     kiwoom = dc_kiwoom(chart_at(CROSSING), balance(), balance(position("000660")))
@@ -308,6 +318,7 @@ async def test_selling_out_after_the_session_forgets_the_dead_cross(data_dir):
 
 async def test_dead_cross_survives_a_restart_and_values_come_back(data_dir):
     write_dc(data_dir)
+    known(data_dir)
     async with running(FakeRealtime(), dc_kiwoom(chart_at(CROSSING)), data_dir) as app:
         await until_status(app, judged)
     kiwoom = dc_kiwoom(chart_at(CROSSING))
@@ -366,6 +377,7 @@ async def test_history_ending_before_the_last_judged_bar_judges_the_latest_only(
 
 async def test_changing_the_periods_recomputes_and_keeps_the_dead_cross(data_dir):
     write_dc(data_dir)
+    known(data_dir)
     chart = chart_at([IN_PROGRESS, "90", "100", "100", "100", "100"])
     async with running(FakeRealtime(), dc_kiwoom(chart), data_dir) as app:
         await until_status(app, lambda b: judged(b) and first(b)["status"] == "crossed")
@@ -432,6 +444,8 @@ async def test_rounds_do_not_overlap_when_a_fetch_outlasts_the_bar(data_dir):
 async def test_us_minute_bars_use_the_exchange_and_new_york_time(data_dir):
     write_dc(data_dir, dc_session("09:30", "16:00", bar_period="1m"), environment="us_paper")
     newest = NY_10.astimezone(NY)
+    last = remembered(newest - timedelta(minutes=2), bar_period="1m", purchase_price="200")
+    write_record(data_dir, {"AAPL": last}, "us_paper")
     chart = Chart(list_key="result_list", page_size=100)
     chart.rows["AAPL"] = minute_rows(newest, ["1", "190.5", "200", "200", "200"], 1, sign="")
     kiwoom = dc_us_kiwoom(chart)
@@ -501,6 +515,8 @@ async def test_us_fetch_continues_to_a_second_page_for_long_periods(data_dir):
 
 async def test_daily_bars_leave_out_today(data_dir):
     write_dc(data_dir, dc_session(bar_period="1d"))
+    day = datetime(2026, 10, 24, tzinfo=KST)
+    write_record(data_dir, {"005930": remembered(day, bar_period="1d")})
     chart = Chart(list_key="stk_dt_pole_chart_qry", page_size=600)
     # 오늘(10/26) 행은 아직 끝나지 않은 봉이다.
     chart.rows["005930"] = daily_rows(AT_10, ["1", "90", "100", "100", "100"])
@@ -520,6 +536,7 @@ async def test_daily_bars_leave_out_today(data_dir):
 
 async def test_connection_replaced_stops_the_watch(data_dir):
     write_dc(data_dir)
+    known(data_dir)
     realtime = FakeRealtime()
     async with running(realtime, dc_kiwoom(chart_at(CROSSING)), data_dir) as app:
         await until_status(app, judged)
@@ -534,6 +551,7 @@ async def test_connection_replaced_stops_the_watch(data_dir):
 
 async def test_rejected_fill_registration_waits_until_registered(data_dir):
     write_dc(data_dir)
+    known(data_dir)
     flag = {"on": True}
     kiwoom = dc_kiwoom(chart_at(CROSSING))
     async with running(rejecting("1", flag), kiwoom, data_dir) as app:
@@ -570,11 +588,12 @@ async def test_unreadable_record_stops_judging_until_settings_are_saved(data_dir
         recovered = await until_status(app, judged)
 
     assert body["stocks"] == []
-    assert first(recovered)["status"] == "crossed"
+    assert first(recovered)["status"] == "tracking"
 
 
 async def test_logs_carry_request_ids_and_moving_averages(data_dir, json_logs: JsonLines):
     write_dc(data_dir)
+    known(data_dir)
     async with running(FakeRealtime(), dc_kiwoom(chart_at(CROSSING)), data_dir) as app:
         await until_status(app, judged)
 
@@ -604,13 +623,16 @@ async def test_legacy_record_is_cleared_once_and_its_dead_cross_does_not_carry_o
     write_legacy_record(
         data_dir, {"005930": remembered(BAR_0955, crossed_at=AT_10, crossed_bar=BAR_0955)}
     )
-    kiwoom = dc_kiwoom(chart_at(ALREADY_BELOW))
+    kiwoom = dc_kiwoom(chart_at(CROSSING))
     async with running(FakeRealtime(), kiwoom, data_dir) as app:
         body = await until_status(app, judged)
+        await settle()
     async with running(FakeRealtime(), kiwoom, data_dir) as app:
         await until_status(app, judged)
+        await settle()
 
     assert first(body)["status"] == "tracking"
+    assert kiwoom.calls("kt10001") == []
     assert read_record(data_dir)["version"] == 2
     migrated = [line for line in json_logs.lines if line["event"] == "dead_cross_record_migrated"]
     assert [line["cleared_codes"] for line in migrated] == ['["005930"]']

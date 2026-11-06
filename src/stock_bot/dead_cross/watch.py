@@ -656,7 +656,8 @@ class _Watch:
     ) -> bool:
         """마지막 판정 봉 뒤의 완료 봉을 오래된 것부터 차례로 판정한다.
 
-        기억이 없거나 기준이 바뀌었으면 가장 최근 완료 봉 하나만 판정한다.
+        기억이 없거나 기준이 바뀌었으면 가장 최근 완료 봉 하나만 본다. 처음 보는 종목의 그 봉은
+        기준점으로만 둔다. 사기 전에 끝났을 수 있어, 하향 돌파여도 발생으로 치지 않는다.
         이번 판정에서 하향 돌파가 일어나 풀리지 않았으면 True다.
         """
         short, long = basis.short_period, basis.long_period
@@ -706,6 +707,15 @@ class _Watch:
             if memory is None:
                 purchase = self._holdings[code].purchase_price
                 memory = self.memory[code] = Memory(basis, bar.start, purchase_price=purchase)
+                log(
+                    logger,
+                    logging.INFO,
+                    "dead_cross_baseline_set",
+                    run=run.number,
+                    code=code,
+                    bar=format_moment(bar.start),
+                )
+                continue
             event = _cross(memory, *values)
             if event == "crossed":
                 memory.crossed_at, memory.crossed_bar = now, bar.start
